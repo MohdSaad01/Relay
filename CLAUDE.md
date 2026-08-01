@@ -18,12 +18,69 @@ This repository contains Version 1 of Relay.
 
 # Current Repository State
 
-This repository is in the initial scaffolding stage: no application source code has been written yet.
+Relay is currently in the **project specification phase**.
 
-* `docs/` exists but is currently empty. Rule 1 requires following the architecture described there — until architecture docs are added, there is no established architecture to follow, so architectural choices for the first milestone should be proposed explicitly (see "If Requirements Are Unclear") rather than assumed.
-* `.gitignore` targets Python, FastAPI, Ruff, and SQLite, plus a `# Node/Electron (later)` section — indicating the Windows side is planned as a Python/FastAPI backend with SQLite for local state, Ruff for linting, and an Electron-based UI to come later. No corresponding dependency manifests (`pyproject.toml`, `requirements.txt`, `package.json`) exist yet.
-* The Android client's technology stack is not yet reflected anywhere in the repo.
-* No build, lint, or test commands exist yet since there is no code to build, lint, or test. Once tooling is introduced, this section should be updated with the actual commands.
+The repository contains the project's architectural documentation but no implementation code yet.
+
+## Documentation
+
+The `docs/` directory contains the official project specification, including:
+
+* Project Charter
+* Project Overview
+* Architecture
+* Technology Stack
+* Project Structure
+* API Design
+* Coding Standards
+* Development Workflow
+* Architecture Decisions
+* 09_Networking.md
+* 10_Security.md
+* 11_File_Transfer.md
+* 12_Packaging_Deployment.md
+
+These documents are the source of truth for Version 1.
+
+Claude Code should read the relevant documentation before implementing any feature.
+
+If documentation conflicts, follow the most specific document and report the inconsistency instead of making assumptions.
+
+---
+
+## Technology Stack
+
+The technology stack for Version 1 has been finalized.
+
+Desktop
+
+* Electron
+* HTML
+* CSS
+* JavaScript
+
+Backend
+
+* Python 3.13+
+* FastAPI
+* SQLAlchemy
+* SQLite
+* Pydantic
+* Uvicorn
+
+Android
+
+* React Native
+
+Development
+
+* Git
+* Ruff
+* Pytest
+* Visual Studio Code
+* Claude Code
+
+Claude Code must not replace major technologies without developer approval.
 
 ---
 
@@ -210,3 +267,18 @@ Every milestone should end with:
 * Testing checklist
 * Suggested Git commit message
 * Next recommended milestone
+
+---
+## Documentation Ownership
+
+The developer owns all documentation.
+
+Claude Code must **never automatically modify**:
+
+* CLAUDE.md
+
+Claude Code may recommend documentation updates when information becomes outdated, but should wait for developer approval before making documentation changes.
+
+Implementation-specific documentation may be updated only when explicitly requested.
+
+---

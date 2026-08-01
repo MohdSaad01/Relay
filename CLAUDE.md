@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # Relay
 
 ## Project Overview
@@ -11,6 +13,17 @@ The goal is to allow users to transfer files directly between their Windows comp
 Relay does **not** use cloud storage or internet servers. All communication happens directly between paired devices.
 
 This repository contains Version 1 of Relay.
+
+---
+
+# Current Repository State
+
+This repository is in the initial scaffolding stage: no application source code has been written yet.
+
+* `docs/` exists but is currently empty. Rule 1 requires following the architecture described there — until architecture docs are added, there is no established architecture to follow, so architectural choices for the first milestone should be proposed explicitly (see "If Requirements Are Unclear") rather than assumed.
+* `.gitignore` targets Python, FastAPI, Ruff, and SQLite, plus a `# Node/Electron (later)` section — indicating the Windows side is planned as a Python/FastAPI backend with SQLite for local state, Ruff for linting, and an Electron-based UI to come later. No corresponding dependency manifests (`pyproject.toml`, `requirements.txt`, `package.json`) exist yet.
+* The Android client's technology stack is not yet reflected anywhere in the repo.
+* No build, lint, or test commands exist yet since there is no code to build, lint, or test. Once tooling is introduced, this section should be updated with the actual commands.
 
 ---
 

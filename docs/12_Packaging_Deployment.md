@@ -156,3 +156,20 @@ Claude Code should:
 * Explain packaging-related dependencies before introducing them.
 * Prefer widely adopted packaging solutions over custom implementations.
 * Design the project so development and production packaging remain clearly separated.
+
+---
+
+## Windows Data Storage
+
+Relay should store user data inside the user's local application data directory.
+
+Examples include:
+
+- SQLite database
+- Application configuration
+- Logs
+- Pairing information
+
+Application binaries should remain separate from user-generated data.
+
+The exact directory structure will be finalized during the Packaging milestone.

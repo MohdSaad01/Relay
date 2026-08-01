@@ -258,6 +258,18 @@ State the ambiguity and recommend the most reasonable approach before implementi
 
 ---
 
+## Engineering Decisions
+
+Claude Code should distinguish between:
+
+- Project Requirements
+- Architectural Decisions
+- Implementation Decisions
+
+If a question concerns implementation rather than architecture, defer the decision until the appropriate milestone instead of expanding the project scope prematurely.
+
+---
+
 # Success Criteria
 
 Every milestone should end with:

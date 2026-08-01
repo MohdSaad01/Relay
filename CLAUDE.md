@@ -103,6 +103,21 @@ Prefer explicit code to clever code.
 
 ---
 
+## Layer Responsibilities
+
+The project follows strict layered architecture.
+
+- API routes may call Services only.
+- Services may call Repositories only.
+- Repositories may access SQLAlchemy only.
+- SQLAlchemy models must never be queried directly from API routes or Services.
+
+Each layer has a single responsibility.
+
+Claude Code should preserve these boundaries unless explicitly instructed otherwise.
+
+---
+
 # Primary Goal
 
 The goal is **not** to finish the project as quickly as possible.

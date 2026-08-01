@@ -17,6 +17,9 @@ htmlcov/
 *.db
 *.sqlite3
 
+# Logs
+logs/
+
 # Node/Electron (later)
 node_modules/
 dist/

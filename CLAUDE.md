@@ -39,6 +39,7 @@ The `docs/` directory contains the official project specification, including:
 * 10_Security.md
 * 11_File_Transfer.md
 * 12_Packaging_Deployment.md
+* 13_Database_Design.md
 
 These documents are the source of truth for Version 1.
 

@@ -1,0 +1,10 @@
+<resources>
+    <!-- Accent color for the foreground-service transfer notification
+         (@supersami/rn-foreground-service's notification_color meta-data in
+         AndroidManifest.xml), matching the blue used for primary actions
+         elsewhere in the app (e.g. FilesScreen's Download button). -->
+    <item name="blue" type="color">#2563eb</item>
+    <integer-array name="androidcolors">
+        <item>@color/blue</item>
+    </integer-array>
+</resources>

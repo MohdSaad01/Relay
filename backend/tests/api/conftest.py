@@ -14,8 +14,7 @@ from app.main import app
 from tests.repositories.conftest import db_session, make_device  # noqa: F401
 
 
-@pytest.fixture
-def client() -> Generator[TestClient, None, None]:
+def _build_test_client(client_address: tuple[str, int]) -> Generator[TestClient, None, None]:
     """A TestClient backed by an isolated in-memory SQLite database.
 
     Uses StaticPool so the single in-memory connection is shared across the
@@ -45,7 +44,7 @@ def client() -> Generator[TestClient, None, None]:
             db.close()
 
     app.dependency_overrides[get_db] = _get_test_db
-    test_client = TestClient(app)
+    test_client = TestClient(app, client=client_address)
     test_client.session_factory = test_session_local  # type: ignore[attr-defined]
 
     try:
@@ -53,3 +52,27 @@ def client() -> Generator[TestClient, None, None]:
     finally:
         app.dependency_overrides.clear()
         engine.dispose()
+
+
+@pytest.fixture
+def client() -> Generator[TestClient, None, None]:
+    """A TestClient simulating a non-loopback (LAN/Android) caller.
+
+    Installs the `get_db` override used by both this fixture and
+    `desktop_client` below.
+    """
+    yield from _build_test_client(("198.51.100.10", 50000))
+
+
+@pytest.fixture
+def desktop_client(client: TestClient) -> TestClient:
+    """A second TestClient simulating the desktop's own loopback caller.
+
+    Depends on `client` so both point at the same FastAPI `app` instance
+    with the same already-installed `get_db` override — i.e. the same
+    in-memory database — rather than each fixture standing up its own
+    isolated database. Tests that need both perspectives (e.g. "share a
+    file as the desktop, then browse it as a paired Android device") need
+    the two callers to see the same data.
+    """
+    return TestClient(app, client=("127.0.0.1", 50000))

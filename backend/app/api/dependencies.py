@@ -15,6 +15,9 @@ from app.services.pairing_manager import PairingManager
 from app.services.pairing_manager import get_pairing_manager as _get_pairing_manager
 from app.services.pairing_service import PairingService
 from app.services.shared_file_service import SharedFileService
+from app.services.transfer_manager import TransferManager
+from app.services.transfer_manager import get_transfer_manager as _get_transfer_manager
+from app.services.transfer_service import TransferService
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -57,6 +60,19 @@ def get_shared_file_service(db: Annotated[Session, Depends(get_db)]) -> SharedFi
     return SharedFileService(db)
 
 
+def get_transfer_manager() -> TransferManager:
+    """Provide the process-wide TransferManager singleton (app/services/transfer_manager.py)."""
+    return _get_transfer_manager()
+
+
+def get_transfer_service(
+    db: Annotated[Session, Depends(get_db)],
+    transfer_manager: Annotated[TransferManager, Depends(get_transfer_manager)],
+) -> TransferService:
+    """Provide a TransferService bound to a request-scoped database session and the shared TransferManager."""
+    return TransferService(db, transfer_manager)
+
+
 def get_current_device(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)],
     auth_service: Annotated[AuthService, Depends(get_auth_service)],
@@ -79,7 +95,8 @@ def get_requesting_device(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)],
     auth_service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> Device | None:
-    """Resolve the caller of a dual-audience endpoint (currently just `GET /files`).
+    """Resolve the caller of a dual-audience endpoint (e.g. `GET /files`, the
+    `/transfers` and `/transfers/requests` routes).
 
     Returns None for the trusted local desktop caller — the desktop can
     never hold a DeviceSession, since `devices.platform` is Android-only
@@ -100,5 +117,6 @@ DeviceServiceDep = Annotated[DeviceService, Depends(get_device_service)]
 PairingServiceDep = Annotated[PairingService, Depends(get_pairing_service)]
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 SharedFileServiceDep = Annotated[SharedFileService, Depends(get_shared_file_service)]
+TransferServiceDep = Annotated[TransferService, Depends(get_transfer_service)]
 CurrentDeviceDep = Annotated[Device, Depends(get_current_device)]
 RequestingDeviceDep = Annotated[Device | None, Depends(get_requesting_device)]

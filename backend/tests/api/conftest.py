@@ -8,9 +8,11 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.api.dependencies import get_transfer_manager
 from app.database.base import Base
 from app.database.session import get_db
 from app.main import app
+from app.services.transfer_manager import TransferManager
 from tests.repositories.conftest import db_session, make_device  # noqa: F401
 
 
@@ -44,6 +46,15 @@ def _build_test_client(client_address: tuple[str, int]) -> Generator[TestClient,
             db.close()
 
     app.dependency_overrides[get_db] = _get_test_db
+    # TransferManager is a process-wide singleton in production (transfer
+    # requests are runtime-only state, like PairingManager -- see
+    # app/services/transfer_manager.py), so without this override it would
+    # otherwise leak pending requests across tests within the same pytest
+    # session. A fresh instance per test client keeps tests isolated while
+    # still letting the client/desktop_client pair share one instance, since
+    # both point at the same overridden `app`.
+    test_transfer_manager = TransferManager()
+    app.dependency_overrides[get_transfer_manager] = lambda: test_transfer_manager
     test_client = TestClient(app, client=client_address)
     test_client.session_factory = test_session_local  # type: ignore[attr-defined]
 

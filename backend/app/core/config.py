@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     PAIRING_TOKEN_TTL_SECONDS: int = 300
     PAIRING_PROTOCOL_VERSION: int = 1
 
+    # Transfer requests (11_File_Transfer.md §7, 13_Database_Design.md §7): how
+    # long a proposed transfer may wait for the desktop user's decision before
+    # it is treated as expired. A security/UX parameter, not a user-editable
+    # preference, so it lives here rather than in the app_settings table —
+    # mirrors PAIRING_TOKEN_TTL_SECONDS above.
+    TRANSFER_REQUEST_TTL_SECONDS: int = 120
+
 
 @lru_cache
 def get_settings() -> Settings:

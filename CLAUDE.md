@@ -30,7 +30,10 @@ Relay has completed its specification phase and is in active backend implementat
 * **M6: API layer** — `app/api/`, REST endpoints for `Settings` (`GET`/`PATCH /settings`) and `Devices` (`GET /devices`, `GET`/`PATCH`/`DELETE /devices/{id}`), centralized exception-to-HTTP mapping, and the shared `ApiResponse` envelope. See `backend/README.md` for full API layer details.
 * **M7: Pairing infrastructure** — `PairingManager` (`app/services/pairing_manager.py`), a lock-guarded, in-memory singleton holding the single active pairing attempt (tokens are never persisted, per `docs/13_Database_Design.md` §9); `PairingService` (`app/services/pairing_service.py`), orchestrating start/submit/approve/reject/collect and delegating persistence to `DeviceService`/`DeviceSessionRepository`/`AppSettingsService`; `app/core/security.py` for token generation and hashing; `DeviceService.register_device`/`is_device_registered`. See `backend/README.md` for full details.
 * **M8: Pairing API** — `app/api/v1/pairing.py` exposes `PairingService` (M7) as REST endpoints: `POST /pairing/start`, `GET /pairing/pending/{token}`, `POST /pairing/request`, `POST /pairing/approve`, `POST /pairing/reject`, `GET /pairing/result/{token}`. Desktop-only: start/pending/approve/reject. Android-only: request/result. Request/response schemas added to `app/schemas/pairing.py`; DI wiring (`PairingServiceDep`) added to `app/api/dependencies.py`. Reuses the centralized exception handlers from M6 — no route-level try/except. Still fully unauthenticated. See `backend/README.md` for full details.
-* **M9: Authentication infrastructure** — `AuthService` (`app/services/auth_service.py`) validates the bearer `DeviceSession` token (`Authorization: Bearer <token>`) issued by `PairingService.approve_pairing` (M7/M8), per `docs/10_Security.md` §7-9: hashes the presented token, looks it up, rejects a missing/unknown/expired token with a new `AuthenticationError` (mapped to `401` via the M6 exception-handler pattern, generic message in every failure case), and on success updates `last_used_at`/`last_seen_at` without committing — that bookkeeping rides along inside whatever transaction the request's own service commits, so authentication itself never owns a transaction boundary. Exposed as the `get_current_device`/`CurrentDeviceDep` FastAPI dependency (`app/api/dependencies.py`). **Not yet attached to any router** — every endpoint remains unauthenticated until a future milestone wires it in. See `backend/README.md` for full details.
+* **M9: Authentication infrastructure** — `AuthService` (`app/services/auth_service.py`) validates the bearer `DeviceSession` token (`Authorization: Bearer <token>`) issued by `PairingService.approve_pairing` (M7/M8), per `docs/10_Security.md` §7-9: hashes the presented token, looks it up, rejects a missing/unknown/expired token with a new `AuthenticationError` (mapped to `401` via the M6 exception-handler pattern, generic message in every failure case), and on success updates `last_used_at`/`last_seen_at` without committing — that bookkeeping rides along inside whatever transaction the request's own service commits, so authentication itself never owns a transaction boundary. Exposed as the `get_current_device`/`CurrentDeviceDep` FastAPI dependency (`app/api/dependencies.py`). At the time of M9 it was not yet attached to any router; M10 attached it. See `backend/README.md` for full details.
+* **M10: Shared file management** — `SharedFileService` (`app/services/shared_file_service.py`) implements the desktop's shared-file list (`docs/13_Database_Design.md` §6): share/list/refresh/unshare, backed by pure filesystem helpers (`app/utils/filesystem.py`) that validate a path (absolute, exists, regular file, not a symlink) and stat its metadata — content is never opened or read at this stage. Exposed via `app/api/v1/shared_files.py` (`POST/GET /files`, `GET/POST(refresh)/DELETE /files/{id}`). `GET /files` is the first — and at the time, only — dual-audience route: it introduced `get_requesting_device`/`RequestingDeviceDep` (`app/api/dependencies.py`), which returns `None` for the trusted loopback desktop caller and otherwise requires the M9 `get_current_device` session check, giving Android a sanitized view (`AvailableFileResponse`, no `file_path`) while the desktop gets the full one. Every other route in this router is desktop-only and unauthenticated, matching `/devices`/`/settings`. See `backend/README.md` for full details.
+* **M11: Transfer API & orchestration** — `TransferService` (`app/services/transfer_service.py`) implements the two-phase transfer lifecycle from `docs/11_File_Transfer.md` §7: a paired Android device proposes a transfer (download of a shared file, or a proposed upload), the desktop accepts or rejects it, and only an accepted proposal becomes a persisted `Transfer` row. Pending proposals are runtime-only state — mirroring the M7 pairing-token pattern — held by `TransferManager` (`app/services/transfer_manager.py`), a lock-guarded in-memory store keyed by request id (unlike pairing's single active attempt, this supports many concurrent pending requests). Exposed via `app/api/v1/transfers.py` under `/transfers/requests` (propose/list/withdraw/accept/reject) and `/transfers` (list/get/cancel). This milestone does not move bytes: the only DB-level status transition it performs is `in_progress -> cancelled`. See `backend/README.md` for full details.
+* **M12: Streaming Engine** — `TransferStreamService` (`app/services/transfer_stream_service.py`) moves the actual bytes of an already-`in_progress` transfer (`docs/11_File_Transfer.md` §8), deliberately kept separate from M11's `TransferService`, which owns the lifecycle and is unchanged by this milestone. Downloads (`GET /transfers/{id}/download`, SEND) stream a shared file from disk via `StreamingResponse` with an explicit `Content-Length`, in chunks sized by the new `Settings.STREAM_CHUNK_SIZE_BYTES` (default 1 MiB). Uploads (`POST /transfers/{id}/upload`, RECEIVE) are the codebase's one `async def` route, since consuming the raw ASGI request body requires `await`; bytes are written to a temp file in `app_settings.download_directory` and atomically renamed into place only once the declared `file_size` is fully received. A filename conflict on upload is resolved automatically (`name (1).ext`, `name (2).ext`, ... — `app/utils/filesystem.resolve_available_path`), and the resulting saved name is written back onto `Transfer.file_name`, a deliberate, narrow exception to that column's immutability documented in `docs/13_Database_Design.md` §7. Cancellation of an active stream is cooperative (periodic status re-check, not preemptive), and a new `ActiveStreamRegistry` (`app/services/active_stream_registry.py`, same in-memory singleton pattern as `PairingManager`/`TransferManager`) rejects a second concurrent stream on the same transfer. Both streaming routes require `CurrentDeviceDep` outright (Android-only, no desktop/loopback exemption). Out of scope, per this milestone's explicit boundaries: resume/`Range` support, checksums, compression, encryption, WebSockets. See `backend/README.md` for full details.
 
 ## Current Architecture
 
@@ -40,33 +43,34 @@ The backend follows the layered design in `docs/02_Architecture.md`:
 API Layer → Service Layer → Repository Layer → SQLAlchemy Models
 ```
 
-Implemented resources: `Devices`, `AppSettings`, `Pairing`. All endpoints are
-currently unauthenticated. The pairing handshake (`PairingManager`/`PairingService`)
-is exposed over HTTP via `app/api/v1/pairing.py` (M8), so a client can drive
-the full start → submit → approve/reject → collect flow. M9 added the
-session-token validation infrastructure (`AuthService`, `get_current_device`/
-`CurrentDeviceDep` in `app/api/dependencies.py`) that will enforce the
-resulting `DeviceSession` token on protected requests, but it is not yet
-attached to any router — every endpoint remains open until a future
-milestone wires it in.
+Implemented resources: `Devices`, `AppSettings`, `Pairing`, `Shared Files`,
+`Transfers` (including byte streaming). `Devices`, `Settings`, and `Pairing`
+remain fully unauthenticated — the desktop's own Electron UI always calls
+them over loopback. `Shared Files` and `Transfers` enforce the M9
+`DeviceSession` bearer-token check (`AuthService`, `get_current_device`/
+`CurrentDeviceDep`, `get_requesting_device`/`RequestingDeviceDep` in
+`app/api/dependencies.py`) for any non-loopback caller — `GET /files` and
+the dual-audience `/transfers` routes accept the trusted desktop caller or
+a session token; the Android-only proposal and byte-streaming routes
+(`POST /transfers/requests`, `DELETE /transfers/requests/{id}`,
+`GET /transfers/{id}/download`, `POST /transfers/{id}/upload`) require a
+session token outright.
 
 ## Not Yet Implemented
 
-* Authentication enforcement on routes (`AuthService`/`get_current_device` from M9 validate a `DeviceSession` bearer token, but no router requires one yet — every endpoint is still reachable without one)
-* Shared files
-* Transfers
 * Device discovery
+* Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)
+* WebSockets / real-time push (transfer progress is currently polled via `GET /transfers/{id}`)
 * Desktop (Electron) and Android clients
+* Whether `Devices`/`Settings`/`Pairing` should also require a paired-device session was raised during M9 and left open — revisit if Android is ever expected to call those routes directly
 
 ## Next Planned Milestone
 
-**Shared Files** — the first Android-facing resource endpoints
-(`docs/13_Database_Design.md` `shared_files` table), and the first router
-expected to actually attach the M9 `get_current_device`/`CurrentDeviceDep`
-dependency so requests require a valid paired-device session. Whether
-`Devices`/`Settings` should also become protected was raised during M9 and
-left open — revisit if Android is ever expected to call those routes
-directly.
+**Device Discovery** (`docs/09_Networking.md` §4) — automatic desktop/Android
+discovery over the local network (mDNS/Zeroconf vs. UDP broadcast to be
+evaluated during that milestone), the last major backend piece before the
+Electron and React Native clients have something to connect to
+automatically without manual configuration.
 
 ## Documentation
 

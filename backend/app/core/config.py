@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     # mirrors PAIRING_TOKEN_TTL_SECONDS above.
     TRANSFER_REQUEST_TTL_SECONDS: int = 120
 
+    # Streaming Engine (11_File_Transfer.md §8, Milestone 12): chunk size used
+    # for both reading a file to stream (download) and writing an incoming
+    # stream to disk (upload). A performance/technical parameter, not a
+    # user-editable preference, so it lives here rather than in app_settings.
+    STREAM_CHUNK_SIZE_BYTES: int = 1_048_576  # 1 MiB
+
 
 @lru_cache
 def get_settings() -> Settings:

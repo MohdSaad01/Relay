@@ -8,6 +8,10 @@ from sqlalchemy.orm import Session
 
 from app.database.session import get_db
 from app.models.device import Device
+from app.services.active_stream_registry import ActiveStreamRegistry
+from app.services.active_stream_registry import (
+    get_active_stream_registry as _get_active_stream_registry,
+)
 from app.services.app_settings_service import AppSettingsService
 from app.services.auth_service import AuthService
 from app.services.device_service import DeviceService
@@ -18,6 +22,7 @@ from app.services.shared_file_service import SharedFileService
 from app.services.transfer_manager import TransferManager
 from app.services.transfer_manager import get_transfer_manager as _get_transfer_manager
 from app.services.transfer_service import TransferService
+from app.services.transfer_stream_service import TransferStreamService
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -73,6 +78,19 @@ def get_transfer_service(
     return TransferService(db, transfer_manager)
 
 
+def get_active_stream_registry() -> ActiveStreamRegistry:
+    """Provide the process-wide ActiveStreamRegistry singleton (app/services/active_stream_registry.py)."""
+    return _get_active_stream_registry()
+
+
+def get_transfer_stream_service(
+    db: Annotated[Session, Depends(get_db)],
+    active_stream_registry: Annotated[ActiveStreamRegistry, Depends(get_active_stream_registry)],
+) -> TransferStreamService:
+    """Provide a TransferStreamService bound to a request-scoped database session and the shared ActiveStreamRegistry."""
+    return TransferStreamService(db, active_stream_registry)
+
+
 def get_current_device(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)],
     auth_service: Annotated[AuthService, Depends(get_auth_service)],
@@ -118,5 +136,6 @@ PairingServiceDep = Annotated[PairingService, Depends(get_pairing_service)]
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 SharedFileServiceDep = Annotated[SharedFileService, Depends(get_shared_file_service)]
 TransferServiceDep = Annotated[TransferService, Depends(get_transfer_service)]
+TransferStreamServiceDep = Annotated[TransferStreamService, Depends(get_transfer_stream_service)]
 CurrentDeviceDep = Annotated[Device, Depends(get_current_device)]
 RequestingDeviceDep = Annotated[Device | None, Depends(get_requesting_device)]

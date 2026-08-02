@@ -51,3 +51,26 @@ def read_file_metadata(file_path: str) -> FileMetadata:
     file_name = os.path.basename(file_path)
     mime_type, _ = mimetypes.guess_type(file_path)
     return FileMetadata(file_name=file_name, file_size=stat_result.st_size, mime_type=mime_type)
+
+
+def resolve_available_path(directory: str, file_name: str) -> str:
+    """Return an absolute path for `file_name` inside `directory` that does not
+    currently exist, resolving a conflict (if any) with the conventional
+    "name (1).ext", "name (2).ext", ... pattern.
+
+    Pure filesystem check: the caller is responsible for creating the file
+    promptly afterward, since a file could in principle appear at the
+    returned path between this check and that write (an accepted, narrow
+    race for a local single-user application -- see TransferStreamService).
+    """
+    candidate = os.path.join(directory, file_name)
+    if not os.path.exists(candidate):
+        return candidate
+
+    base, ext = os.path.splitext(file_name)
+    counter = 1
+    while True:
+        candidate = os.path.join(directory, f"{base} ({counter}){ext}")
+        if not os.path.exists(candidate):
+            return candidate
+        counter += 1

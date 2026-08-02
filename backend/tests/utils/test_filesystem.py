@@ -10,6 +10,7 @@ from app.utils.filesystem import (
     is_symlink,
     path_exists,
     read_file_metadata,
+    resolve_available_path,
 )
 
 
@@ -80,3 +81,35 @@ def test_read_file_metadata_mime_type_none_for_unknown_extension(tmp_path: Path)
     metadata = read_file_metadata(str(file_path))
 
     assert metadata.mime_type is None
+
+
+def test_resolve_available_path_returns_requested_name_when_free(tmp_path: Path) -> None:
+    resolved = resolve_available_path(str(tmp_path), "photo.jpg")
+
+    assert resolved == str(tmp_path / "photo.jpg")
+
+
+def test_resolve_available_path_appends_counter_on_conflict(tmp_path: Path) -> None:
+    (tmp_path / "photo.jpg").write_bytes(b"existing")
+
+    resolved = resolve_available_path(str(tmp_path), "photo.jpg")
+
+    assert resolved == str(tmp_path / "photo (1).jpg")
+
+
+def test_resolve_available_path_increments_past_multiple_conflicts(tmp_path: Path) -> None:
+    (tmp_path / "photo.jpg").write_bytes(b"existing")
+    (tmp_path / "photo (1).jpg").write_bytes(b"existing")
+    (tmp_path / "photo (2).jpg").write_bytes(b"existing")
+
+    resolved = resolve_available_path(str(tmp_path), "photo.jpg")
+
+    assert resolved == str(tmp_path / "photo (3).jpg")
+
+
+def test_resolve_available_path_preserves_extension_with_no_dot_in_name(tmp_path: Path) -> None:
+    (tmp_path / "README").write_bytes(b"existing")
+
+    resolved = resolve_available_path(str(tmp_path), "README")
+
+    assert resolved == str(tmp_path / "README (1)")

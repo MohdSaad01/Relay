@@ -128,7 +128,7 @@ This table only represents files shared **from the desktop**. Android-initiated 
 | `device_id` | Integer (FK → `devices.id`, `ON DELETE SET NULL`) | Yes | — | Yes |
 | `shared_file_id` | Integer (FK → `shared_files.id`, `ON DELETE SET NULL`) | Yes | — | Yes |
 | `direction` | Enum(`send`, `receive`) | No | — | Yes |
-| `file_name` | String | No | — | Yes |
+| `file_name` | String | No | — | Yes, with one exception (see Reasoning) |
 | `file_size` | Integer (bytes) | No | — | Yes |
 | `device_name` | String | No | — | Yes |
 | `status` | Enum(`in_progress`, `completed`, `failed`, `cancelled`) | No | `in_progress` | No |
@@ -147,6 +147,7 @@ This table only represents files shared **from the desktop**. Android-initiated 
 - `completed_at` is a dedicated nullable timestamp, set once the transfer leaves `in_progress` (success, failure, or cancellation). It is intentionally separate from any generic "last updated" timestamp so that "when did this transfer finish" is always an explicit, unambiguous field rather than inferred from a mutation-tracking column.
 - `failure_reason` (renamed from an earlier `error_message` working name) better reflects its purpose: it explains *why* a transfer did not complete, not a generic error log line.
 - **`batch_id` has been removed for Version 1.** Sequential, one-file-at-a-time transfer processing (`11_File_Transfer.md` §10) does not require correlating multiple rows into a batch. If grouped/batch transfer semantics are introduced in a future version, a proper batch entity (e.g. a `transfer_batches` table with its own lifecycle) should be introduced at that time rather than reviving a loose correlation column.
+- **`file_name` is updated post-creation in exactly one case, decided during the Streaming Engine milestone (implementation, not this document, at the time this schema was designed).** An upload (`direction = receive`) whose declared name collides with an existing file on disk is saved under an automatically renamed path (`name (1).ext`, `name (2).ext`, ...). Once the rename is known — at successful completion, not at transfer creation — `file_name` is overwritten with the actual saved name, so `GET /transfers/{id}` always reflects what is really on disk instead of a name that was never used. This is a narrow, deliberate exception to the immutability above, not a general license to mutate this column: it only ever happens once, only for a completed `receive` transfer, and only when a rename actually occurred. No schema change was involved — it is a plain update to an existing column, performed by `TransferStreamService._finalize` (`backend/app/services/transfer_stream_service.py`).
 
 ---
 
@@ -183,6 +184,8 @@ Temporary QR-pairing tokens (`10_Security.md` §6) are **not persisted to the da
 - Avoids an extra table plus expiry-sweep logic for something that provides no durability benefit.
 
 This will be implemented as an in-memory structure (e.g. a dictionary keyed by token, with TTL) inside the pairing service during the Pairing milestone.
+
+**Addendum, decided during the Transfers milestone (implementation, after this document was finalized):** the same reasoning was extended to *pending transfer requests*. A proposed transfer (Android asking to download or upload a file) that the desktop user has not yet accepted or rejected is held only in memory (`TransferManager`, keyed by an opaque request id, the same lock-guarded singleton pattern as the pairing manager above) — never written to the `transfers` table. This is why the `transfers.status` enum in §7 has no `pending` or `rejected` value: only an *accepted* request ever becomes a row. A request that is still pending, or was rejected, when the backend restarts is simply gone, matching a pairing attempt under the same circumstances.
 
 ---
 

@@ -8,10 +8,11 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.api.dependencies import get_transfer_manager
+from app.api.dependencies import get_active_stream_registry, get_transfer_manager
 from app.database.base import Base
 from app.database.session import get_db
 from app.main import app
+from app.services.active_stream_registry import ActiveStreamRegistry
 from app.services.transfer_manager import TransferManager
 from tests.repositories.conftest import db_session, make_device  # noqa: F401
 
@@ -55,6 +56,12 @@ def _build_test_client(client_address: tuple[str, int]) -> Generator[TestClient,
     # both point at the same overridden `app`.
     test_transfer_manager = TransferManager()
     app.dependency_overrides[get_transfer_manager] = lambda: test_transfer_manager
+    # Same reasoning as TransferManager above: ActiveStreamRegistry is a
+    # process-wide singleton in production, so it needs a fresh instance per
+    # test client to avoid an "already streaming" false positive leaking in
+    # from a previous test.
+    test_active_stream_registry = ActiveStreamRegistry()
+    app.dependency_overrides[get_active_stream_registry] = lambda: test_active_stream_registry
     test_client = TestClient(app, client=client_address)
     test_client.session_factory = test_session_local  # type: ignore[attr-defined]
 

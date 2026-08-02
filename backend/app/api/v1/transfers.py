@@ -1,7 +1,7 @@
-"""Transfer endpoints: propose, decide on, list, and cancel file transfers
-(docs/11_File_Transfer.md §7, docs/13_Database_Design.md §7).
+"""Transfer endpoints: propose, decide on, list, cancel, and stream the bytes
+of file transfers (docs/11_File_Transfer.md §7-8, docs/13_Database_Design.md §7).
 
-Two sub-resources:
+Three sub-resources:
 
 * `/transfers/requests` — the pending, in-memory phase (TransferManager).
   Android-only (`CurrentDeviceDep`) for proposing (POST) and withdrawing
@@ -13,26 +13,35 @@ Two sub-resources:
   loopback).
 * `/transfers` — the persisted phase (TransferRepository), created only once
   a request is accepted. Dual-audience throughout, same split as above.
+* `/transfers/{id}/download` and `/transfers/{id}/upload` — the Streaming
+  Engine (Milestone 12, TransferStreamService). Android-only, like the
+  request sub-resource: the desktop never calls these itself, it just reads
+  or writes local disk, since the backend is embedded in the desktop app.
 
 Routes stay thin — no business logic and no route-level try/except. Every
-TransferService exception is translated to an HTTP response by the
-centralized handlers in app/api/exception_handlers.py (Milestone 6).
+TransferService/TransferStreamService exception is translated to an HTTP
+response by the centralized handlers in app/api/exception_handlers.py
+(Milestone 6).
 """
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Request, Response, status
+from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import (
     CurrentDeviceDep,
     RequestingDeviceDep,
     TransferServiceDep,
+    TransferStreamServiceDep,
 )
 from app.api.responses import success
+from app.models.enums import TransferDirection, TransferStatus
 from app.schemas.common import ApiResponse
 from app.schemas.transfer import (
     TransferRequestCreate,
     TransferRequestResponse,
     TransferResponse,
 )
+from app.services.exceptions import ConflictError
 
 router = APIRouter()
 
@@ -123,3 +132,57 @@ def cancel_transfer(
     transfer = service.cancel_transfer(transfer_id, device)
     response = TransferResponse.model_validate(transfer)
     return success(response.model_dump(mode="json"), message="Transfer cancelled.")
+
+
+# --- /transfers/{id}/download, /transfers/{id}/upload (Streaming Engine) -------
+
+
+@router.get("/{transfer_id}/download")
+def download_transfer(
+    transfer_id: int,
+    device: CurrentDeviceDep,
+    service: TransferServiceDep,
+    stream_service: TransferStreamServiceDep,
+) -> StreamingResponse:
+    """Stream an in-progress SEND transfer's bytes to the paired Android device
+    that requested it. Not wrapped in the standard ApiResponse envelope — the
+    body is the raw file (05_API_Design.md §5)."""
+    transfer = service.get_transfer_or_raise(transfer_id, device)
+    if transfer.direction is not TransferDirection.SEND:
+        raise ConflictError(f"Transfer {transfer_id} is not a download.")
+    if transfer.status is not TransferStatus.IN_PROGRESS:
+        raise ConflictError(f"Transfer {transfer_id} is not in progress.")
+
+    file_path = stream_service.resolve_download_source(transfer)
+    quoted_file_name = transfer.file_name.replace('"', "'")
+    headers = {
+        "Content-Length": str(transfer.file_size),
+        "Content-Disposition": f'attachment; filename="{quoted_file_name}"',
+    }
+    return StreamingResponse(
+        stream_service.stream_download(transfer, file_path),
+        media_type=stream_service.guess_media_type(transfer.file_name),
+        headers=headers,
+    )
+
+
+@router.post("/{transfer_id}/upload", response_model=ApiResponse)
+async def upload_transfer(
+    transfer_id: int,
+    request: Request,
+    device: CurrentDeviceDep,
+    service: TransferServiceDep,
+    stream_service: TransferStreamServiceDep,
+) -> ApiResponse:
+    """Receive an in-progress RECEIVE transfer's bytes from the paired Android
+    device that owns it. The request body is the raw file, not JSON
+    (05_API_Design.md §5) — only the response uses the standard envelope."""
+    transfer = service.get_transfer_or_raise(transfer_id, device)
+    if transfer.direction is not TransferDirection.RECEIVE:
+        raise ConflictError(f"Transfer {transfer_id} is not an upload.")
+    if transfer.status is not TransferStatus.IN_PROGRESS:
+        raise ConflictError(f"Transfer {transfer_id} is not in progress.")
+
+    updated = await stream_service.receive_upload(transfer, request.stream())
+    response = TransferResponse.model_validate(updated)
+    return success(response.model_dump(mode="json"), message="Transfer completed.")

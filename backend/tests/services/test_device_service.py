@@ -3,8 +3,9 @@
 import pytest
 from sqlalchemy.orm import Session
 
+from app.models.enums import Platform
 from app.services.device_service import DeviceService
-from app.services.exceptions import NotFoundError, ValidationError
+from app.services.exceptions import ConflictError, NotFoundError, ValidationError
 from tests.services.conftest import make_device
 
 
@@ -93,3 +94,44 @@ def test_remove_device_raises_when_missing(db_session: Session) -> None:
 
     with pytest.raises(NotFoundError):
         service.remove_device(999)
+
+
+def test_is_device_registered_returns_false_when_absent(db_session: Session) -> None:
+    service = DeviceService(db_session)
+
+    assert service.is_device_registered("unknown-device") is False
+
+
+def test_is_device_registered_returns_true_once_paired(db_session: Session) -> None:
+    service = DeviceService(db_session)
+    service.device_repository.create(make_device(identifier="device-1"))
+
+    assert service.is_device_registered("device-1") is True
+
+
+def test_register_device_creates_device(db_session: Session) -> None:
+    service = DeviceService(db_session)
+
+    device = service.register_device(
+        device_identifier="device-1",
+        device_name="Test Phone",
+        platform=Platform.ANDROID,
+        device_secret_hash="hashed-secret",
+    )
+    db_session.commit()
+
+    assert device.id is not None
+    assert service.get_device_or_raise(device.id).device_identifier == "device-1"
+
+
+def test_register_device_raises_conflict_when_already_paired(db_session: Session) -> None:
+    service = DeviceService(db_session)
+    service.device_repository.create(make_device(identifier="device-1"))
+
+    with pytest.raises(ConflictError):
+        service.register_device(
+            device_identifier="device-1",
+            device_name="Test Phone",
+            platform=Platform.ANDROID,
+            device_secret_hash="hashed-secret",
+        )

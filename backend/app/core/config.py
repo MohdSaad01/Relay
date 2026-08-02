@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_DIR: str = "logs"
 
+    # Pairing (10_Security.md §6): short-lived, single-use handshake tokens.
+    # A security parameter, not a user-editable preference, so it lives here
+    # rather than in the app_settings table.
+    PAIRING_TOKEN_TTL_SECONDS: int = 300
+    PAIRING_PROTOCOL_VERSION: int = 1
+
 
 @lru_cache
 def get_settings() -> Settings:

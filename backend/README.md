@@ -28,6 +28,24 @@ Service Layer exceptions (`app/services/exceptions.py`: `NotFoundError`,
 with no FastAPI dependency — the API Layer is what translates them into HTTP
 responses (see [Exception Handling](#exception-handling) below).
 
+## Pairing Infrastructure
+
+`PairingService` (`app/services/pairing_service.py`) orchestrates the
+pairing handshake described in `docs/10_Security.md` §4-6 — start, submit,
+approve/reject, collect — but it is not yet wired to any API route; that is
+the next milestone. It delegates persistence to the existing
+`DeviceService`/`DeviceSessionRepository`/`AppSettingsService` rather than
+duplicating logic.
+
+Its runtime state does not go through the layers above: pairing tokens are
+single-use and expire within minutes, so per `docs/13_Database_Design.md` §9
+they are never written to the database. `PairingManager`
+(`app/services/pairing_manager.py`) holds them in a lock-guarded, in-memory
+dict instead — a process-lifetime singleton (`get_pairing_manager()`)
+alongside, not inside, the layered request/DB flow described above. Token
+generation and hashing (`generate_token`, `hash_token`) live in
+`app/core/security.py`, reused for both pairing tokens and device secrets.
+
 ## API Layer
 
 ### Routing structure
@@ -113,7 +131,8 @@ backend/
 │   ├── main.py                 # FastAPI app instance, startup/shutdown, router + exception handler registration
 │   ├── core/
 │   │   ├── config.py            # Environment-driven settings (pydantic-settings)
-│   │   └── logging_config.py    # Logging setup (console + file handlers)
+│   │   ├── logging_config.py    # Logging setup (console + file handlers)
+│   │   └── security.py          # generate_token()/hash_token() — shared by pairing + device secrets
 │   ├── database/
 │   │   ├── base.py              # Declarative Base and TimestampMixin
 │   │   ├── session.py           # SQLAlchemy engine, session factory, get_db dependency, FK pragma
@@ -134,12 +153,15 @@ backend/
 │   │   └── app_settings_repository.py
 │   ├── services/
 │   │   ├── exceptions.py           # NotFoundError, ValidationError, ConflictError (FastAPI-agnostic)
-│   │   ├── device_service.py       # List/inspect/rename/remove paired devices
-│   │   └── app_settings_service.py # Get/update the singleton settings row
+│   │   ├── device_service.py       # List/inspect/rename/remove/register paired devices
+│   │   ├── app_settings_service.py # Get/update the singleton settings row
+│   │   ├── pairing_manager.py      # In-memory, lock-guarded pairing attempt store (singleton)
+│   │   └── pairing_service.py      # Pairing handshake workflow; not yet wired to a route
 │   ├── schemas/
 │   │   ├── common.py            # ApiResponse — the shared response envelope
 │   │   ├── device.py            # DeviceResponse, DeviceUpdateRequest
-│   │   └── settings.py          # SettingsResponse, SettingsUpdateRequest
+│   │   ├── settings.py          # SettingsResponse, SettingsUpdateRequest
+│   │   └── pairing.py           # PairingQrPayload
 │   ├── api/
 │   │   ├── dependencies.py      # Service provider functions + Annotated Dep aliases
 │   │   ├── responses.py         # success() helper for building ApiResponse envelopes
@@ -150,12 +172,14 @@ backend/
 │   │       ├── settings.py       # GET/PATCH /settings
 │   │       └── devices.py        # GET /devices, GET/PATCH/DELETE /devices/{id}
 │   └── utils/
-│       └── time.py              # utc_now() helper shared by models
+│       ├── time.py              # utc_now() helper shared by models
+│       └── network.py           # get_local_ip_address() — for the pairing QR's desktop_ip
 └── tests/
     ├── api/                     # Route-level tests via FastAPI TestClient (in-memory SQLite)
     ├── services/                # Service-layer unit tests
     ├── repositories/            # Repository-layer unit tests
-    └── database/                # Constraint and cascade/set-null delete behavior
+    ├── database/                # Constraint and cascade/set-null delete behavior
+    └── core/                    # Tests for app/core (security token generation/hashing)
 ```
 
 `app/websocket/` (described in `docs/04_Project_Structure.md`) will be added
@@ -209,8 +233,14 @@ All commands below are run from the `backend/` directory.
 ## Running tests
 
 ```bash
-pytest
+python -m pytest
 ```
+
+Use `python -m pytest`, not a bare `pytest` invocation — there is no
+`pyproject.toml`/`pytest.ini` declaring `backend/` as the import root, and
+`tests/` has no `__init__.py` files, so a bare `pytest` cannot resolve the
+`app` and `tests` packages (`ModuleNotFoundError`). `python -m pytest` adds
+the current directory to `sys.path` and works correctly.
 
 API-layer tests (`tests/api/`) run against an isolated in-memory SQLite
 database per test (via a `client` fixture in `tests/api/conftest.py`), so

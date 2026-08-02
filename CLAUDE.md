@@ -28,6 +28,7 @@ Relay has completed its specification phase and is in active backend implementat
 * **M4: Repository layer** — `app/repositories/`, one repository per model, the only code that queries SQLAlchemy directly.
 * **M5: Service layer** — `app/services/`, business logic for devices and app settings, raising FastAPI-agnostic exceptions (`NotFoundError`, `ValidationError`, `ConflictError`).
 * **M6: API layer** — `app/api/`, REST endpoints for `Settings` (`GET`/`PATCH /settings`) and `Devices` (`GET /devices`, `GET`/`PATCH`/`DELETE /devices/{id}`), centralized exception-to-HTTP mapping, and the shared `ApiResponse` envelope. See `backend/README.md` for full API layer details.
+* **M7: Pairing infrastructure** — `PairingManager` (`app/services/pairing_manager.py`), a lock-guarded, in-memory singleton holding the single active pairing attempt (tokens are never persisted, per `docs/13_Database_Design.md` §9); `PairingService` (`app/services/pairing_service.py`), orchestrating start/submit/approve/reject/collect and delegating persistence to `DeviceService`/`DeviceSessionRepository`/`AppSettingsService`; `app/core/security.py` for token generation and hashing; `DeviceService.register_device`/`is_device_registered`. **Not yet wired to any API route** — see Next Planned Milestone. See `backend/README.md` for full details.
 
 ## Current Architecture
 
@@ -38,12 +39,15 @@ API Layer → Service Layer → Repository Layer → SQLAlchemy Models
 ```
 
 Implemented resources: `Devices`, `AppSettings`. All endpoints are currently
-unauthenticated — the Authentication milestone has not started.
+unauthenticated — the Authentication milestone has not started. The pairing
+handshake (`PairingManager`/`PairingService`) is implemented at the service
+layer but has no API routes yet, so it cannot currently be driven by a
+client.
 
 ## Not Yet Implemented
 
-* Pairing (device registration)
-* Authentication / sessions
+* Pairing API routes (the handshake logic itself is implemented — see M7 — but not exposed over HTTP)
+* Authentication / sessions (session-validating middleware; `DeviceSession` rows can already be created by `PairingService`, but nothing yet enforces them on a request)
 * Shared files
 * Transfers
 * Device discovery
@@ -51,10 +55,12 @@ unauthenticated — the Authentication milestone has not started.
 
 ## Next Planned Milestone
 
-**Pairing** — device registration and the QR-based pairing flow described in
-`docs/13_Database_Design.md` §4 and `docs/10_Security.md`, including issuing
-each device's long-lived secret. Authentication (session tokens) is expected
-to follow, since it depends on paired devices existing.
+**Pairing API Layer** — expose `PairingService` (M7) as REST endpoints
+following the `app/api/` conventions established in M6 (start pairing, submit
+a request, view/approve/reject a pending request, collect the result),
+including the request/response schemas for each step. Authentication
+(session-validating middleware) is expected to follow, since it depends on
+devices being able to actually pair through the API.
 
 ## Documentation
 

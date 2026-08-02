@@ -16,13 +16,18 @@ htmlcov/
 # SQLite
 *.db
 *.sqlite3
+*.db-journal
+*.db-shm
+*.db-wal
 
 # Logs
 logs/
+*.log
 
 # Node/Electron (later)
 node_modules/
 dist/
+build/
 out/
 
 # IDE
@@ -32,6 +37,7 @@ out/
 # OS
 .DS_Store
 Thumbs.db
+Desktop.ini
 
 # Claude local data
 .claude/

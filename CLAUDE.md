@@ -18,9 +18,43 @@ This repository contains Version 1 of Relay.
 
 # Current Repository State
 
-Relay is currently in the **project specification phase**.
+Relay has completed its specification phase and is in active backend implementation.
 
-The repository contains the project's architectural documentation but no implementation code yet.
+## Completed Milestones
+
+* **Project specification** — architecture, tech stack, and API/database design finalized in `docs/`.
+* **Backend project structure** — FastAPI app scaffold, configuration, logging, and database session setup.
+* **M3: Database models** — SQLAlchemy models for `devices`, `sessions` (`DeviceSession`), `shared_files`, `transfers`, and `app_settings`, matching `docs/13_Database_Design.md`.
+* **M4: Repository layer** — `app/repositories/`, one repository per model, the only code that queries SQLAlchemy directly.
+* **M5: Service layer** — `app/services/`, business logic for devices and app settings, raising FastAPI-agnostic exceptions (`NotFoundError`, `ValidationError`, `ConflictError`).
+* **M6: API layer** — `app/api/`, REST endpoints for `Settings` (`GET`/`PATCH /settings`) and `Devices` (`GET /devices`, `GET`/`PATCH`/`DELETE /devices/{id}`), centralized exception-to-HTTP mapping, and the shared `ApiResponse` envelope. See `backend/README.md` for full API layer details.
+
+## Current Architecture
+
+The backend follows the layered design in `docs/02_Architecture.md`:
+
+```
+API Layer → Service Layer → Repository Layer → SQLAlchemy Models
+```
+
+Implemented resources: `Devices`, `AppSettings`. All endpoints are currently
+unauthenticated — the Authentication milestone has not started.
+
+## Not Yet Implemented
+
+* Pairing (device registration)
+* Authentication / sessions
+* Shared files
+* Transfers
+* Device discovery
+* Desktop (Electron) and Android clients
+
+## Next Planned Milestone
+
+**Pairing** — device registration and the QR-based pairing flow described in
+`docs/13_Database_Design.md` §4 and `docs/10_Security.md`, including issuing
+each device's long-lived secret. Authentication (session tokens) is expected
+to follow, since it depends on paired devices existing.
 
 ## Documentation
 

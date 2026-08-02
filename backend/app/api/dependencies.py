@@ -15,6 +15,10 @@ from app.services.active_stream_registry import (
 from app.services.app_settings_service import AppSettingsService
 from app.services.auth_service import AuthService
 from app.services.device_service import DeviceService
+from app.services.discovery_service import DiscoveryService
+from app.services.discovery_service import (
+    get_discovery_service as _get_discovery_service,
+)
 from app.services.pairing_manager import PairingManager
 from app.services.pairing_manager import get_pairing_manager as _get_pairing_manager
 from app.services.pairing_service import PairingService
@@ -91,6 +95,11 @@ def get_transfer_stream_service(
     return TransferStreamService(db, active_stream_registry)
 
 
+def get_discovery_service() -> DiscoveryService:
+    """Provide the process-wide DiscoveryService singleton (app/services/discovery_service.py)."""
+    return _get_discovery_service()
+
+
 def get_current_device(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)],
     auth_service: Annotated[AuthService, Depends(get_auth_service)],
@@ -137,5 +146,6 @@ AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 SharedFileServiceDep = Annotated[SharedFileService, Depends(get_shared_file_service)]
 TransferServiceDep = Annotated[TransferService, Depends(get_transfer_service)]
 TransferStreamServiceDep = Annotated[TransferStreamService, Depends(get_transfer_stream_service)]
+DiscoveryServiceDep = Annotated[DiscoveryService, Depends(get_discovery_service)]
 CurrentDeviceDep = Annotated[Device, Depends(get_current_device)]
 RequestingDeviceDep = Annotated[Device | None, Depends(get_requesting_device)]

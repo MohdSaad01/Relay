@@ -18,3 +18,16 @@ def get_local_ip_address() -> str:
         return "127.0.0.1"
     finally:
         sock.close()
+
+
+def get_broadcast_address() -> str:
+    """Return the UDP address device-discovery announcements are broadcast to.
+
+    Always the limited broadcast address ("255.255.255.255") for Version 1
+    (09_Networking.md §4, Device Discovery milestone) — simpler and more
+    portable across Windows/Android than computing a subnet-directed
+    broadcast address per network interface. Kept as its own function so a
+    future milestone could compute an interface-specific address without
+    changing DiscoveryService.
+    """
+    return "255.255.255.255"

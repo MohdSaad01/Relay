@@ -55,7 +55,20 @@ The discovery mechanism should:
 * Discover only Relay-enabled devices.
 * Be reliable on common home networks.
 
-The specific discovery technology (such as mDNS/Zeroconf or UDP broadcast) will be selected during the **Device Discovery milestone** after evaluating the available options.
+**Decision (Device Discovery milestone):** UDP broadcast, not mDNS/Zeroconf.
+The desktop backend broadcasts a periodic, credential-free announcement
+(protocol version, Relay version, instance id, device display name,
+desktop IP, and port) to the LAN broadcast address on a fixed port, and
+Android listens for it — no extra runtime dependency, and simpler to
+reason about and test than resolving mDNS/Zeroconf across Windows and
+Android. The one-directional nature of the broadcast — the desktop never
+listens for a reply — means there is no new inbound firewall rule beyond
+the one the API's own TCP port already needs (§10), and no listening
+socket that could be flooded. Whether broadcasting is currently active is
+a user-editable preference (`app_settings.discovery_enabled`); the desktop
+can check the broadcaster's live status via `GET /discovery/status`. See
+`backend/README.md` ("Device Discovery Infrastructure") for the
+implementation.
 
 ---
 

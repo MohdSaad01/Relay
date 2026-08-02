@@ -271,6 +271,44 @@ Each completed milestone should result in a logical Git commit before moving to 
 
 ---
 
+# ADR-010
+
+## Decision
+
+Device Discovery Protocol
+
+## Choice
+
+UDP Broadcast
+
+## Reason
+
+The desktop backend broadcasts a periodic, credential-free announcement to
+the LAN broadcast address on a fixed port; Android listens for it. This
+requires no manual configuration, matching `docs/09_Networking.md` §4, and
+needs no new inbound firewall rule beyond the one the API's own TCP port
+already needs, since the broadcast is one-directional (the desktop never
+listens for a reply).
+
+## Alternatives Considered
+
+* mDNS/Zeroconf — richer service discovery, but pulls in an extra
+  dependency and behaves inconsistently across Windows and Android without
+  clear Version 1 benefit over a simple broadcast.
+* Manual IP entry only — no discovery at all; rejected as a fallback rather
+  than the primary mechanism, since `docs/09_Networking.md` §4 requires no
+  manual configuration wherever possible.
+
+## Why This Was Chosen
+
+UDP broadcast is simpler to implement, test, and reason about than
+mDNS/Zeroconf, while still satisfying every requirement in
+`docs/09_Networking.md` §4 for Version 1's supported networks (§3: home
+Wi-Fi, office LAN, mobile hotspot). See `backend/README.md`
+("Device Discovery Infrastructure") for the implementation.
+
+---
+
 # Future Decisions
 
 Additional ADRs should be added as new architectural choices are made.
@@ -278,7 +316,6 @@ Additional ADRs should be added as new architectural choices are made.
 Examples:
 
 * Authentication mechanism
-* Device discovery protocol
 * QR pairing implementation
 * File transfer protocol
 * Encryption strategy

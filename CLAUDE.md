@@ -58,7 +58,6 @@ session token outright.
 
 ## Not Yet Implemented
 
-* Device discovery
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)
 * WebSockets / real-time push (transfer progress is currently polled via `GET /transfers/{id}`)
 * Desktop (Electron) and Android clients

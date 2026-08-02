@@ -219,6 +219,36 @@ request/resume support, checksum verification, compression, encryption,
 and WebSocket push — progress is observed by polling the existing
 `GET /transfers/{id}`.
 
+## Device Discovery Infrastructure
+
+`DiscoveryService` (`app/services/discovery_service.py`) lets a nearby
+Android device find this desktop's backend without manual configuration
+(`docs/09_Networking.md` §4). UDP broadcast was selected as the mechanism
+for Version 1 — simpler than mDNS/Zeroconf, no extra dependency, and
+sufficient for the home Wi-Fi/office LAN/mobile-hotspot networks
+`docs/09_Networking.md` §3 targets.
+
+Unlike every other service in this codebase, `DiscoveryService` is not
+request-scoped: it is started once at process startup and stopped once at
+shutdown (`app/main.py`'s `lifespan`), running its broadcast loop on a
+single dedicated daemon thread that opens its own short-lived DB session on
+every tick (it cannot borrow a request-scoped `Session`, since no request is
+driving it). While running, it sends a `DiscoveryAnnouncePayload`
+(`app/schemas/discovery.py`) — protocol version, Relay version, a
+per-process `instance_id`, `device_display_name`, `desktop_ip`, and `port`,
+deliberately no credentials, per `docs/10_Security.md` §5 — to the LAN
+broadcast address (`app/utils/network.get_broadcast_address`, always
+`255.255.255.255` in V1) on `Settings.DISCOVERY_PORT` every
+`Settings.DISCOVERY_BROADCAST_INTERVAL_SECONDS`, unless
+`app_settings.discovery_enabled` is currently off.
+
+Deliberately isolated: this module only reads `AppSettingsService`, and
+nothing else in the codebase depends on it. A broadcast failure (socket
+creation at startup, a transient send error mid-loop) is always logged and
+swallowed, never raised — discovery is a pure UX convenience layer, not a
+dependency of pairing (`PairingService.build_qr_payload` already resolves
+`desktop_ip`/`port` independently) or any other feature.
+
 ## API Layer
 
 ### Routing structure
@@ -233,6 +263,7 @@ sub-router per resource:
 | `settings.py` | `/settings` | `GET /settings`, `PATCH /settings` |
 | `devices.py` | `/devices` | `GET /devices`, `GET /devices/{id}`, `PATCH /devices/{id}`, `DELETE /devices/{id}` |
 | `pairing.py` | `/pairing` | `POST /pairing/start`, `GET /pairing/pending/{token}`, `POST /pairing/request`, `POST /pairing/approve`, `POST /pairing/reject`, `GET /pairing/result/{token}` |
+| `discovery.py` | `/discovery` | `GET /discovery/status` |
 | `shared_files.py` | `/files` | `POST /files`, `GET /files`, `GET /files/{id}`, `POST /files/{id}/refresh`, `DELETE /files/{id}` |
 | `transfers.py` | `/transfers` | `POST /transfers/requests`, `GET /transfers/requests`, `GET /transfers/requests/{id}`, `DELETE /transfers/requests/{id}`, `POST /transfers/requests/{id}/accept`, `POST /transfers/requests/{id}/reject`, `GET /transfers`, `GET /transfers/{id}`, `POST /transfers/{id}/cancel`, `GET /transfers/{id}/download`, `POST /transfers/{id}/upload` |
 
@@ -245,21 +276,24 @@ per resource.
 `app/api/dependencies.py` provides one function per service
 (`get_app_settings_service`, `get_device_service`, `get_pairing_service`,
 `get_auth_service`, `get_shared_file_service`, `get_transfer_service`,
-`get_transfer_stream_service`), each depending on `get_db`
-(`app/database/session.py`) for a request-scoped SQLAlchemy `Session`.
-Three of these additionally depend on a process-wide, in-memory singleton
-rather than being purely `Session`-scoped, since that runtime state lives
-outside the database by design: `get_pairing_service` on
+`get_transfer_stream_service`, `get_discovery_service`), each depending on
+`get_db` (`app/database/session.py`) for a request-scoped SQLAlchemy
+`Session`. Four of these additionally depend on a process-wide, in-memory
+singleton rather than being purely `Session`-scoped, since that runtime
+state lives outside the database by design: `get_pairing_service` on
 `get_pairing_manager` (`PairingManager`, `docs/13_Database_Design.md` §9),
 `get_transfer_service` on `get_transfer_manager` (`TransferManager`, same
-reasoning — see [Transfer Infrastructure](#transfer-infrastructure)), and
+reasoning — see [Transfer Infrastructure](#transfer-infrastructure)),
 `get_transfer_stream_service` on `get_active_stream_registry`
-(`ActiveStreamRegistry` — see [Streaming Engine](#streaming-engine)).
+(`ActiveStreamRegistry` — see [Streaming Engine](#streaming-engine)), and
+`get_discovery_service` on the module-level `DiscoveryService` singleton
+started/stopped by `app/main.py`'s `lifespan` (see
+[Device Discovery Infrastructure](#device-discovery-infrastructure)).
 Routes consume these through `Annotated` type aliases
 (`AppSettingsServiceDep`, `DeviceServiceDep`, `PairingServiceDep`,
 `AuthServiceDep`, `SharedFileServiceDep`, `TransferServiceDep`,
-`TransferStreamServiceDep`) rather than `= Depends(...)` default values,
-e.g.:
+`TransferStreamServiceDep`, `DiscoveryServiceDep`) rather than
+`= Depends(...)` default values, e.g.:
 
 ```python
 def get_device(device_id: int, service: DeviceServiceDep) -> ApiResponse:
@@ -451,6 +485,23 @@ accepts (`POST /transfers/requests/{id}/accept`, creating the persisted
 `POST .../upload`) → either side polls `GET /transfers/{id}` for progress
 (`bytes_transferred`) until `status` reaches a terminal value.
 
+## Discovery API
+
+`app/api/v1/discovery.py` exposes one read-only route over
+`DiscoveryService` (M13, see
+[Device Discovery Infrastructure](#device-discovery-infrastructure)).
+
+| Endpoint | Status codes | Caller |
+|---|---|---|
+| `GET /discovery/status` | 200 | Desktop |
+
+It reports whether the broadcaster is actually running right now
+(`broadcasting`), its per-process `instance_id`, and the port it broadcasts
+on — useful for the desktop UI to show, e.g., "not discoverable" if socket
+creation failed at startup. It adds no way to control discovery: that
+remains `PATCH /settings` (`app_settings.discovery_enabled`), unchanged
+from before this milestone.
+
 ## Structure
 
 ```text
@@ -490,7 +541,8 @@ backend/
 │   │   ├── transfer_manager.py        # In-memory, lock-guarded pending-transfer-request store (singleton)
 │   │   ├── transfer_service.py        # Transfer lifecycle: propose/accept/reject/cancel; exposed via app/api/v1/transfers.py
 │   │   ├── transfer_stream_service.py # Streams bytes for an already-accepted transfer (Milestone 12)
-│   │   └── active_stream_registry.py  # In-memory guard: one active byte stream per transfer_id (singleton)
+│   │   ├── active_stream_registry.py  # In-memory guard: one active byte stream per transfer_id (singleton)
+│   │   └── discovery_service.py       # Background UDP broadcaster singleton (Milestone 13)
 │   ├── schemas/
 │   │   ├── common.py            # ApiResponse — the shared response envelope
 │   │   ├── device.py            # DeviceResponse, DeviceUpdateRequest
@@ -499,7 +551,8 @@ backend/
 │   │   │                         # PairingPendingRequestResponse, PairingApproveRequest,
 │   │   │                         # PairingRejectRequest, PairingResultResponse
 │   │   ├── shared_file.py       # SharedFileResponse, AvailableFileResponse, ShareFileRequest
-│   │   └── transfer.py          # TransferRequestCreate, TransferRequestResponse, TransferResponse
+│   │   ├── transfer.py          # TransferRequestCreate, TransferRequestResponse, TransferResponse
+│   │   └── discovery.py         # DiscoveryAnnouncePayload (UDP), DiscoveryStatusResponse
 │   ├── api/
 │   │   ├── dependencies.py      # Service provider functions + Annotated Dep aliases
 │   │   ├── responses.py         # success() helper for building ApiResponse envelopes
@@ -513,10 +566,11 @@ backend/
 │   │       │                      # POST /pairing/request, POST /pairing/approve,
 │   │       │                      # POST /pairing/reject, GET /pairing/result/{token}
 │   │       ├── shared_files.py   # POST/GET /files, GET/POST(refresh)/DELETE /files/{id}
-│   │       └── transfers.py      # /transfers/requests..., /transfers..., /transfers/{id}/download|upload
+│   │       ├── transfers.py      # /transfers/requests..., /transfers..., /transfers/{id}/download|upload
+│   │       └── discovery.py      # GET /discovery/status
 │   └── utils/
 │       ├── time.py              # utc_now() helper shared by models
-│       ├── network.py           # get_local_ip_address() — for the pairing QR's desktop_ip
+│       ├── network.py           # get_local_ip_address(), get_broadcast_address() — desktop_ip for pairing QR + discovery broadcasts
 │       └── filesystem.py        # Pure filesystem helpers: path validation, metadata stat, conflict-free renaming
 └── tests/
     ├── api/                     # Route-level tests via FastAPI TestClient (in-memory SQLite)
@@ -578,14 +632,17 @@ All commands below are run from the `backend/` directory.
    * Transfers: no plain GET link is interesting until a device is paired —
      follow the pairing flow above, then the propose → accept →
      download/upload flow described in [Transfer API](#transfer-api)
+   * Discovery status: http://localhost:8000/api/v1/discovery/status — the
+     background broadcaster starts automatically with the app (see
+     [Device Discovery Infrastructure](#device-discovery-infrastructure))
    * Swagger UI: http://localhost:8000/docs
    * ReDoc: http://localhost:8000/redoc
 
-   Note: `/settings`, `/devices`, and `/pairing` remain fully unauthenticated
-   — the desktop's own Electron UI always calls them over loopback. `/files`,
-   `/transfers/requests`, `/transfers`, and `/transfers/{id}/download|upload`
-   enforce a `DeviceSession` bearer token (`AuthService`, M9) for any
-   non-loopback caller — see
+   Note: `/settings`, `/devices`, `/pairing`, and `/discovery` remain fully
+   unauthenticated — the desktop's own Electron UI always calls them over
+   loopback. `/files`, `/transfers/requests`, `/transfers`, and
+   `/transfers/{id}/download|upload` enforce a `DeviceSession` bearer token
+   (`AuthService`, M9) for any non-loopback caller — see
    [Authentication Infrastructure](#authentication-infrastructure) above.
 
 ## Running tests

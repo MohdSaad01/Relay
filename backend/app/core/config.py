@@ -46,6 +46,17 @@ class Settings(BaseSettings):
     # user-editable preference, so it lives here rather than in app_settings.
     STREAM_CHUNK_SIZE_BYTES: int = 1_048_576  # 1 MiB
 
+    # Device Discovery (09_Networking.md §4, Milestone 13): the desktop
+    # broadcasts a periodic UDP announcement so nearby Android devices can
+    # find it without manual configuration. Static deployment/protocol
+    # parameters, not user-editable preferences — mirrors
+    # PAIRING_TOKEN_TTL_SECONDS above. Whether broadcasting happens at all is
+    # controlled separately by the user-editable app_settings.discovery_enabled
+    # flag, not by anything here.
+    DISCOVERY_PORT: int = 40890
+    DISCOVERY_BROADCAST_INTERVAL_SECONDS: int = 2
+    DISCOVERY_PROTOCOL_VERSION: int = 1
+
 
 @lru_cache
 def get_settings() -> Settings:

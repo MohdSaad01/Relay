@@ -46,6 +46,42 @@ alongside, not inside, the layered request/DB flow described above. Token
 generation and hashing (`generate_token`, `hash_token`) live in
 `app/core/security.py`, reused for both pairing tokens and device secrets.
 
+## Authentication Infrastructure
+
+`AuthService` (`app/services/auth_service.py`) validates the bearer
+`DeviceSession` token minted by `PairingService.approve_pairing` (M7/M8),
+per `docs/10_Security.md` §7-9. It hashes the presented token
+(`app/core/security.hash_token`, the same helper used for pairing tokens
+and device secrets), looks it up via
+`DeviceSessionRepository.get_by_token_hash`, rejects a missing, unknown, or
+expired token with `AuthenticationError`, and on success updates
+`sessions.last_used_at`/`devices.last_seen_at`.
+
+Every failure path raises the same `AuthenticationError` with an identical
+generic message, regardless of which case occurred — this avoids giving a
+caller an oracle for probing valid tokens, per `docs/10_Security.md` §11.
+The specific cause is only ever logged server-side (`WARNING`), never
+returned to the client.
+
+`AuthService.authenticate()` deliberately never calls `db.commit()`. It runs
+as part of a FastAPI dependency ahead of the route's own service call,
+sharing that request's `Session` (FastAPI caches `Depends(get_db)` per
+request), so its `last_used_at`/`last_seen_at` writes ride along inside
+whatever transaction the route's own service commits — keeping
+authentication itself from owning a transaction boundary on every protected
+request. Trade-off: on a purely read-only protected route with no other
+writes, that bookkeeping update can be rolled back on session close instead
+of persisting. Accepted, since these two fields are informational only and
+never participate in a security decision.
+
+It is exposed as the `get_current_device` dependency / `CurrentDeviceDep`
+type alias (`app/api/dependencies.py`), following the same pattern as the
+service dependencies below. **It is not yet attached to any router** — no
+endpoint currently requires a session token. It exists so that the first
+milestone introducing an Android-facing resource can add
+`Depends(get_current_device)` (or `dependencies=[Depends(get_current_device)]`
+at the router level) without any further plumbing.
+
 ## API Layer
 
 ### Routing structure
@@ -68,16 +104,16 @@ per resource.
 ### Dependency injection
 
 `app/api/dependencies.py` provides one function per service
-(`get_app_settings_service`, `get_device_service`, `get_pairing_service`),
-each depending on `get_db` (`app/database/session.py`) for a request-scoped
-SQLAlchemy `Session`. `get_pairing_service` additionally depends on
-`get_pairing_manager`, a thin wrapper around the process-wide
+(`get_app_settings_service`, `get_device_service`, `get_pairing_service`,
+`get_auth_service`), each depending on `get_db` (`app/database/session.py`)
+for a request-scoped SQLAlchemy `Session`. `get_pairing_service` additionally
+depends on `get_pairing_manager`, a thin wrapper around the process-wide
 `PairingManager` singleton (`app/services/pairing_manager.py`) — the one
 service dependency that isn't purely `Session`-scoped, since pairing state
 lives outside the database by design (`docs/13_Database_Design.md` §9).
 Routes consume these through `Annotated` type aliases
-(`AppSettingsServiceDep`, `DeviceServiceDep`, `PairingServiceDep`) rather
-than `= Depends(...)` default values, e.g.:
+(`AppSettingsServiceDep`, `DeviceServiceDep`, `PairingServiceDep`,
+`AuthServiceDep`) rather than `= Depends(...)` default values, e.g.:
 
 ```python
 def get_device(device_id: int, service: DeviceServiceDep) -> ApiResponse:
@@ -87,6 +123,12 @@ def get_device(device_id: int, service: DeviceServiceDep) -> ApiResponse:
 This keeps routes free of any direct `Session` or repository knowledge, and
 is the ruff-clean form of the pattern (`Depends(...)` as an argument default
 triggers the bugbear `B008` rule).
+
+One further dependency, `get_current_device` (`CurrentDeviceDep`), sits on
+top of `get_auth_service`: it extracts the `Authorization: Bearer` header via
+FastAPI's `HTTPBearer(auto_error=False)` and calls `AuthService.authenticate`,
+returning the resolved `Device`. See
+[Authentication Infrastructure](#authentication-infrastructure) above.
 
 ### Request/response flow
 
@@ -123,11 +165,15 @@ try/except blocks:
 | `NotFoundError` | 404 | — |
 | `ValidationError` | 400 | `INFO` |
 | `ConflictError` | 409 | `WARNING` |
+| `AuthenticationError` | 401 | `WARNING` |
 | `RequestValidationError` (Pydantic/FastAPI) | 422 | — |
 | Any other unhandled `Exception` | 500 | `ERROR` (with traceback) |
 
 All error responses use the same `ApiResponse` envelope (`success: false`,
-`data: null`), so clients only ever handle one response shape.
+`data: null`), so clients only ever handle one response shape. The 401
+response additionally carries a `WWW-Authenticate: Bearer` header, and its
+message is deliberately generic — see
+[Authentication Infrastructure](#authentication-infrastructure) above.
 
 ## Pairing API
 
@@ -204,11 +250,12 @@ backend/
 │   │   ├── transfer_repository.py
 │   │   └── app_settings_repository.py
 │   ├── services/
-│   │   ├── exceptions.py           # NotFoundError, ValidationError, ConflictError (FastAPI-agnostic)
+│   │   ├── exceptions.py           # NotFoundError, ValidationError, ConflictError, AuthenticationError (FastAPI-agnostic)
 │   │   ├── device_service.py       # List/inspect/rename/remove/register paired devices
 │   │   ├── app_settings_service.py # Get/update the singleton settings row
 │   │   ├── pairing_manager.py      # In-memory, lock-guarded pairing attempt store (singleton)
-│   │   └── pairing_service.py      # Pairing handshake workflow; exposed via app/api/v1/pairing.py
+│   │   ├── pairing_service.py      # Pairing handshake workflow; exposed via app/api/v1/pairing.py
+│   │   └── auth_service.py         # Validates a DeviceSession bearer token; not yet wired to any router
 │   ├── schemas/
 │   │   ├── common.py            # ApiResponse — the shared response envelope
 │   │   ├── device.py            # DeviceResponse, DeviceUpdateRequest
@@ -287,9 +334,11 @@ All commands below are run from the `backend/` directory.
    * Swagger UI: http://localhost:8000/docs
    * ReDoc: http://localhost:8000/redoc
 
-   Note: `/settings`, `/devices`, and `/pairing` are all unauthenticated in
-   this milestone — authentication has not been implemented yet (see
-   `docs/10_Security.md`).
+   Note: `/settings`, `/devices`, and `/pairing` are all unauthenticated.
+   The session-validation infrastructure (`AuthService`, `get_current_device`)
+   exists as of M9, but is not yet attached to any router, so no endpoint
+   currently requires a bearer token — see
+   [Authentication Infrastructure](#authentication-infrastructure) above.
 
 ## Running tests
 

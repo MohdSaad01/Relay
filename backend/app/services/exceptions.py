@@ -20,3 +20,7 @@ class ValidationError(ServiceError):
 
 class ConflictError(ServiceError):
     """Raised when an operation would violate a uniqueness or state constraint."""
+
+
+class AuthenticationError(ServiceError):
+    """Raised when a request's bearer session token is missing, unknown, or expired."""

@@ -11,20 +11,33 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.schemas.common import ApiResponse
-from app.services.exceptions import ConflictError, NotFoundError, ValidationError
+from app.services.exceptions import (
+    AuthenticationError,
+    ConflictError,
+    NotFoundError,
+    ValidationError,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _error_response(status_code: int, message: str) -> JSONResponse:
+def _error_response(status_code: int, message: str, headers: dict[str, str] | None = None) -> JSONResponse:
     """Build an error response using the standard ApiResponse envelope."""
     body = ApiResponse(success=False, message=message, data=None)
-    return JSONResponse(status_code=status_code, content=body.model_dump(mode="json"))
+    return JSONResponse(status_code=status_code, content=body.model_dump(mode="json"), headers=headers)
 
 
 async def handle_not_found_error(request: Request, exc: NotFoundError) -> JSONResponse:
     """Map NotFoundError to 404."""
     return _error_response(404, str(exc))
+
+
+async def handle_authentication_error(request: Request, exc: AuthenticationError) -> JSONResponse:
+    """Map AuthenticationError to 401 and log it at WARNING (10_Security.md §11: failed
+    authentication must be logged). The response message is already generic; never log
+    the presented token itself."""
+    logger.warning("Authentication failed on %s %s: %s", request.method, request.url.path, exc)
+    return _error_response(401, str(exc), headers={"WWW-Authenticate": "Bearer"})
 
 
 async def handle_validation_error(request: Request, exc: ValidationError) -> JSONResponse:
@@ -59,5 +72,6 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(NotFoundError, handle_not_found_error)
     app.add_exception_handler(ValidationError, handle_validation_error)
     app.add_exception_handler(ConflictError, handle_conflict_error)
+    app.add_exception_handler(AuthenticationError, handle_authentication_error)
     app.add_exception_handler(RequestValidationError, handle_request_validation_error)
     app.add_exception_handler(Exception, handle_unhandled_exception)

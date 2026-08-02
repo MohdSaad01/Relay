@@ -11,6 +11,7 @@ from sqlalchemy.pool import StaticPool
 from app.database.base import Base
 from app.database.session import get_db
 from app.main import app
+from tests.repositories.conftest import db_session, make_device  # noqa: F401
 
 
 @pytest.fixture

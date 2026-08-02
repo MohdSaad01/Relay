@@ -30,6 +30,7 @@ Relay has completed its specification phase and is in active backend implementat
 * **M6: API layer** — `app/api/`, REST endpoints for `Settings` (`GET`/`PATCH /settings`) and `Devices` (`GET /devices`, `GET`/`PATCH`/`DELETE /devices/{id}`), centralized exception-to-HTTP mapping, and the shared `ApiResponse` envelope. See `backend/README.md` for full API layer details.
 * **M7: Pairing infrastructure** — `PairingManager` (`app/services/pairing_manager.py`), a lock-guarded, in-memory singleton holding the single active pairing attempt (tokens are never persisted, per `docs/13_Database_Design.md` §9); `PairingService` (`app/services/pairing_service.py`), orchestrating start/submit/approve/reject/collect and delegating persistence to `DeviceService`/`DeviceSessionRepository`/`AppSettingsService`; `app/core/security.py` for token generation and hashing; `DeviceService.register_device`/`is_device_registered`. See `backend/README.md` for full details.
 * **M8: Pairing API** — `app/api/v1/pairing.py` exposes `PairingService` (M7) as REST endpoints: `POST /pairing/start`, `GET /pairing/pending/{token}`, `POST /pairing/request`, `POST /pairing/approve`, `POST /pairing/reject`, `GET /pairing/result/{token}`. Desktop-only: start/pending/approve/reject. Android-only: request/result. Request/response schemas added to `app/schemas/pairing.py`; DI wiring (`PairingServiceDep`) added to `app/api/dependencies.py`. Reuses the centralized exception handlers from M6 — no route-level try/except. Still fully unauthenticated. See `backend/README.md` for full details.
+* **M9: Authentication infrastructure** — `AuthService` (`app/services/auth_service.py`) validates the bearer `DeviceSession` token (`Authorization: Bearer <token>`) issued by `PairingService.approve_pairing` (M7/M8), per `docs/10_Security.md` §7-9: hashes the presented token, looks it up, rejects a missing/unknown/expired token with a new `AuthenticationError` (mapped to `401` via the M6 exception-handler pattern, generic message in every failure case), and on success updates `last_used_at`/`last_seen_at` without committing — that bookkeeping rides along inside whatever transaction the request's own service commits, so authentication itself never owns a transaction boundary. Exposed as the `get_current_device`/`CurrentDeviceDep` FastAPI dependency (`app/api/dependencies.py`). **Not yet attached to any router** — every endpoint remains unauthenticated until a future milestone wires it in. See `backend/README.md` for full details.
 
 ## Current Architecture
 
@@ -40,15 +41,18 @@ API Layer → Service Layer → Repository Layer → SQLAlchemy Models
 ```
 
 Implemented resources: `Devices`, `AppSettings`, `Pairing`. All endpoints are
-currently unauthenticated — the Authentication milestone has not started.
-The pairing handshake (`PairingManager`/`PairingService`) is now exposed
-over HTTP via `app/api/v1/pairing.py` (M8), so a client can drive the full
-start → submit → approve/reject → collect flow, though nothing yet enforces
-the resulting session token on subsequent requests.
+currently unauthenticated. The pairing handshake (`PairingManager`/`PairingService`)
+is exposed over HTTP via `app/api/v1/pairing.py` (M8), so a client can drive
+the full start → submit → approve/reject → collect flow. M9 added the
+session-token validation infrastructure (`AuthService`, `get_current_device`/
+`CurrentDeviceDep` in `app/api/dependencies.py`) that will enforce the
+resulting `DeviceSession` token on protected requests, but it is not yet
+attached to any router — every endpoint remains open until a future
+milestone wires it in.
 
 ## Not Yet Implemented
 
-* Authentication / sessions (session-validating middleware; `DeviceSession` rows can already be created by `PairingService`, but nothing yet enforces them on a request)
+* Authentication enforcement on routes (`AuthService`/`get_current_device` from M9 validate a `DeviceSession` bearer token, but no router requires one yet — every endpoint is still reachable without one)
 * Shared files
 * Transfers
 * Device discovery
@@ -56,11 +60,13 @@ the resulting session token on subsequent requests.
 
 ## Next Planned Milestone
 
-**Authentication** — session-validating middleware/dependency that checks
-the `DeviceSession` token issued by `PairingService.approve_pairing`
-(M7/M8) against each protected request, per `docs/10_Security.md` §7-9.
-This is now unblocked since devices can complete pairing through the API
-(M8).
+**Shared Files** — the first Android-facing resource endpoints
+(`docs/13_Database_Design.md` `shared_files` table), and the first router
+expected to actually attach the M9 `get_current_device`/`CurrentDeviceDep`
+dependency so requests require a valid paired-device session. Whether
+`Devices`/`Settings` should also become protected was raised during M9 and
+left open — revisit if Android is ever expected to call those routes
+directly.
 
 ## Documentation
 

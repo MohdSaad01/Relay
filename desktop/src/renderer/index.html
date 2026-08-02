@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src http://127.0.0.1:*"
+  />
+  <title>Relay</title>
+  <link rel="stylesheet" href="../../styles/app.css" />
+</head>
+<body>
+  <div id="app">
+    <nav id="nav">
+      <button data-view="devices">Devices</button>
+      <button data-view="pairing">Pairing</button>
+      <button data-view="files">Shared Files</button>
+      <button data-view="transfers">Transfers</button>
+      <button data-view="settings">Settings</button>
+    </nav>
+    <main id="view-container"></main>
+    <footer id="status-bar">Backend: <span id="backend-state">starting</span></footer>
+  </div>
+  <script type="module" src="renderer.js"></script>
+</body>
+</html>

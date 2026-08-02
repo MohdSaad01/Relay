@@ -10,6 +10,7 @@ from app.api.exception_handlers import register_exception_handlers
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.logging_config import configure_logging
+from app.database.init_db import init_db
 from app.services.discovery_service import get_discovery_service
 
 settings = get_settings()
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Log application startup/shutdown and run the discovery broadcaster."""
     logger.info("Relay backend starting up.")
+    init_db()
     discovery_service = get_discovery_service()
     discovery_service.start()
     yield

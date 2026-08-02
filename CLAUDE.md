@@ -28,7 +28,8 @@ Relay has completed its specification phase and is in active backend implementat
 * **M4: Repository layer** — `app/repositories/`, one repository per model, the only code that queries SQLAlchemy directly.
 * **M5: Service layer** — `app/services/`, business logic for devices and app settings, raising FastAPI-agnostic exceptions (`NotFoundError`, `ValidationError`, `ConflictError`).
 * **M6: API layer** — `app/api/`, REST endpoints for `Settings` (`GET`/`PATCH /settings`) and `Devices` (`GET /devices`, `GET`/`PATCH`/`DELETE /devices/{id}`), centralized exception-to-HTTP mapping, and the shared `ApiResponse` envelope. See `backend/README.md` for full API layer details.
-* **M7: Pairing infrastructure** — `PairingManager` (`app/services/pairing_manager.py`), a lock-guarded, in-memory singleton holding the single active pairing attempt (tokens are never persisted, per `docs/13_Database_Design.md` §9); `PairingService` (`app/services/pairing_service.py`), orchestrating start/submit/approve/reject/collect and delegating persistence to `DeviceService`/`DeviceSessionRepository`/`AppSettingsService`; `app/core/security.py` for token generation and hashing; `DeviceService.register_device`/`is_device_registered`. **Not yet wired to any API route** — see Next Planned Milestone. See `backend/README.md` for full details.
+* **M7: Pairing infrastructure** — `PairingManager` (`app/services/pairing_manager.py`), a lock-guarded, in-memory singleton holding the single active pairing attempt (tokens are never persisted, per `docs/13_Database_Design.md` §9); `PairingService` (`app/services/pairing_service.py`), orchestrating start/submit/approve/reject/collect and delegating persistence to `DeviceService`/`DeviceSessionRepository`/`AppSettingsService`; `app/core/security.py` for token generation and hashing; `DeviceService.register_device`/`is_device_registered`. See `backend/README.md` for full details.
+* **M8: Pairing API** — `app/api/v1/pairing.py` exposes `PairingService` (M7) as REST endpoints: `POST /pairing/start`, `GET /pairing/pending/{token}`, `POST /pairing/request`, `POST /pairing/approve`, `POST /pairing/reject`, `GET /pairing/result/{token}`. Desktop-only: start/pending/approve/reject. Android-only: request/result. Request/response schemas added to `app/schemas/pairing.py`; DI wiring (`PairingServiceDep`) added to `app/api/dependencies.py`. Reuses the centralized exception handlers from M6 — no route-level try/except. Still fully unauthenticated. See `backend/README.md` for full details.
 
 ## Current Architecture
 
@@ -38,15 +39,15 @@ The backend follows the layered design in `docs/02_Architecture.md`:
 API Layer → Service Layer → Repository Layer → SQLAlchemy Models
 ```
 
-Implemented resources: `Devices`, `AppSettings`. All endpoints are currently
-unauthenticated — the Authentication milestone has not started. The pairing
-handshake (`PairingManager`/`PairingService`) is implemented at the service
-layer but has no API routes yet, so it cannot currently be driven by a
-client.
+Implemented resources: `Devices`, `AppSettings`, `Pairing`. All endpoints are
+currently unauthenticated — the Authentication milestone has not started.
+The pairing handshake (`PairingManager`/`PairingService`) is now exposed
+over HTTP via `app/api/v1/pairing.py` (M8), so a client can drive the full
+start → submit → approve/reject → collect flow, though nothing yet enforces
+the resulting session token on subsequent requests.
 
 ## Not Yet Implemented
 
-* Pairing API routes (the handshake logic itself is implemented — see M7 — but not exposed over HTTP)
 * Authentication / sessions (session-validating middleware; `DeviceSession` rows can already be created by `PairingService`, but nothing yet enforces them on a request)
 * Shared files
 * Transfers
@@ -55,12 +56,11 @@ client.
 
 ## Next Planned Milestone
 
-**Pairing API Layer** — expose `PairingService` (M7) as REST endpoints
-following the `app/api/` conventions established in M6 (start pairing, submit
-a request, view/approve/reject a pending request, collect the result),
-including the request/response schemas for each step. Authentication
-(session-validating middleware) is expected to follow, since it depends on
-devices being able to actually pair through the API.
+**Authentication** — session-validating middleware/dependency that checks
+the `DeviceSession` token issued by `PairingService.approve_pairing`
+(M7/M8) against each protected request, per `docs/10_Security.md` §7-9.
+This is now unblocked since devices can complete pairing through the API
+(M8).
 
 ## Documentation
 

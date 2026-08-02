@@ -32,10 +32,10 @@ responses (see [Exception Handling](#exception-handling) below).
 
 `PairingService` (`app/services/pairing_service.py`) orchestrates the
 pairing handshake described in `docs/10_Security.md` §4-6 — start, submit,
-approve/reject, collect — but it is not yet wired to any API route; that is
-the next milestone. It delegates persistence to the existing
+approve/reject, collect. It delegates persistence to the existing
 `DeviceService`/`DeviceSessionRepository`/`AppSettingsService` rather than
-duplicating logic.
+duplicating logic, and is exposed over HTTP by `app/api/v1/pairing.py`
+(see [Pairing API](#pairing-api) below).
 
 Its runtime state does not go through the layers above: pairing tokens are
 single-use and expire within minutes, so per `docs/13_Database_Design.md` §9
@@ -59,6 +59,7 @@ sub-router per resource:
 | `health.py` | `/health` | `GET /health` |
 | `settings.py` | `/settings` | `GET /settings`, `PATCH /settings` |
 | `devices.py` | `/devices` | `GET /devices`, `GET /devices/{id}`, `PATCH /devices/{id}`, `DELETE /devices/{id}` |
+| `pairing.py` | `/pairing` | `POST /pairing/start`, `GET /pairing/pending/{token}`, `POST /pairing/request`, `POST /pairing/approve`, `POST /pairing/reject`, `GET /pairing/result/{token}` |
 
 A new resource gets its own router module in `app/api/v1/`, included in
 `router.py` — routers are never nested arbitrarily deep, matching one file
@@ -67,11 +68,16 @@ per resource.
 ### Dependency injection
 
 `app/api/dependencies.py` provides one function per service
-(`get_app_settings_service`, `get_device_service`), each depending on
-`get_db` (`app/database/session.py`) for a request-scoped SQLAlchemy
-`Session`. Routes consume these through `Annotated` type aliases
-(`AppSettingsServiceDep`, `DeviceServiceDep`) rather than `= Depends(...)`
-default values, e.g.:
+(`get_app_settings_service`, `get_device_service`, `get_pairing_service`),
+each depending on `get_db` (`app/database/session.py`) for a request-scoped
+SQLAlchemy `Session`. `get_pairing_service` additionally depends on
+`get_pairing_manager`, a thin wrapper around the process-wide
+`PairingManager` singleton (`app/services/pairing_manager.py`) — the one
+service dependency that isn't purely `Session`-scoped, since pairing state
+lives outside the database by design (`docs/13_Database_Design.md` §9).
+Routes consume these through `Annotated` type aliases
+(`AppSettingsServiceDep`, `DeviceServiceDep`, `PairingServiceDep`) rather
+than `= Depends(...)` default values, e.g.:
 
 ```python
 def get_device(device_id: int, service: DeviceServiceDep) -> ApiResponse:
@@ -123,6 +129,52 @@ try/except blocks:
 All error responses use the same `ApiResponse` envelope (`success: false`,
 `data: null`), so clients only ever handle one response shape.
 
+## Pairing API
+
+`app/api/v1/pairing.py` exposes the M7 pairing handshake
+(`docs/10_Security.md` §4-6) over HTTP. Routes stay thin — each one calls a
+single `PairingService` method and lets the centralized exception handlers
+above do the HTTP translation; there is no route-level try/except and no
+business logic in this layer.
+
+| Endpoint | Status codes | Caller |
+|---|---|---|
+| `POST /pairing/start` | 201, 500 | Desktop |
+| `GET /pairing/pending/{token}` | 200, 404 | Desktop |
+| `POST /pairing/request` | 200, 400, 404, 409 | Android |
+| `POST /pairing/approve` | 200, 404 | Desktop |
+| `POST /pairing/reject` | 200, 404 | Desktop |
+| `GET /pairing/result/{token}` | 200, 400, 404 | Android |
+
+`POST /pairing/start` is the only pairing endpoint returning `201` — it
+mints a new pairing attempt (a new resource). The rest are state
+transitions on that existing attempt, so they return `200` like the
+`Devices`/`Settings` routers.
+
+Typical flow:
+
+1. Desktop calls `POST /pairing/start`; the response's `qr` object
+   (`PairingQrPayload`) is rendered as a QR code, and `expires_at` reflects
+   the attempt's TTL (`Settings.PAIRING_TOKEN_TTL_SECONDS`).
+2. Android scans the QR and calls `POST /pairing/request` with the embedded
+   `pairing_token` plus its own device info.
+3. Desktop polls `GET /pairing/pending/{token}` (404 until Android submits)
+   to learn who's asking, then calls `POST /pairing/approve` or
+   `POST /pairing/reject`.
+4. Android polls `GET /pairing/result/{token}` (404 while still pending,
+   400 if rejected) until it gets a 200 with its one-time
+   `device_secret`/`session_token` credentials — collected exactly once,
+   per `docs/13_Database_Design.md` §9.
+
+There is no server-defined polling interval — each client (desktop, Android)
+chooses its own cadence; the backend only guarantees idempotent, side-effect-free
+reads until a terminal state is reached.
+
+`PairingManager` is a process-wide singleton, so its state is not reset
+between requests the way the per-request `Session` is — `docs/13_Database_Design.md`
+§9 only requires one active pairing attempt at a time, which the manager
+already enforces (`start()` discards any prior attempt).
+
 ## Structure
 
 ```text
@@ -156,12 +208,14 @@ backend/
 │   │   ├── device_service.py       # List/inspect/rename/remove/register paired devices
 │   │   ├── app_settings_service.py # Get/update the singleton settings row
 │   │   ├── pairing_manager.py      # In-memory, lock-guarded pairing attempt store (singleton)
-│   │   └── pairing_service.py      # Pairing handshake workflow; not yet wired to a route
+│   │   └── pairing_service.py      # Pairing handshake workflow; exposed via app/api/v1/pairing.py
 │   ├── schemas/
 │   │   ├── common.py            # ApiResponse — the shared response envelope
 │   │   ├── device.py            # DeviceResponse, DeviceUpdateRequest
 │   │   ├── settings.py          # SettingsResponse, SettingsUpdateRequest
-│   │   └── pairing.py           # PairingQrPayload
+│   │   └── pairing.py           # PairingQrPayload, PairingStartResponse, PairingRequestSubmitRequest,
+│   │                             # PairingPendingRequestResponse, PairingApproveRequest,
+│   │                             # PairingRejectRequest, PairingResultResponse
 │   ├── api/
 │   │   ├── dependencies.py      # Service provider functions + Annotated Dep aliases
 │   │   ├── responses.py         # success() helper for building ApiResponse envelopes
@@ -170,7 +224,10 @@ backend/
 │   │       ├── router.py         # Aggregates all v1 routers
 │   │       ├── health.py         # GET /health
 │   │       ├── settings.py       # GET/PATCH /settings
-│   │       └── devices.py        # GET /devices, GET/PATCH/DELETE /devices/{id}
+│   │       ├── devices.py        # GET /devices, GET/PATCH/DELETE /devices/{id}
+│   │       └── pairing.py        # POST /pairing/start, GET /pairing/pending/{token},
+│   │                              # POST /pairing/request, POST /pairing/approve,
+│   │                              # POST /pairing/reject, GET /pairing/result/{token}
 │   └── utils/
 │       ├── time.py              # utc_now() helper shared by models
 │       └── network.py           # get_local_ip_address() — for the pairing QR's desktop_ip
@@ -224,11 +281,15 @@ All commands below are run from the `backend/` directory.
    * Health check: http://localhost:8000/api/v1/health
    * Settings: http://localhost:8000/api/v1/settings
    * Devices: http://localhost:8000/api/v1/devices
+   * Pairing: no plain GET link — start a pairing attempt via
+     `POST /api/v1/pairing/start` (e.g. from Swagger UI) and follow the flow
+     described in [Pairing API](#pairing-api)
    * Swagger UI: http://localhost:8000/docs
    * ReDoc: http://localhost:8000/redoc
 
-   Note: `/settings` and `/devices` are unauthenticated in this milestone —
-   authentication has not been implemented yet (see `docs/10_Security.md`).
+   Note: `/settings`, `/devices`, and `/pairing` are all unauthenticated in
+   this milestone — authentication has not been implemented yet (see
+   `docs/10_Security.md`).
 
 ## Running tests
 

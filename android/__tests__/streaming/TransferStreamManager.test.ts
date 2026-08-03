@@ -44,6 +44,19 @@ function makeTask(promise: Promise<void>) {
   return { promise, cancel: jest.fn() };
 }
 
+/**
+ * Same as makeTask(Promise.reject(err)), but pre-attaches a no-op .catch so
+ * Node's unhandled-rejection detector never sees a window where the promise
+ * has no handler at all — start()'s own `await activeTask.promise` still
+ * observes and handles the rejection normally; a settled promise can have
+ * any number of .then/.catch handlers attached.
+ */
+function makeRejectedTask(err: Error) {
+  const promise = Promise.reject(err);
+  promise.catch(() => undefined);
+  return { promise, cancel: jest.fn() };
+}
+
 async function waitUntil(predicate: () => boolean): Promise<void> {
   for (let i = 0; i < 50; i++) {
     if (predicate()) {
@@ -114,6 +127,38 @@ test('start() on a receive transfer with no registered source fails without call
   expect(TransferStreamManager.getState()).toMatchObject({ transferId: 3, status: 'failed' });
 });
 
+test('start() calls fired back-to-back do not both begin streaming', async () => {
+  // Regression test: start() only guarded against a concurrent call via
+  // `state`, which wasn't committed until after `await`ing the
+  // POST_NOTIFICATIONS permission request — a second start() call fired
+  // before that await resolved (e.g. from two TransferProgressDetail
+  // screens mounting in quick succession) would pass the guard checks too,
+  // and both would begin streaming.
+  let resolveFirst: () => void = () => {};
+  mockDownloadFile.mockReturnValueOnce(
+    makeTask(
+      new Promise<void>(resolve => {
+        resolveFirst = resolve;
+      }),
+    ),
+  );
+
+  const first = TransferStreamManager.start({ ...sendTransfer, id: 40 });
+  const second = TransferStreamManager.start({ ...sendTransfer, id: 41 });
+
+  // second is rejected synchronously, in the same tick as first's guard
+  // checks (before first's own first `await` yields back to the event
+  // loop) — this doesn't depend on first's continuation ever resuming.
+  await second;
+
+  await waitUntil(() => mockDownloadFile.mock.calls.length === 1);
+  expect(mockDownloadFile).toHaveBeenCalledTimes(1);
+  expect(TransferStreamManager.getState()?.transferId).toBe(40);
+
+  resolveFirst();
+  await first;
+});
+
 test('start() is a no-op while another transfer is already streaming', async () => {
   let resolveFirst: () => void = () => {};
   mockDownloadFile.mockReturnValueOnce(
@@ -146,7 +191,7 @@ test('start() does not restart a transfer that already ran to a terminal result'
 });
 
 test('a stream failure sets status "failed" with the error message', async () => {
-  mockDownloadFile.mockReturnValue(makeTask(Promise.reject(new ApiError('The file changed.', 400))));
+  mockDownloadFile.mockReturnValue(makeRejectedTask(new ApiError('The file changed.', 400)));
 
   await TransferStreamManager.start({ ...sendTransfer, id: 20 });
 
@@ -158,7 +203,7 @@ test('a stream failure sets status "failed" with the error message', async () =>
 });
 
 test('a 401 during streaming clears the session', async () => {
-  mockDownloadFile.mockReturnValue(makeTask(Promise.reject(new ApiError('Your session has expired.', 401))));
+  mockDownloadFile.mockReturnValue(makeRejectedTask(new ApiError('Your session has expired.', 401)));
 
   await TransferStreamManager.start({ ...sendTransfer, id: 21 });
 

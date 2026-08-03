@@ -241,6 +241,15 @@ class TransferService:
         name = (file_name or "").strip()
         if not name:
             raise ValidationError("file_name is required to propose an upload.")
+        # file_name is joined onto app_settings.download_directory as-is by
+        # TransferStreamService/resolve_available_path at upload time. Without
+        # this check, a path separator or drive letter here would let a
+        # proposed upload escape that directory (10_Security.md §10: directory
+        # traversal must be prevented) — e.g. "../../evil.txt" or an absolute
+        # Windows path. Rejecting anything but a plain file name is required,
+        # not just a stricter-than-necessary input rule.
+        if "/" in name or "\\" in name or ":" in name or name in (".", ".."):
+            raise ValidationError("file_name must be a plain file name, not a path.")
         if file_size is None or file_size < 0:
             raise ValidationError("file_size must be a non-negative integer to propose an upload.")
         return name, file_size

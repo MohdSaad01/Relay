@@ -189,12 +189,15 @@ def test_stream_download_rejects_second_concurrent_stream(db_session: Session, t
     service = TransferStreamService(db_session, registry)
     path = service.resolve_download_source(transfer)
 
-    first = service.stream_download(transfer, path)
-    next(first)  # acquires the registry slot
+    first = service.stream_download(transfer, path)  # acquires the registry slot immediately
 
-    second = service.stream_download(transfer, path)
+    # The conflict must surface from the call itself, not from the first
+    # next() on the returned generator: the route hands this return value
+    # straight to StreamingResponse, which sends its 200 status/headers
+    # before ever pulling a chunk from the iterator. A conflict raised only
+    # on first iteration would arrive too late to become a clean 409.
     with pytest.raises(ConflictError):
-        next(second)
+        service.stream_download(transfer, path)
 
     first.close()
 

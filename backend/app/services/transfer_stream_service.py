@@ -109,15 +109,28 @@ class TransferStreamService:
         return media_type or "application/octet-stream"
 
     def stream_download(self, transfer: Transfer, file_path: str) -> Iterator[bytes]:
-        """Yield the file's bytes in fixed-size chunks, updating progress and
+        """Acquire the active-stream guard, then return a generator that
+        yields the file's bytes in fixed-size chunks, updating progress and
         the transfer's terminal status as it goes.
 
-        This is a generator: none of this runs until the caller starts
-        iterating it, which is when the active-stream guard is acquired.
+        The guard is acquired here, eagerly, rather than inside the
+        generator body: the route passes our return value straight into
+        StreamingResponse, which sends its 200 status and headers before
+        ever pulling the first chunk from the iterator. Raising
+        ConflictError from inside the generator would therefore happen
+        *after* the client already received a 200 — too late for the
+        centralized exception handlers to turn it into a clean 409. Raising
+        it here, in a plain method call the route makes before constructing
+        the response, lets it propagate the normal way.
         """
         transfer_id = transfer.id
-        chunk_size = get_settings().STREAM_CHUNK_SIZE_BYTES
         self.active_stream_registry.acquire(transfer_id)
+        return self._generate_download(transfer_id, file_path)
+
+    def _generate_download(self, transfer_id: int, file_path: str) -> Iterator[bytes]:
+        """The actual chunked read loop. Assumes the caller already acquired
+        the active-stream guard; always releases it exactly once, on exit."""
+        chunk_size = get_settings().STREAM_CHUNK_SIZE_BYTES
         bytes_sent = 0
         bytes_since_update = 0
         try:

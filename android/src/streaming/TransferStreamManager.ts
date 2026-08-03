@@ -32,6 +32,14 @@ type Listener = () => void;
 
 let state: StreamState | null = null;
 let activeTask: StreamTask | null = null;
+// True from the moment a start() call has passed its guard checks until it
+// has committed `state` — closes the race where a second start() call is
+// invoked before the first one's own first `await` (the notification
+// permission request, below) yields back to the event loop. Without this,
+// two calls fired back-to-back both pass the state-based guards and both
+// begin streaming, breaking the one-active-stream-at-a-time invariant this
+// module documents above.
+let starting = false;
 const listeners = new Set<Listener>();
 
 function notify(): void {
@@ -67,7 +75,7 @@ export const TransferStreamManager = {
    * restarted the next time its detail screen regains focus.
    */
   async start(transfer: TransferResponse): Promise<void> {
-    if (state?.status === 'streaming') {
+    if (state?.status === 'streaming' || starting) {
       return;
     }
     if (state?.transferId === transfer.id) {
@@ -88,6 +96,8 @@ export const TransferStreamManager = {
       return;
     }
 
+    starting = true;
+
     // Requested here, not at app launch — the one moment this app actually
     // needs it, per the approved design's Permissions section. Best-effort:
     // a denial doesn't block starting the service, it just means Android
@@ -104,6 +114,9 @@ export const TransferStreamManager = {
       status: 'streaming',
       error: null,
     });
+    // From here on, state.status === 'streaming' is itself a sufficient
+    // guard against a concurrent start() call — see the top of this method.
+    starting = false;
 
     await startTransferNotification(transfer.file_name, 0);
 

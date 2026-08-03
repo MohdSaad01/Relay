@@ -1,7 +1,7 @@
 "use strict";
 
 import { api, ApiError } from "../api/client.js";
-import { escapeHtml, renderError } from "../dom.js";
+import { escapeHtml, renderError, parseApiDateTime } from "../dom.js";
 
 const POLL_INTERVAL_MS = 1500;
 
@@ -37,6 +37,7 @@ async function startPairing(controller) {
   try {
     const { data } = await api.post("/pairing/start");
     controller.token = data.qr.pairing_token;
+    controller.expiresAt = data.expires_at;
     const qrDataUrl = await window.relay.generateQrCode(data.qr);
     renderWaiting(container, qrDataUrl, data.expires_at);
 
@@ -53,7 +54,7 @@ function renderWaiting(container, qrDataUrl, expiresAt) {
     <h2>Pair a Device</h2>
     <img class="qr-code" src="${qrDataUrl}" alt="Pairing QR code" />
     <p>Scan this code from the Relay Android app.</p>
-    <p class="muted">Expires at ${new Date(expiresAt).toLocaleTimeString()}</p>
+    <p class="muted">Expires at ${parseApiDateTime(expiresAt).toLocaleTimeString()}</p>
     <p id="pairing-status">Waiting for a device to scan...</p>
   `;
 }
@@ -66,12 +67,33 @@ async function pollPending(controller) {
     renderReview(controller, pending);
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
-      // Nobody has submitted a request against this attempt yet; keep waiting.
+      // The backend can't distinguish "nobody has submitted yet" from "this
+      // attempt expired" (both 404, by design - see PairingService.get_pending_request).
+      // The client knows expiresAt from the /pairing/start response, so it's
+      // the one place that can tell the two apart and stop polling a dead QR code.
+      if (controller.expiresAt && Date.now() >= parseApiDateTime(controller.expiresAt).getTime()) {
+        controller.setPollTimer(null);
+        renderExpired(controller);
+        return;
+      }
       return;
     }
     controller.setPollTimer(null);
     renderError(controller.container, err);
   }
+}
+
+function renderExpired(controller) {
+  controller.token = null;
+  controller.expiresAt = null;
+  controller.container.innerHTML = `
+    <h2>Pair a Device</h2>
+    <p>This pairing attempt expired before a device scanned it.</p>
+    <button id="start-pairing">Start New Pairing</button>
+  `;
+  controller.container
+    .querySelector("#start-pairing")
+    .addEventListener("click", () => startPairing(controller));
 }
 
 function renderReview(controller, pending) {

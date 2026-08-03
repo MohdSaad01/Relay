@@ -49,6 +49,14 @@ class AuthService:
         now = utc_now()
         if session.expires_at <= now:
             self.device_session_repository.delete(session)
+            # Unlike the last_used_at/last_seen_at bookkeeping below, this
+            # delete has nothing else to ride along with: authentication
+            # fails here, so no route-level service ever runs to commit it.
+            # Without an explicit commit, get_db() closes the session on the
+            # way out and the delete is silently rolled back, so the expired
+            # row would never actually be removed (13_Database_Design.md §5:
+            # expired sessions must be "deleted outright").
+            self.db.commit()
             raise AuthenticationError(_INVALID_TOKEN_MESSAGE)
 
         device = session.device

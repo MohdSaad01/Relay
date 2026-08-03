@@ -63,6 +63,26 @@ def test_authenticate_raises_and_deletes_expired_session(db_session: Session) ->
     assert DeviceSessionRepository(db_session).get_by_id(session_id) is None
 
 
+def test_authenticate_expired_session_delete_survives_rollback(db_session: Session) -> None:
+    """The expired-session delete must actually commit: authenticate() fails
+    before any route-level service ever runs, so there is no other commit
+    for it to ride along with. Without its own commit, get_db() closing the
+    request's Session on the way out would silently roll the delete back,
+    and the row would never actually be removed
+    (13_Database_Design.md §5: expired sessions are "deleted outright"). A
+    rollback immediately afterward proves the delete already made it past
+    the transaction boundary rather than merely being staged."""
+    service = AuthService(db_session)
+    _, session = _paired_device_with_session(db_session, "expired-token", expired=True)
+    session_id = session.id
+
+    with pytest.raises(AuthenticationError):
+        service.authenticate("expired-token")
+    db_session.rollback()
+
+    assert DeviceSessionRepository(db_session).get_by_id(session_id) is None
+
+
 def test_authenticate_updates_last_used_and_last_seen(db_session: Session) -> None:
     service = AuthService(db_session)
     device, session = _paired_device_with_session(db_session, "valid-token")

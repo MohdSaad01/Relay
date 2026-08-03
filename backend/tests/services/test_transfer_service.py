@@ -71,6 +71,32 @@ def test_request_transfer_upload_requires_file_name_and_size(db_session: Session
         service.request_transfer(device, TransferDirection.RECEIVE, None, "photo.jpg", None)
 
 
+@pytest.mark.parametrize(
+    "file_name",
+    [
+        "../evil.txt",
+        "..\\evil.txt",
+        "subdir/evil.txt",
+        "subdir\\evil.txt",
+        "/etc/passwd",
+        "C:\\Windows\\System32\\evil.txt",
+        "C:evil.txt",
+        "..",
+    ],
+)
+def test_request_transfer_upload_rejects_path_like_file_name(
+    db_session: Session, file_name: str
+) -> None:
+    """A malicious file_name must never reach resolve_available_path's
+    os.path.join with app_settings.download_directory (10_Security.md §10:
+    directory traversal must be prevented)."""
+    device = _register_device(db_session)
+    service = _service(db_session)
+
+    with pytest.raises(ValidationError):
+        service.request_transfer(device, TransferDirection.RECEIVE, None, file_name, 1024)
+
+
 def test_request_transfer_upload_creates_pending_request(db_session: Session) -> None:
     device = _register_device(db_session)
     service = _service(db_session)

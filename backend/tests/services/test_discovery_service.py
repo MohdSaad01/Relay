@@ -111,6 +111,23 @@ def test_broadcast_once_sends_nothing_when_discovery_disabled(
     fake_socket.sendto.assert_not_called()
 
 
+def test_broadcast_once_creates_settings_row_on_first_tick_against_fresh_db(
+    session_factory: sessionmaker,
+) -> None:
+    """Regression test: on a brand-new database with no app_settings row yet,
+    AppSettingsService.get_settings() creates and commits the singleton row.
+    SessionLocal's default expire_on_commit=True then expires that object's
+    attributes, so reading them after _broadcast_once's own db.close() must
+    not raise DetachedInstanceError -- it previously did, on every fresh
+    install's very first broadcast tick."""
+    service = DiscoveryService(session_factory=session_factory)
+    fake_socket = MagicMock()
+
+    service._broadcast_once(fake_socket, get_settings())  # must not raise
+
+    fake_socket.sendto.assert_called_once()
+
+
 def test_broadcast_once_sends_expected_payload_when_enabled(
     session_factory: sessionmaker,
 ) -> None:

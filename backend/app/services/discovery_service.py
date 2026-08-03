@@ -136,17 +136,25 @@ class DiscoveryService:
         db = self._session_factory()
         try:
             app_settings = AppSettingsService(db).get_settings()
+            # Read the fields this method needs while the session is still
+            # open. On the very first tick against a fresh database,
+            # get_settings() creates and commits the singleton row, which
+            # (SessionLocal's default expire_on_commit=True) expires its
+            # attributes — accessing them after db.close() below would raise
+            # DetachedInstanceError instead of returning a value.
+            discovery_enabled = app_settings.discovery_enabled
+            device_display_name = app_settings.device_display_name
         finally:
             db.close()
 
-        if not app_settings.discovery_enabled:
+        if not discovery_enabled:
             return
 
         payload = DiscoveryAnnouncePayload(
             protocol_version=settings.DISCOVERY_PROTOCOL_VERSION,
             relay_version=settings.APP_VERSION,
             instance_id=self.instance_id,
-            device_display_name=app_settings.device_display_name,
+            device_display_name=device_display_name,
             desktop_ip=get_local_ip_address(),
             port=settings.PORT,
         )

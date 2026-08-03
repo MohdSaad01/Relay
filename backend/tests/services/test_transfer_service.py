@@ -264,3 +264,47 @@ def test_cancel_transfer_raises_when_already_terminal(db_session: Session) -> No
 
     with pytest.raises(ConflictError):
         service.cancel_transfer(transfer.id, None)
+
+
+# --- reconcile_interrupted_transfers ---------------------------------------------
+
+
+def test_reconcile_interrupted_transfers_marks_stuck_transfers_failed(db_session: Session) -> None:
+    """Reproduces the T7 finding: a transfer an unclean shutdown left
+    IN_PROGRESS has no ActiveStreamRegistry entry and no TransferManager
+    state in a freshly started process -- nothing will ever move it out of
+    IN_PROGRESS on its own. Without this reconciliation, GET /transfers/{id}
+    would report IN_PROGRESS forever."""
+    device = _register_device(db_session)
+    service = _service(db_session)
+    request = service.request_transfer(device, TransferDirection.RECEIVE, None, "a.jpg", 100)
+    stuck = service.accept_request(request.request_id)
+    assert stuck.status is TransferStatus.IN_PROGRESS
+
+    reconciled_count = service.reconcile_interrupted_transfers()
+
+    assert reconciled_count == 1
+    refreshed = service.get_transfer_or_raise(stuck.id, None)
+    assert refreshed.status is TransferStatus.FAILED
+    assert refreshed.failure_reason == "Interrupted by backend restart."
+    assert refreshed.completed_at is not None
+
+
+def test_reconcile_interrupted_transfers_leaves_terminal_transfers_untouched(db_session: Session) -> None:
+    device = _register_device(db_session)
+    service = _service(db_session)
+    request = service.request_transfer(device, TransferDirection.RECEIVE, None, "a.jpg", 100)
+    transfer = service.accept_request(request.request_id)
+    cancelled = service.cancel_transfer(transfer.id, None)
+
+    reconciled_count = service.reconcile_interrupted_transfers()
+
+    assert reconciled_count == 0
+    refreshed = service.get_transfer_or_raise(cancelled.id, None)
+    assert refreshed.status is TransferStatus.CANCELLED
+
+
+def test_reconcile_interrupted_transfers_returns_zero_when_nothing_stuck(db_session: Session) -> None:
+    service = _service(db_session)
+
+    assert service.reconcile_interrupted_transfers() == 0

@@ -122,6 +122,31 @@ def test_reject_pairing_then_result_returns_400(client: TestClient) -> None:
     assert result_response.status_code == 400
 
 
+def test_approved_result_still_collectible_after_new_pairing_started(client: TestClient) -> None:
+    """A new pairing attempt must not strand a just-approved device.
+
+    Regression for a T5 integration defect: PairingManager.start() used to
+    unconditionally discard the previous attempt, including one already
+    APPROVED (and therefore already registered in the database) but not yet
+    collected by Android. If the desktop user started a new pairing attempt
+    in that window, the original device's one-time credentials were lost
+    forever -- Android got a 404 indistinguishable from "still pending", and
+    re-pairing the same device_identifier was permanently blocked by the
+    already-registered check below.
+    """
+    first_token = _start(client)
+    _submit(client, first_token)
+    client.post("/api/v1/pairing/approve", json={"pairing_token": first_token})
+
+    _start(client)
+
+    result_response = client.get(f"/api/v1/pairing/result/{first_token}")
+    assert result_response.status_code == 200
+    result_data = result_response.json()["data"]
+    assert result_data["device_secret"]
+    assert result_data["session_token"]
+
+
 def test_submit_request_conflicts_for_already_paired_device(client: TestClient) -> None:
     first_token = _start(client)
     _submit(client, first_token)

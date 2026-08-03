@@ -83,11 +83,22 @@ class BackendManager {
    * Packaging milestone). This assumes a single packaged executable bundled
    * at resources/backend/relay-backend.exe alongside the Electron app —
    * only this one path needs to change once that milestone lands.
+   *
+   * The packaged backend is launched with RELAY_DATA_DIR set to this app's
+   * own userData directory, so its SQLite database and logs land in the
+   * local app data directory rather than inside the install directory
+   * (docs/12_Packaging_Deployment.md, "Windows Data Storage") — the same
+   * directory this process's own Logger already uses.
    */
   resolveCommand() {
     if (app.isPackaged) {
       const exe = path.join(process.resourcesPath, "backend", "relay-backend.exe");
-      return { command: exe, args: ["--port", String(this.port)], cwd: path.dirname(exe) };
+      return {
+        command: exe,
+        args: ["--port", String(this.port)],
+        cwd: path.dirname(exe),
+        env: { ...process.env, RELAY_DATA_DIR: app.getPath("userData") },
+      };
     }
 
     const backendDir = path.join(__dirname, "..", "..", "..", "backend");
@@ -119,10 +130,10 @@ class BackendManager {
   }
 
   spawnProcess() {
-    const { command, args, cwd } = this.resolveCommand();
+    const { command, args, cwd, env } = this.resolveCommand();
     this.logger.info(`Starting backend: ${command} ${args.join(" ")} (cwd=${cwd})`);
 
-    const proc = spawn(command, args, { cwd, windowsHide: true });
+    const proc = spawn(command, args, { cwd, env, windowsHide: true });
     this.process = proc;
 
     proc.stdout.on("data", (chunk) => this.logger.backend(chunk.toString().trimEnd()));

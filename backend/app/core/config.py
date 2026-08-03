@@ -1,8 +1,34 @@
 """Application configuration loaded from environment variables."""
 
+import os
 from functools import lru_cache
+from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _default_database_url() -> str:
+    """Default DATABASE_URL: under RELAY_DATA_DIR when set, else today's
+    dev-mode relative path (docs/12_Packaging_Deployment.md, "Windows Data
+    Storage": user data belongs in the local app data directory, separate
+    from application binaries). The packaged desktop app sets RELAY_DATA_DIR
+    to Electron's `app.getPath("userData")`; nothing sets it in dev, so
+    local development is unaffected. An explicit DATABASE_URL (env var or
+    .env) always takes priority over this default.
+    """
+    data_dir = os.environ.get("RELAY_DATA_DIR")
+    if data_dir:
+        return f"sqlite:///{(Path(data_dir) / 'relay.db').as_posix()}"
+    return "sqlite:///./relay.db"
+
+
+def _default_log_dir() -> str:
+    """Default LOG_DIR, mirroring `_default_database_url`'s RELAY_DATA_DIR handling."""
+    data_dir = os.environ.get("RELAY_DATA_DIR")
+    if data_dir:
+        return str(Path(data_dir) / "logs")
+    return "logs"
 
 
 class Settings(BaseSettings):
@@ -22,10 +48,10 @@ class Settings(BaseSettings):
     PORT: int = 8000
     DEBUG: bool = True
 
-    DATABASE_URL: str = "sqlite:///./relay.db"
+    DATABASE_URL: str = Field(default_factory=_default_database_url)
 
     LOG_LEVEL: str = "INFO"
-    LOG_DIR: str = "logs"
+    LOG_DIR: str = Field(default_factory=_default_log_dir)
 
     # Pairing (10_Security.md §6): short-lived, single-use handshake tokens.
     # A security parameter, not a user-editable preference, so it lives here

@@ -79,12 +79,24 @@ class PairingManager:
         self._lock = threading.Lock()
 
     def start(self, attempt: PairingAttempt) -> None:
-        """Store a new pairing attempt, discarding any previous one.
+        """Store a new pairing attempt, discarding any previous in-flight one.
 
-        Only one pairing attempt is active at a time in Version 1.
+        Only one pairing attempt is active (PENDING/AWAITING_APPROVAL) at a
+        time in Version 1. A prior attempt already in a terminal state
+        (APPROVED/REJECTED) is deliberately kept rather than discarded here:
+        an APPROVED attempt's device/session were already committed to the
+        database by the time it reached this store, so dropping it before
+        Android calls collect_result() would strand a registered device with
+        credentials nobody can ever retrieve (and no way to re-pair, since
+        the device is already registered). Terminal attempts are still
+        bounded in lifetime via the existing expiry eviction below.
         """
         with self._lock:
-            self._attempts.clear()
+            self._attempts = {
+                token: existing
+                for token, existing in self._attempts.items()
+                if existing.status in (PairingStatus.APPROVED, PairingStatus.REJECTED)
+            }
             self._attempts[attempt.token] = attempt
 
     def get(self, token: str) -> PairingAttempt | None:

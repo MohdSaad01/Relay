@@ -37,7 +37,7 @@ def test_start_stores_new_attempt() -> None:
     assert manager.get(attempt.token) is attempt
 
 
-def test_start_discards_previous_attempt() -> None:
+def test_start_discards_previous_pending_attempt() -> None:
     manager = PairingManager()
     manager.start(_make_attempt(token="first"))
 
@@ -46,6 +46,53 @@ def test_start_discards_previous_attempt() -> None:
 
     assert manager.get("first") is None
     assert manager.get("second") is second
+
+
+def test_start_discards_previous_awaiting_approval_attempt() -> None:
+    manager = PairingManager()
+    first = _make_attempt(token="first")
+    manager.start(first)
+    manager.submit_request(first.token, _make_requesting_device())
+
+    manager.start(_make_attempt(token="second"))
+
+    assert manager.get("first") is None
+
+
+def test_start_preserves_uncollected_approved_attempt() -> None:
+    """A device/session already committed to the database on approval must stay
+    collectible even if the desktop starts a new pairing attempt before Android
+    calls collect_result() -- otherwise the device is stranded: registered, but
+    with credentials nobody can retrieve, and re-pairing blocked by the
+    already-registered check in PairingService.submit_pairing_request.
+    """
+    manager = PairingManager()
+    first = _make_attempt(token="first")
+    manager.start(first)
+    manager.submit_request(first.token, _make_requesting_device())
+    claimed = manager.claim_for_approval(first.token)
+    assert claimed is not None
+    claimed.status = PairingStatus.APPROVED
+    manager.store_approved(claimed)
+
+    manager.start(_make_attempt(token="second"))
+
+    assert manager.get("first") is claimed
+    collected = manager.collect_result("first")
+    assert collected is claimed
+
+
+def test_start_preserves_uncollected_rejected_attempt() -> None:
+    manager = PairingManager()
+    first = _make_attempt(token="first")
+    manager.start(first)
+    manager.submit_request(first.token, _make_requesting_device())
+    rejected = manager.reject(first.token)
+    assert rejected is not None
+
+    manager.start(_make_attempt(token="second"))
+
+    assert manager.get("first") is rejected
 
 
 def test_get_returns_none_for_unknown_token() -> None:

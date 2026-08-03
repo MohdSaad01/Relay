@@ -368,3 +368,43 @@ def test_receive_upload_stops_when_cancelled_at_a_checkpoint(
 
     assert updated.status is TransferStatus.CANCELLED  # not overwritten
     assert list(tmp_path.iterdir()) == []  # temp file discarded, nothing saved as photo.jpg
+
+
+# --- cleanup_orphaned_upload_temp_files (T7: process-recovery / temp-file leak) ---
+
+
+def test_cleanup_orphaned_upload_temp_files_removes_leftover_temp_file(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """Reproduces the T7 finding: a hard crash mid-upload skips receive_upload's
+    `finally` block entirely, so `_discard_temp_file` never runs -- unlike
+    every clean failure path (already covered by the tests above), which
+    does clean up. The temp file is left behind forever unless something
+    sweeps it at the next startup."""
+    _set_download_directory(db_session, tmp_path)
+    orphan = tmp_path / f"{transfer_stream_service._UPLOAD_TEMP_FILE_PREFIX}abc123"
+    orphan.write_bytes(b"partial upload data")
+    (tmp_path / "unrelated.txt").write_bytes(b"keep me")
+    service = _stream_service(db_session)
+
+    removed = service.cleanup_orphaned_upload_temp_files()
+
+    assert removed == 1
+    remaining = {p.name for p in tmp_path.iterdir()}
+    assert remaining == {"unrelated.txt"}
+
+
+def test_cleanup_orphaned_upload_temp_files_returns_zero_when_none_present(
+    db_session: Session, tmp_path: Path
+) -> None:
+    _set_download_directory(db_session, tmp_path)
+    service = _stream_service(db_session)
+
+    assert service.cleanup_orphaned_upload_temp_files() == 0
+
+
+def test_cleanup_orphaned_upload_temp_files_tolerates_missing_directory(db_session: Session, tmp_path: Path) -> None:
+    _set_download_directory(db_session, tmp_path / "does-not-exist-yet")
+    service = _stream_service(db_session)
+
+    assert service.cleanup_orphaned_upload_temp_files() == 0

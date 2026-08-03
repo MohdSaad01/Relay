@@ -218,6 +218,31 @@ class TransferService:
             raise NotFoundError(f"Transfer {transfer_id} was not found.")
         return transfer
 
+    def reconcile_interrupted_transfers(self) -> int:
+        """Mark any transfer left IN_PROGRESS by an unclean shutdown as FAILED.
+
+        Intended to be called once at backend startup (docs/09_Networking.md
+        §9: Relay "should gracefully handle... backend restarts"). A freshly
+        started process has an empty ActiveStreamRegistry and TransferManager
+        — nothing is actually streaming these rows anymore, and V1 has no
+        resume support (11_File_Transfer.md §16), so without this sweep an
+        interrupted transfer would stay IN_PROGRESS forever, misleading any
+        client still polling GET /transfers/{id}. Returns the number of
+        transfers reconciled.
+        """
+        stuck = self.transfer_repository.list_by_status(TransferStatus.IN_PROGRESS, limit=10_000)
+        for transfer in stuck:
+            transfer.status = TransferStatus.FAILED
+            transfer.completed_at = utc_now()
+            transfer.failure_reason = "Interrupted by backend restart."
+            self.transfer_repository.update(transfer)
+        if stuck:
+            self.db.commit()
+            logger.warning(
+                "Reconciled %s transfer(s) left in-progress by an unclean shutdown.", len(stuck)
+            )
+        return len(stuck)
+
     def cancel_transfer(self, transfer_id: int, requesting_device: Device | None) -> Transfer:
         """Cancel an in-progress transfer.
 

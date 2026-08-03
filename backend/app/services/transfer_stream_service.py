@@ -68,6 +68,13 @@ logger = logging.getLogger(__name__)
 # an accepted trade-off, not a correctness concern.
 _PROGRESS_UPDATE_INTERVAL_BYTES = 8 * 1_048_576  # 8 MiB
 
+# Prefix used for an in-progress upload's temp file (receive_upload below).
+# Also matched by cleanup_orphaned_upload_temp_files at startup: any file
+# under this prefix still present in the download directory can only be one
+# an unclean shutdown interrupted before its finally-block ran, since a
+# completed or cleanly-failed upload always renames or removes it.
+_UPLOAD_TEMP_FILE_PREFIX = ".relay-upload-"
+
 
 class TransferStreamService:
     """Business logic for streaming the bytes of an already-accepted transfer."""
@@ -203,7 +210,7 @@ class TransferStreamService:
             if not self._touch_progress(transfer_id, bytes_received):
                 return self._current(transfer_id)
 
-            fd, temp_path = tempfile.mkstemp(dir=download_directory, prefix=".relay-upload-")
+            fd, temp_path = tempfile.mkstemp(dir=download_directory, prefix=_UPLOAD_TEMP_FILE_PREFIX)
             with os.fdopen(fd, "wb") as temp_file:
                 async for chunk in body:
                     if not chunk:
@@ -256,6 +263,39 @@ class TransferStreamService:
         finally:
             self._discard_temp_file(temp_path)
             self.active_stream_registry.release(transfer_id)
+
+    def cleanup_orphaned_upload_temp_files(self) -> int:
+        """Remove any leftover upload temp file from an unclean shutdown.
+
+        Intended to be called once at backend startup, alongside
+        TransferService.reconcile_interrupted_transfers (same docs/09_Networking.md
+        §9 "backend restarts" requirement). A hard crash or kill -9 skips
+        receive_upload's `finally` block entirely, so `_discard_temp_file`
+        never runs for whatever chunk was mid-write — unlike every clean
+        failure path (oversized/undersized upload, disconnect, OSError),
+        which already deletes its own temp file. Any `_UPLOAD_TEMP_FILE_PREFIX`
+        file still present at startup is, by construction, orphaned: a
+        completed upload always renames it away via os.replace. Best-effort
+        and never raises, matching `_discard_temp_file`'s own policy — a
+        missing or unreadable download directory is not an error here.
+        """
+        download_directory = self.app_settings_service.get_settings().download_directory
+        removed = 0
+        try:
+            entries = os.listdir(download_directory)
+        except OSError:
+            return 0
+        for entry in entries:
+            if not entry.startswith(_UPLOAD_TEMP_FILE_PREFIX):
+                continue
+            try:
+                os.remove(os.path.join(download_directory, entry))
+                removed += 1
+            except OSError as exc:
+                logger.warning("Unable to remove orphaned upload temp file: name=%s error=%s", entry, exc)
+        if removed:
+            logger.warning("Removed %s orphaned upload temp file(s) left by an unclean shutdown.", removed)
+        return removed
 
     # --- Shared helpers ---------------------------------------------------------
 

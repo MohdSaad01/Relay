@@ -18,7 +18,14 @@ This repository contains Version 1 of Relay.
 
 # Current Repository State
 
-Relay has completed its specification phase and is in active backend implementation.
+Relay's Version 1 is **feature-complete**: the backend, the Electron desktop
+app, and the React Native Android app all implement the full pairing →
+discovery → share → transfer → stream flow (`git log`: `M14: Implement
+Electron desktop application`, `Complete Phase1` (Android client),
+`v1-feature-complete`). What remains is packaging/distribution
+(`docs/12_Packaging_Deployment.md`) and the enhancements listed under
+[Not Yet Implemented](#not-yet-implemented) — see `README.md` for the
+project-level overview and setup instructions for all three components.
 
 ## Completed Milestones
 
@@ -34,6 +41,10 @@ Relay has completed its specification phase and is in active backend implementat
 * **M10: Shared file management** — `SharedFileService` (`app/services/shared_file_service.py`) implements the desktop's shared-file list (`docs/13_Database_Design.md` §6): share/list/refresh/unshare, backed by pure filesystem helpers (`app/utils/filesystem.py`) that validate a path (absolute, exists, regular file, not a symlink) and stat its metadata — content is never opened or read at this stage. Exposed via `app/api/v1/shared_files.py` (`POST/GET /files`, `GET/POST(refresh)/DELETE /files/{id}`). `GET /files` is the first — and at the time, only — dual-audience route: it introduced `get_requesting_device`/`RequestingDeviceDep` (`app/api/dependencies.py`), which returns `None` for the trusted loopback desktop caller and otherwise requires the M9 `get_current_device` session check, giving Android a sanitized view (`AvailableFileResponse`, no `file_path`) while the desktop gets the full one. Every other route in this router is desktop-only and unauthenticated, matching `/devices`/`/settings`. See `backend/README.md` for full details.
 * **M11: Transfer API & orchestration** — `TransferService` (`app/services/transfer_service.py`) implements the two-phase transfer lifecycle from `docs/11_File_Transfer.md` §7: a paired Android device proposes a transfer (download of a shared file, or a proposed upload), the desktop accepts or rejects it, and only an accepted proposal becomes a persisted `Transfer` row. Pending proposals are runtime-only state — mirroring the M7 pairing-token pattern — held by `TransferManager` (`app/services/transfer_manager.py`), a lock-guarded in-memory store keyed by request id (unlike pairing's single active attempt, this supports many concurrent pending requests). Exposed via `app/api/v1/transfers.py` under `/transfers/requests` (propose/list/withdraw/accept/reject) and `/transfers` (list/get/cancel). This milestone does not move bytes: the only DB-level status transition it performs is `in_progress -> cancelled`. See `backend/README.md` for full details.
 * **M12: Streaming Engine** — `TransferStreamService` (`app/services/transfer_stream_service.py`) moves the actual bytes of an already-`in_progress` transfer (`docs/11_File_Transfer.md` §8), deliberately kept separate from M11's `TransferService`, which owns the lifecycle and is unchanged by this milestone. Downloads (`GET /transfers/{id}/download`, SEND) stream a shared file from disk via `StreamingResponse` with an explicit `Content-Length`, in chunks sized by the new `Settings.STREAM_CHUNK_SIZE_BYTES` (default 1 MiB). Uploads (`POST /transfers/{id}/upload`, RECEIVE) are the codebase's one `async def` route, since consuming the raw ASGI request body requires `await`; bytes are written to a temp file in `app_settings.download_directory` and atomically renamed into place only once the declared `file_size` is fully received. A filename conflict on upload is resolved automatically (`name (1).ext`, `name (2).ext`, ... — `app/utils/filesystem.resolve_available_path`), and the resulting saved name is written back onto `Transfer.file_name`, a deliberate, narrow exception to that column's immutability documented in `docs/13_Database_Design.md` §7. Cancellation of an active stream is cooperative (periodic status re-check, not preemptive), and a new `ActiveStreamRegistry` (`app/services/active_stream_registry.py`, same in-memory singleton pattern as `PairingManager`/`TransferManager`) rejects a second concurrent stream on the same transfer. Both streaming routes require `CurrentDeviceDep` outright (Android-only, no desktop/loopback exemption). Out of scope, per this milestone's explicit boundaries: resume/`Range` support, checksums, compression, encryption, WebSockets. See `backend/README.md` for full details.
+* **M13: Device Discovery** — `DiscoveryService` (`app/services/discovery_service.py`) lets Android find the desktop automatically, per `docs/09_Networking.md` §4. Version 1 uses UDP broadcast (not mDNS/Zeroconf) — a credential-free `DiscoveryAnnouncePayload` is broadcast periodically to the LAN broadcast address on `Settings.DISCOVERY_PORT`. Unlike every other service in the codebase, it is not request-scoped: it starts/stops once with the app's `lifespan` and runs its own daemon thread. Exposed read-only via `GET /discovery/status` (`app/api/v1/discovery.py`); toggling it remains `PATCH /settings` (`app_settings.discovery_enabled`). See `backend/README.md` for full details.
+* **M14: Electron Desktop Application** — `desktop/` is the Electron shell that makes the backend a real desktop app instead of a bare `uvicorn` process. The main process (`desktop/src/main/backend-manager.js`) starts and stops the FastAPI backend as a child process alongside the Electron app's own lifecycle, adds a system tray (`tray.js`, `scripts/generate_tray_icon.js`), and exposes backend access to the renderer through a preload bridge (`src/preload/preload.js`) and IPC handlers (`src/main/ipc-handlers.js`). The renderer (`src/renderer/`) is plain HTML/CSS/JS (no framework, per the finalized tech stack) with one view module per resource — `devices.js`, `files.js`, `pairing.js`, `settings.js`, `transfers.js` — talking to the backend through `src/renderer/api/client.js`. No backend business logic lives in this layer; it is strictly a host and a UI.
+* **Android Client ("Complete Phase1")** — `android/` is the React Native (TypeScript) app that pairs with the desktop and drives transfers from the phone side, organized to mirror the backend's own domains: `src/discovery/` (listens for the M13 UDP broadcast), `src/pairing/` (QR scan, submit/poll the M7/M8 handshake), `src/session/` (stores the device secret/session token via `react-native-keychain`), `src/files/` (lists shared files), `src/transfers/` and `src/streaming/` (propose/accept-driven transfer requests and the actual upload/download byte streams, including a foreground service for long-running transfers), with `src/screens/` and `src/navigation/` wiring it into a tab/stack UI (`@react-navigation`). Ships with a Jest test suite (`android/__tests__/`) mirroring `src/`. A follow-up commit (`fix(android): close TransferStreamManager start() race condition`) hardened a startup race in `src/streaming/TransferStreamManager.ts` alongside matching backend fixes.
+* **v1-feature-complete** — final hardening pass tagged as the close of Version 1's feature work: additional config/service edge-case tests (`backend/tests/core/test_config.py` and others), small fixes to `PairingManager`, `TransferService`, and `TransferStreamService`, and a full rewrite of `docs/14_Testing_Plan.md` to match the finished feature set. No new endpoints or resources were added in this pass.
 
 ## Current Architecture
 
@@ -43,12 +54,13 @@ The backend follows the layered design in `docs/02_Architecture.md`:
 API Layer → Service Layer → Repository Layer → SQLAlchemy Models
 ```
 
-Implemented resources: `Devices`, `AppSettings`, `Pairing`, `Shared Files`,
-`Transfers` (including byte streaming). `Devices`, `Settings`, and `Pairing`
-remain fully unauthenticated — the desktop's own Electron UI always calls
-them over loopback. `Shared Files` and `Transfers` enforce the M9
-`DeviceSession` bearer-token check (`AuthService`, `get_current_device`/
-`CurrentDeviceDep`, `get_requesting_device`/`RequestingDeviceDep` in
+Implemented resources: `Devices`, `AppSettings`, `Pairing`, `Discovery`,
+`Shared Files`, `Transfers` (including byte streaming). `Devices`,
+`Settings`, `Pairing`, and `Discovery` remain fully unauthenticated — the
+desktop's own Electron UI always calls them over loopback. `Shared Files`
+and `Transfers` enforce the M9 `DeviceSession` bearer-token check
+(`AuthService`, `get_current_device`/`CurrentDeviceDep`,
+`get_requesting_device`/`RequestingDeviceDep` in
 `app/api/dependencies.py`) for any non-loopback caller — `GET /files` and
 the dual-audience `/transfers` routes accept the trusted desktop caller or
 a session token; the Android-only proposal and byte-streaming routes
@@ -56,20 +68,28 @@ a session token; the Android-only proposal and byte-streaming routes
 `GET /transfers/{id}/download`, `POST /transfers/{id}/upload`) require a
 session token outright.
 
+The backend runs embedded inside the M14 Electron desktop app
+(`desktop/`), which starts/stops it automatically and provides the desktop
+UI. The Android client (`android/`, React Native/TypeScript) discovers the
+desktop via M13's UDP broadcast, pairs with it, and drives the transfer
+flow from the phone side. See `README.md` for the full three-component
+overview and per-component setup instructions.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)
 * WebSockets / real-time push (transfer progress is currently polled via `GET /transfers/{id}`)
-* Desktop (Electron) and Android clients
-* Whether `Devices`/`Settings`/`Pairing` should also require a paired-device session was raised during M9 and left open — revisit if Android is ever expected to call those routes directly
+* Packaging & distribution (`docs/12_Packaging_Deployment.md`): no PyInstaller (or equivalent) backend bundling, no `electron-builder` installer, no signed release APK — all three components currently run from source
+* Whether `Devices`/`Settings`/`Pairing`/`Discovery` should also require a paired-device session was raised during M9 and left open — revisit if Android is ever expected to call those routes directly
 
 ## Next Planned Milestone
 
-**Device Discovery** (`docs/09_Networking.md` §4) — automatic desktop/Android
-discovery over the local network (mDNS/Zeroconf vs. UDP broadcast to be
-evaluated during that milestone), the last major backend piece before the
-Electron and React Native clients have something to connect to
-automatically without manual configuration.
+**Packaging & Deployment** (`docs/12_Packaging_Deployment.md`) — the last
+major piece before Version 1 is distributable: bundling the FastAPI backend
+so it runs without a system Python install, packaging the Electron app into
+a Windows installer that starts the backend automatically, and producing a
+signed release APK for Android. The exact backend packaging tool
+(PyInstaller or an equivalent) is still to be selected, per that document.
 
 ## Documentation
 

@@ -77,6 +77,18 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
+    // Autolinked native modules (react-native-screens, react-native-gesture-handler, ...)
+    // declare externalNativeBuild.cmake without pinning a version, and the New
+    // Architecture's combined codegen build (owned by :app) inherits that gap too, so AGP
+    // falls back to its bundled default CMake (3.22.1) and reinstalls it on every sync.
+    // Pinning it here forces the single :app-owned CMake build to use the newer CMake
+    // already installed instead.
+    externalNativeBuild {
+        cmake {
+            version "4.1.2"
+        }
+    }
+
     namespace "com.relay.mobile"
     defaultConfig {
         applicationId "com.relay.mobile"

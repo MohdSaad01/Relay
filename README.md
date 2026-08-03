@@ -115,6 +115,11 @@ device) — see the React Native docs linked in `android/README.md`. The app
 must be on the same Wi-Fi network or hotspot as the desktop to discover and
 pair with it.
 
+**Building on Windows:** also requires JDK 17, Windows Long Paths enabled,
+and CMake 4.1.2 installed via the Android SDK Manager — see
+"Windows: native build requirements" in `android/README.md` for why, and
+for the native-build root cause these address.
+
 Run tests: `npm test` (from `android/`). Lint: `npm run lint`. Type-check: `npm run typecheck`.
 
 ## API Overview

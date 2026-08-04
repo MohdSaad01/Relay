@@ -26,6 +26,16 @@ describe('downloadFile', () => {
     expect(ReactNativeBlobUtil.fs.unlink).toHaveBeenCalledWith('/dest/a.txt');
   });
 
+  test('rejects with the backend message when the error body has one', async () => {
+    const { promise } = downloadFile('http://x/transfers/1/download', {}, '/dest/a.txt', jest.fn());
+    lastTask().__resolve(400, { message: 'The source file is no longer available.' });
+
+    await expect(promise).rejects.toMatchObject({
+      status: 400,
+      message: 'The source file is no longer available.',
+    });
+  });
+
   test('reports progress via the progress callback', () => {
     const onProgress = jest.fn();
     downloadFile('http://x/transfers/1/download', {}, '/dest/a.txt', onProgress);

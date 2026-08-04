@@ -8,46 +8,69 @@ import {
   Text,
   View,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { useSharedFiles } from '../../files/useSharedFiles';
+import { deriveDownloadStatus, FileDownloadStatus } from '../../files/downloadStatus';
+import { useTransferRequests } from '../../transfers/useTransferRequests';
+import { useTransfers } from '../../transfers/useTransfers';
 import { proposeTransfer } from '../../api/endpoints/transfers';
 import { ApiError } from '../../api/client';
 import { AvailableFileResponse } from '../../api/types';
 import { formatFileSize } from '../../utils/formatFileSize';
 
-type DownloadStatus = 'idle' | 'requesting' | 'requested' | 'error';
+const POLL_INTERVAL_MS = 2000;
 
 /**
  * Browses the desktop's shared file list and lets the user *initiate* a
- * download. "Initiate" is the operative word — tapping Download only
- * proposes the transfer (POST /transfers/requests), which is as far as this
- * milestone goes. Tracking its acceptance, progress, and the actual byte
- * stream belongs to the transfers milestone; this screen doesn't attempt
- * any of that, it just reuses the already-built proposeTransfer endpoint
- * function as the literal "initiation" action.
+ * download. Tapping Download only proposes the transfer (POST
+ * /transfers/requests) — from there, this screen's per-file status is
+ * derived from the same pending-requests/transfers lists TransferListScreen
+ * polls (see downloadStatus.ts), rather than a local flag that only ever
+ * reflected the propose call's own success/failure.
  */
 export function FilesScreen() {
   const { files, loading, refreshing, error, refresh } = useSharedFiles();
-  const [downloadStatus, setDownloadStatus] = useState<Record<number, DownloadStatus>>({});
-  const [downloadError, setDownloadError] = useState<Record<number, string>>({});
+  const { requests, refresh: refreshRequests } = useTransferRequests();
+  const { transfers, refresh: refreshTransfers } = useTransfers();
+  const [requestingIds, setRequestingIds] = useState<Record<number, boolean>>({});
+  const [requestErrors, setRequestErrors] = useState<Record<number, string>>({});
 
-  const handleDownload = useCallback(async (file: AvailableFileResponse) => {
-    setDownloadStatus(prev => ({ ...prev, [file.id]: 'requesting' }));
-    setDownloadError(prev => {
-      const next = { ...prev };
-      delete next[file.id];
-      return next;
-    });
-    try {
-      await proposeTransfer({ direction: 'send', shared_file_id: file.id });
-      setDownloadStatus(prev => ({ ...prev, [file.id]: 'requested' }));
-    } catch (err) {
-      setDownloadStatus(prev => ({ ...prev, [file.id]: 'error' }));
-      setDownloadError(prev => ({
-        ...prev,
-        [file.id]: err instanceof ApiError ? err.message : 'Could not request this download.',
-      }));
-    }
-  }, []);
+  useFocusEffect(
+    useCallback(() => {
+      const timer = setInterval(() => {
+        refreshRequests();
+        refreshTransfers();
+      }, POLL_INTERVAL_MS);
+      return () => clearInterval(timer);
+    }, [refreshRequests, refreshTransfers]),
+  );
+
+  const handleDownload = useCallback(
+    async (file: AvailableFileResponse) => {
+      setRequestingIds(prev => ({ ...prev, [file.id]: true }));
+      setRequestErrors(prev => {
+        const next = { ...prev };
+        delete next[file.id];
+        return next;
+      });
+      try {
+        await proposeTransfer({ direction: 'send', shared_file_id: file.id });
+        await refreshRequests();
+      } catch (err) {
+        setRequestErrors(prev => ({
+          ...prev,
+          [file.id]: err instanceof ApiError ? err.message : 'Could not request this download.',
+        }));
+      } finally {
+        setRequestingIds(prev => {
+          const next = { ...prev };
+          delete next[file.id];
+          return next;
+        });
+      }
+    },
+    [refreshRequests],
+  );
 
   if (loading) {
     return (
@@ -71,8 +94,9 @@ export function FilesScreen() {
         renderItem={({ item }) => (
           <FileRow
             file={item}
-            status={downloadStatus[item.id] ?? 'idle'}
-            errorMessage={downloadError[item.id]}
+            requesting={requestingIds[item.id] ?? false}
+            requestError={requestErrors[item.id]}
+            status={deriveDownloadStatus(item.id, requests, transfers)}
             onDownload={() => handleDownload(item)}
           />
         )}
@@ -87,17 +111,36 @@ export function FilesScreen() {
   );
 }
 
+function downloadButtonLabel(requesting: boolean, status: FileDownloadStatus): string {
+  if (requesting) return '...';
+  switch (status.kind) {
+    case 'pending':
+      return 'Requested';
+    case 'in_progress':
+      return 'Downloading...';
+    case 'completed':
+      return 'Downloaded';
+    default:
+      return 'Download';
+  }
+}
+
 function FileRow({
   file,
+  requesting,
+  requestError,
   status,
-  errorMessage,
   onDownload,
 }: {
   file: AvailableFileResponse;
-  status: DownloadStatus;
-  errorMessage?: string;
+  requesting: boolean;
+  requestError?: string;
+  status: FileDownloadStatus;
   onDownload: () => void;
 }) {
+  const disabled = requesting || status.kind === 'pending' || status.kind === 'in_progress' || status.kind === 'completed';
+  const errorMessage = requestError ?? (status.kind === 'failed' ? status.message ?? 'This download failed.' : undefined);
+
   return (
     <View style={styles.row}>
       <View style={styles.rowInfo}>
@@ -108,16 +151,14 @@ function FileRow({
           {formatFileSize(file.file_size)}
           {file.mime_type ? ` · ${file.mime_type}` : ''}
         </Text>
-        {status === 'error' && errorMessage && <Text style={styles.rowError}>{errorMessage}</Text>}
+        {errorMessage && <Text style={styles.rowError}>{errorMessage}</Text>}
       </View>
       <Pressable
-        style={[styles.downloadButton, status === 'requested' && styles.downloadButtonDone]}
+        style={[styles.downloadButton, status.kind === 'completed' && styles.downloadButtonDone]}
         onPress={onDownload}
-        disabled={status === 'requesting' || status === 'requested'}
+        disabled={disabled}
       >
-        <Text style={styles.downloadButtonText}>
-          {status === 'requesting' ? '...' : status === 'requested' ? 'Requested' : 'Download'}
-        </Text>
+        <Text style={styles.downloadButtonText}>{downloadButtonLabel(requesting, status)}</Text>
       </Pressable>
     </View>
   );

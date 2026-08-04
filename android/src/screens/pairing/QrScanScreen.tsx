@@ -28,9 +28,15 @@ export function QrScanScreen() {
   // read inside the callback's closure would still see the stale value.
   const isSubmittingRef = useRef(false);
 
+  // TEMP DEBUG LOGGING — remove after pairing QR pipeline is diagnosed.
+  useEffect(() => {
+    console.log('[QR-DEBUG] 1. QrScanScreen mounted');
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.CAMERA).then(result => {
+      console.log('[QR-DEBUG] 1b. Camera permission result:', result);
       if (!cancelled) {
         setPermission(result === PermissionsAndroid.RESULTS.GRANTED ? 'granted' : 'denied');
       }
@@ -40,12 +46,25 @@ export function QrScanScreen() {
     };
   }, []);
 
+  // TEMP DEBUG LOGGING
+  useEffect(() => {
+    if (permission === 'granted') {
+      console.log('[QR-DEBUG] 2. Rendering <Camera> (permission granted)');
+    }
+  }, [permission]);
+
   const handleReadCode = useCallback(
     async (event: { nativeEvent: { codeStringValue: string } }) => {
+      // TEMP DEBUG LOGGING
+      console.log('[QR-DEBUG] 4. onReadCode fired (QR detected)');
       if (isSubmittingRef.current) {
+        console.log('[QR-DEBUG] 4b. Ignored — already submitting');
         return;
       }
       setError(null);
+
+      // TEMP DEBUG LOGGING
+      console.log('[QR-DEBUG] 5. Raw QR payload:', event.nativeEvent.codeStringValue);
 
       let desktopBaseUrl: string;
       let pairingToken: string;
@@ -53,7 +72,11 @@ export function QrScanScreen() {
         const qr = parsePairingQrPayload(event.nativeEvent.codeStringValue);
         desktopBaseUrl = buildDesktopBaseUrl(qr);
         pairingToken = qr.pairing_token;
+        // TEMP DEBUG LOGGING
+        console.log('[QR-DEBUG] 6. Payload parsed:', JSON.stringify(qr));
       } catch (err) {
+        // TEMP DEBUG LOGGING
+        console.error('[QR-DEBUG] 10. Exception parsing QR payload:', err);
         setError((err as Error).message);
         return;
       }
@@ -61,14 +84,20 @@ export function QrScanScreen() {
       isSubmittingRef.current = true;
       setSubmitting(true);
       try {
+        // TEMP DEBUG LOGGING
+        console.log('[QR-DEBUG] 7. Calling submitPairingRequest', { desktopBaseUrl, pairingToken });
         await submitPairingRequest(desktopBaseUrl, {
           pairing_token: pairingToken,
           device_identifier: generateDeviceIdentifier(),
           device_name: getDefaultDeviceName(),
           platform: 'android',
         });
+        // TEMP DEBUG LOGGING
+        console.log('[QR-DEBUG] 9c. submitPairingRequest succeeded, navigating to PairingWaiting');
         navigation.navigate('PairingWaiting', { desktopBaseUrl, pairingToken });
       } catch (err) {
+        // TEMP DEBUG LOGGING
+        console.error('[QR-DEBUG] 10. submitPairingRequest threw:', err);
         setError(err instanceof ApiError ? err.message : 'Could not reach that desktop.');
         isSubmittingRef.current = false;
         setSubmitting(false);
@@ -104,6 +133,13 @@ export function QrScanScreen() {
         allowedBarcodeTypes={['qr']}
         scanThrottleDelay={1000}
         onReadCode={handleReadCode}
+        // TEMP DEBUG LOGGING — react-native-camera-kit exposes no per-frame
+        // "detector received a frame" callback; onZoom firing "on startup"
+        // (per its own docs) and onLayout are the closest available proxies
+        // for "camera started". onError only fires on Android.
+        onLayout={() => console.log('[QR-DEBUG] 2b. Camera native view laid out')}
+        onZoom={e => console.log('[QR-DEBUG] 3. onZoom fired (proxy for camera started):', e.nativeEvent.zoom)}
+        onError={e => console.error('[QR-DEBUG] 10. Camera onError:', e.nativeEvent.errorMessage)}
       />
       {submitting && (
         <View style={styles.overlay}>

@@ -33,7 +33,14 @@ let evictionTimer: ReturnType<typeof setInterval> | null = null;
 const discovered = new Map<string, DiscoveredDesktop>();
 const listeners = new Set<Listener>();
 
+// useDiscovery() reads this via useSyncExternalStore, which requires
+// getSnapshot to return a referentially stable value when nothing has
+// changed — recomputing a fresh array on every call causes an infinite
+// render loop. Only rebuilt when `discovered` actually mutates, below.
+let snapshot: DiscoveredDesktop[] = [];
+
 function notify(): void {
+  snapshot = Array.from(discovered.values()).sort((a, b) => a.displayName.localeCompare(b.displayName));
   listeners.forEach(listener => listener());
 }
 
@@ -122,7 +129,7 @@ export const DiscoveryService = {
   },
 
   getDiscoveredDesktops(): DiscoveredDesktop[] {
-    return Array.from(discovered.values()).sort((a, b) => a.displayName.localeCompare(b.displayName));
+    return snapshot;
   },
 
   subscribe(listener: Listener): () => void {

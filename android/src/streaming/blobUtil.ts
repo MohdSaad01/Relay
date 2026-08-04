@@ -58,8 +58,9 @@ export function downloadFile(
       // The response body was already written to destPath regardless of
       // status (the library doesn't know it's an error until it's done) —
       // don't leave an error-body file behind masquerading as the download.
+      const message = (await extractMessage(response)) ?? describeStreamError(status);
       await ReactNativeBlobUtil.fs.unlink(destPath).catch(() => undefined);
-      throw new ApiError(describeStreamError(status), status);
+      throw new ApiError(message, status);
     }
   })();
 
@@ -85,16 +86,20 @@ export function uploadFile(
     const response = await task;
     const status = response.info().status;
     if (status < 200 || status >= 300) {
-      throw new ApiError(extractMessage(response) ?? describeStreamError(status), status);
+      throw new ApiError((await extractMessage(response)) ?? describeStreamError(status), status);
     }
   })();
 
   return { promise, cancel: () => task.cancel() };
 }
 
-function extractMessage(response: { json: () => unknown }): string | null {
+// response.json() is synchronous for the upload path's default response type,
+// but returns a Promise for the download path's 'path' response type (it reads
+// destPath off disk to parse it) — awaiting a non-Promise value is a no-op, so
+// this handles both without the caller needing to know which mode it's in.
+async function extractMessage(response: { json: () => unknown }): Promise<string | null> {
   try {
-    const body = response.json() as { message?: unknown };
+    const body = (await response.json()) as { message?: unknown };
     return typeof body.message === 'string' ? body.message : null;
   } catch {
     return null;

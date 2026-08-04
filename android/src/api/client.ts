@@ -63,10 +63,17 @@ async function request<T>(
     init.body = JSON.stringify(body);
   }
 
+  // TEMP DEBUG LOGGING — remove after pairing QR pipeline is diagnosed.
+  console.log('[QR-DEBUG] 8. HTTP request about to be sent:', method, `${baseUrl}${path}`, init.body);
+
   let response: Response;
   try {
     response = await fetch(`${baseUrl}${path}`, init);
+    // TEMP DEBUG LOGGING
+    console.log('[QR-DEBUG] 9. HTTP response received:', response.status, response.ok);
   } catch (err) {
+    // TEMP DEBUG LOGGING
+    console.error('[QR-DEBUG] 10. fetch() threw:', err);
     throw new ApiError(`Could not reach the backend: ${(err as Error).message}`, 0);
   }
 
@@ -74,7 +81,16 @@ async function request<T>(
     return undefined as T;
   }
 
-  const envelope = (await response.json()) as ApiResponse<T>;
+  let envelope: ApiResponse<T>;
+  try {
+    envelope = (await response.json()) as ApiResponse<T>;
+    // TEMP DEBUG LOGGING
+    console.log('[QR-DEBUG] 9b. Response envelope parsed:', envelope);
+  } catch (err) {
+    // TEMP DEBUG LOGGING
+    console.error('[QR-DEBUG] 10. response.json() threw:', err);
+    throw err;
+  }
   if (!response.ok || envelope.success === false) {
     if (response.status === 401) {
       // Awaited so callers observing the thrown ApiError are guaranteed to

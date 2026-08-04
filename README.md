@@ -261,3 +261,7 @@ Deliberately out of scope for Version 1 (`docs/11_File_Transfer.md` §16,
 `backend/README.md` documents the backend's internals in depth (services,
 API layer, dependency injection, request flow). `CLAUDE.md` documents
 project rules and per-milestone history for Claude Code.
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

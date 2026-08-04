@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -11,6 +11,7 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { useSharedFiles } from '../../files/useSharedFiles';
 import { deriveDownloadStatus, FileDownloadStatus } from '../../files/downloadStatus';
+import { useDownloadExistence } from '../../files/useDownloadExistence';
 import { useTransferRequests } from '../../transfers/useTransferRequests';
 import { useTransfers } from '../../transfers/useTransfers';
 import { getTransfer, proposeTransfer } from '../../api/endpoints/transfers';
@@ -20,6 +21,15 @@ import { formatFileSize } from '../../utils/formatFileSize';
 import { TransferStreamManager } from '../../streaming/TransferStreamManager';
 
 const POLL_INTERVAL_MS = 2000;
+// Deliberately longer than the transfer-progress poll above: the shared-file
+// list only changes when the desktop user shares/unshares a file (rare
+// compared to an active transfer's byte-level progress), so polling it that
+// aggressively would just be wasted traffic. This, plus a refresh the moment
+// the screen regains focus below, is enough to pick up a newly shared file
+// without the user having to pull-to-refresh — see docs/15_QA_NOTEBOOK.md's
+// Milestone P2 entry for the alternatives considered (a push channel would be
+// the "correct" fix but is out of scope for a UX-polish milestone).
+const FILES_POLL_INTERVAL_MS = 5000;
 
 /**
  * Browses the desktop's shared file list and lets the user *initiate* a
@@ -30,12 +40,15 @@ const POLL_INTERVAL_MS = 2000;
  * tab. This screen's per-file status is still derived from the same
  * pending-requests/transfers lists TransferListScreen polls (see
  * downloadStatus.ts), rather than a local flag that only ever reflected the
- * propose call's own success/failure.
+ * propose call's own success/failure — further gated by useDownloadExistence
+ * so a 'completed' transfer whose saved file was since deleted doesn't keep
+ * claiming "Downloaded" forever.
  */
 export function FilesScreen() {
-  const { files, loading, refreshing, error, refresh } = useSharedFiles();
+  const { files, loading, refreshing, error, refresh, refreshSilently } = useSharedFiles();
   const { requests, refresh: refreshRequests } = useTransferRequests();
   const { transfers, refresh: refreshTransfers } = useTransfers();
+  const { existence, verify } = useDownloadExistence();
   const [requestingIds, setRequestingIds] = useState<Record<number, boolean>>({});
   const [requestErrors, setRequestErrors] = useState<Record<number, string>>({});
 
@@ -48,6 +61,25 @@ export function FilesScreen() {
       return () => clearInterval(timer);
     }, [refreshRequests, refreshTransfers]),
   );
+
+  useFocusEffect(
+    useCallback(() => {
+      refreshSilently();
+      const timer = setInterval(refreshSilently, FILES_POLL_INTERVAL_MS);
+      return () => clearInterval(timer);
+    }, [refreshSilently]),
+  );
+
+  // Re-verifies on-device existence for every file the polled data currently
+  // reports as a completed download — covers both a stale 'completed' from
+  // before this screen mounted and a file deleted while it stayed open.
+  useEffect(() => {
+    files.forEach(file => {
+      if (deriveDownloadStatus(file.id, requests, transfers).kind === 'completed') {
+        verify(file.file_name);
+      }
+    });
+  }, [files, requests, transfers, verify]);
 
   const handleDownload = useCallback(
     async (file: AvailableFileResponse) => {
@@ -104,7 +136,7 @@ export function FilesScreen() {
             file={item}
             requesting={requestingIds[item.id] ?? false}
             requestError={requestErrors[item.id]}
-            status={deriveDownloadStatus(item.id, requests, transfers)}
+            status={deriveDownloadStatus(item.id, requests, transfers, existence[item.file_name])}
             onDownload={() => handleDownload(item)}
           />
         )}
@@ -119,8 +151,18 @@ export function FilesScreen() {
   );
 }
 
+// A download's request is always auto-accepted, and the resulting Transfer
+// row is already 'in_progress' the instant propose() resolves (see
+// TransferService._create_transfer) — well before this app's own stream
+// actually starts moving bytes. So the brief `requesting` window (the
+// propose/getTransfer round trip) is never really an unknown state; it's
+// already known to be a download starting. This used to show a bare "..."
+// for that window (Milestone P2's Issue 2 — see docs/15_QA_NOTEBOOK.md),
+// which added a meaningless extra step; showing the real label immediately
+// lets the user transition straight into it once the polled data confirms
+// the same thing.
 function downloadButtonLabel(requesting: boolean, status: FileDownloadStatus): string {
-  if (requesting) return '...';
+  if (requesting) return 'Downloading...';
   switch (status.kind) {
     case 'pending':
       return 'Requested';

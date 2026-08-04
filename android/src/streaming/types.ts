@@ -13,7 +13,7 @@ export interface StreamState {
   error: string | null;
 }
 
-/** A file picked locally for an upload (direction "receive"), remembered between proposing the transfer and it being accepted. */
+/** A file picked locally for an upload (direction "receive"), remembered from the moment it's proposed (auto-accepted) until its stream starts. */
 export interface PickedUploadFile {
   uri: string;
   name: string;

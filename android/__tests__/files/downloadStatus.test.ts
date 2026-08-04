@@ -88,3 +88,21 @@ test('ignores requests/transfers for other files', () => {
 test('ignores upload transfers (direction receive) even if shared_file_id happens to match', () => {
   expect(deriveDownloadStatus(5, [], [transfer({ direction: 'receive' })])).toEqual({ kind: 'idle' });
 });
+
+test('completed stays completed when fileExists is omitted (not checked yet)', () => {
+  expect(deriveDownloadStatus(5, [], [transfer({ status: 'completed' })])).toEqual({ kind: 'completed' });
+});
+
+test('completed stays completed when fileExists is true', () => {
+  expect(deriveDownloadStatus(5, [], [transfer({ status: 'completed' })], true)).toEqual({ kind: 'completed' });
+});
+
+test('completed downgrades to idle when fileExists is explicitly false — the deleted-download case', () => {
+  expect(deriveDownloadStatus(5, [], [transfer({ status: 'completed' })], false)).toEqual({ kind: 'idle' });
+});
+
+test('fileExists is irrelevant to non-completed statuses', () => {
+  expect(deriveDownloadStatus(5, [], [transfer({ status: 'in_progress' })], false)).toEqual({
+    kind: 'in_progress',
+  });
+});

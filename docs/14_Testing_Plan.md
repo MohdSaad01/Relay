@@ -739,6 +739,240 @@ packaging, UI polish, and user testing.
 
 ---
 
+## P1 — Workflow Simplification (Automatic Uploads)
+
+### Status
+
+**Completed**
+
+### Summary
+
+Product-polish follow-up to T9's Release Candidate: simplified the upload
+workflow to match the download workflow, removing a manual desktop
+approval step that added friction without adding real protection.
+
+Previously: Android proposes an upload → desktop sees it under "Incoming
+Transfer Requests" → desktop user explicitly accepts or rejects it → only
+then does the `Transfer` row exist and streaming become possible. A
+download had already been auto-accepted since T3/T4 (see
+`docs/15_QA_NOTEBOOK.md`'s "Download Flow Required Manual Desktop Approval..."
+entry); uploads were the one remaining case still requiring a decision.
+
+Since the desktop already explicitly approved the pairing that let a device
+propose anything at all, a second manual per-upload approval was redundant
+— identical reasoning to why downloads were auto-accepted.
+
+### Changes
+
+- **Backend:** `TransferService.request_transfer` (`app/services/transfer_service.py`)
+  now creates the `Transfer` row immediately for both directions instead of
+  only for `send`; `accept_request`, `reject_request`, and
+  `withdraw_request` were removed, since nothing is ever left `PENDING` for
+  them to act on anymore. The corresponding routes
+  (`POST /transfers/requests/{id}/accept`, `POST .../reject`,
+  `DELETE /transfers/requests/{id}`) were removed from
+  `app/api/v1/transfers.py`. `GET /transfers/requests` and
+  `GET /transfers/requests/{id}` are unchanged and kept — the first is
+  still polled defensively by Android's download-status derivation, the
+  second still lets a caller look up a request it just made.
+- **Desktop:** `desktop/src/renderer/views/transfers.js` no longer fetches
+  `/transfers/requests` or renders the "Incoming Transfer Requests"
+  table/accept/reject buttons — the view is just the `Transfers` list now.
+- **Android:** `TransferListScreen`'s upload flow now mirrors
+  `FilesScreen`'s download flow exactly: `handleUpload` registers the
+  picked file's local URI under the `transfer_id` the auto-accepted
+  proposal already returns, fetches the `Transfer`, and hands it directly
+  to `TransferStreamManager.start()`, rather than navigating to a
+  now-nonexistent pending-request screen. `TransferRequestDetail.tsx` and
+  `useTransferRequest.ts` were deleted (unreachable — nothing is ever
+  pending to view or withdraw), `TransferDetailScreen`'s route param
+  collapsed from a `{kind: 'request'|'transfer'}` discriminated union to a
+  plain `{transferId: number}`, and `uploadSourceRegistry.ts` dropped its
+  two-phase request-id-to-transfer-id promotion (`registerUploadSource` now
+  takes the `transfer_id` directly, since it's known synchronously the
+  moment the proposal resolves).
+
+### Issues Found
+
+No defects — this was a scoped workflow simplification, not a bug fix.
+
+### Result
+
+Workflow simplification completed successfully.
+
+Regression status:
+
+- Backend: 286 tests passed, 2 skipped (`python -m pytest`); `ruff check`
+  clean.
+- Android: 21 suites / 118 tests passed (`npx jest`); `npx tsc --noEmit`
+  and `npx eslint` clean.
+- Desktop: no test suite exists for the plain-JS renderer (unchanged from
+  T1); the edited view was syntax-checked and manually traced against the
+  simplified `/transfers` response shape.
+
+### Known Limitations
+
+- Live device E2E (confirming an upload picked on Android starts streaming
+  immediately with no desktop interaction, and that the desktop's
+  Transfers view shows it without ever showing an accept/reject prompt)
+  was not re-run as part of this change — no physical device/desktop pair
+  was available in the environment the change was made in. Recommended
+  before closing this out, consistent with prior milestones' own
+  live-device caveats.
+
+---
+
+## P2 — Shared Files UX & Synchronization
+
+### Status
+
+**Completed**
+
+### Summary
+
+Product-polish follow-up, scoped entirely to Android's Files screen
+(`android/src/screens/files/FilesScreen.tsx` and `android/src/files/`).
+Three issues raised against the current Files UX, all rooted in the same
+theme: the screen's per-file status display trusted state it never
+re-validated. No transfer, streaming, notification, pairing, discovery, or
+authentication code was touched.
+
+### Issues Found
+
+**1. A deleted download still showed "Downloaded" (Medium — incorrect UI
+behavior):**
+
+`deriveDownloadStatus()` (`android/src/files/downloadStatus.ts`) mapped a
+file straight to `'completed'` whenever its most recent `Transfer` row had
+`status === 'completed'`. That status is written once by the backend when
+the stream finishes and never changes again — it says nothing about
+whether the saved file is still on the device afterward. Deleting the file
+manually, clearing the `Relay` Downloads subfolder, or reinstalling the app
+all left the `Transfer` row (and therefore the label) exactly as
+"Downloaded" forever, since nothing ever re-checked the actual filesystem.
+
+**2. A meaningless "..." button state appeared before every download
+(Low — minor workflow issue):**
+
+`FilesScreen.handleDownload` set a local `requesting` flag for the
+duration of the `propose → refresh → getTransfer` round trip, and the
+button rendered a bare `'...'` for that whole window before flipping to
+"Downloading...". Investigation traced this back to
+`TransferService._create_transfer` (`backend/app/services/transfer_service.py`):
+a download's `Transfer` row is created with `status=IN_PROGRESS` in the
+very same call that proposes it (see the "Download Flow Required Manual
+Desktop Approval..." entry in `docs/15_QA_NOTEBOOK.md`), so the true state
+of the request is already known — "this is now downloading" — for the
+entire duration `requesting` was true. The "..." added a step that
+communicated nothing the app didn't already know.
+
+**3. Newly shared files did not appear without a manual pull-to-refresh
+(Medium — minor workflow issue):**
+
+`useSharedFiles()` fetched the shared-file list once on mount and only
+again on an explicit pull-to-refresh gesture. There is no push channel
+from desktop to Android for this list (unlike transfers, which Android
+already polls — see `TransferListScreen`/`FilesScreen`'s existing
+`useTransferRequests`/`useTransfers` polling), so a file shared while the
+Android user was already sitting on the Files screen stayed invisible
+until they manually pulled down.
+
+### Root Cause
+
+All three trace to the same pattern: FilesScreen's UI reflected a single
+snapshot of remote/persisted state (a `Transfer` row's terminal status, or
+whatever the shared-file list looked like at last fetch) without a
+mechanism to notice that snapshot had gone stale — either because the
+on-device world changed independently (the file was deleted) or because
+the desktop's world changed and nothing told Android (a new share).
+
+### Changes
+
+- **Issue 1 — on-device existence verification, not a new status enum.**
+  `android/src/files/downloadExistence.ts` (new) exports
+  `downloadedFileExists(fileName)`, which checks the file's actual save
+  location: `Downloads/Relay/<fileName>` under the public Downloads
+  directory on API 29+ (where `streaming/blobUtil.ts`'s `publishDownload`
+  actually publishes it), or the private staging path below API 29 (where
+  `publishDownload` is a no-op and the file never moves). This
+  deliberately duplicates those two path constants rather than importing
+  them, since `android/src/streaming/**` is out of scope for this
+  milestone. `android/src/files/useDownloadExistence.ts` (new) is a small
+  hook holding an existence cache keyed by file name, with `verify()` safe
+  to call repeatedly (in-flight calls for the same file are deduped, but
+  results are never cached forever, since the file can be deleted at any
+  time after a prior check found it present). `deriveDownloadStatus()`
+  gained a 4th, optional `fileExists` parameter that only matters for the
+  `'completed'` case: `false` downgrades the status to `'idle'` (so the
+  file can be downloaded again); `true` or the default `undefined`
+  ("not checked yet") keeps it `'completed'`, so the UI doesn't flash
+  "Download" while a check is still in flight. This is a gate on the
+  existing state machine, not a second, duplicate status — `Transfer.status`
+  from the backend remains the single source of truth for
+  pending/in_progress/failed, and the existence cache only ever narrows
+  the terminal `'completed'` case.
+- **Issue 2 — show the real state instead of a placeholder.** In
+  `FilesScreen.tsx`, `downloadButtonLabel()`'s `requesting` branch now
+  returns `'Downloading...'` (the same label as `'in_progress'`) instead
+  of `'...'`. No state was removed — `requesting` still exists and still
+  disables the button and drives the propose-call error message — only
+  its *label* changed, since the underlying transfer is already known to
+  be starting a download for that entire window.
+- **Issue 3 — focus refresh + a slow, screen-scoped poll, not a push
+  channel.** `useSharedFiles()` gained `refreshSilently()` alongside the
+  existing `refresh()`: both re-fetch through the same `load()` core, but
+  `refreshSilently()` never toggles `loading`/`refreshing`, so it doesn't
+  flash the pull-to-refresh spinner. `FilesScreen` calls it once whenever
+  the screen regains focus and then every 5 seconds while it stays
+  focused (`FILES_POLL_INTERVAL_MS`), via its own `useFocusEffect` —
+  deliberately a separate, slower interval from the existing 2-second
+  transfer-progress poll on the same screen, since the shared-file list
+  changes far less often than an active transfer's byte-level progress. A
+  real push channel (WebSockets) was considered and rejected as
+  disproportionate to a UX-polish milestone and explicitly out of scope
+  per `docs/11_File_Transfer.md` §16's list of deferred enhancements; a
+  short, screen-scoped poll (only running while Files is the focused
+  screen) was judged the smallest change that fits the existing
+  polling-based architecture already used for transfers.
+
+### Result
+
+Shared Files UX validation completed with three issues found and fixed.
+
+Regression status:
+
+- Android: 23 suites / 134 tests passed (`npx jest`), including new
+  suites `downloadExistence.test.ts`, `useDownloadExistence.test.tsx`, and
+  new cases in `downloadStatus.test.ts` / `useSharedFiles.test.tsx`.
+  `npx tsc --noEmit` and `npx eslint` clean on all changed/added files.
+- Backend, Desktop: untouched by this milestone.
+
+### Known Limitations
+
+- `downloadedFileExists()`'s API 29+ check relies on this app being able
+  to read, via a raw filesystem path, a file it published into MediaStore
+  itself. This is the standard behavior scoped storage grants an app for
+  its own MediaStore-owned entries, but it was validated by tracing the
+  library's native implementation (`react-native-blob-util`'s
+  `ReactNativeBlobUtilFS.exists()`, `File(path).exists()`), not on a
+  physical device — no device was available in the environment this
+  change was made in. Recommended before closing this out, consistent
+  with prior milestones' live-device caveats.
+- The existence check duplicates two small constants
+  (`MEDIASTORE_MIN_SDK`, the `Relay` subfolder name) already defined in
+  `android/src/streaming/blobUtil.ts`, instead of importing them, because
+  that module was out of scope to modify for this milestone. If
+  `publishDownload`'s destination ever changes, `downloadExistence.ts`
+  must be updated to match by hand.
+- The 5-second shared-files poll only runs while the Files screen is
+  focused (matching the existing transfer-poll pattern) — a file shared
+  while Android is fully backgrounded still requires the user to return
+  to the Files screen (which refreshes immediately on focus) rather than
+  appearing via a background/push notification. Consistent with V1's
+  existing no-push-channel design.
+
+---
+
 # 4. Bug Classification
 
 Critical

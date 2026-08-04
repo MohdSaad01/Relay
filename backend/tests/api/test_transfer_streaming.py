@@ -68,18 +68,21 @@ def _accept_download(client: TestClient, shared_file_id: int, token: str) -> dic
 
 def _accept_upload(
     client: TestClient,
-    desktop_client: TestClient,
     token: str,
     file_name: str = "photo.jpg",
     file_size: int = 12,
 ) -> dict:
+    """Named `_accept_upload` for parity with `_accept_download` above, even
+    though an upload no longer needs a separate desktop accept call -- the
+    propose response already carries the accepted Transfer's id."""
     created = client.post(
         "/api/v1/transfers/requests",
         json={"direction": "receive", "file_name": file_name, "file_size": file_size},
         headers=_auth_headers(token),
     ).json()["data"]
-    response = desktop_client.post(f"/api/v1/transfers/requests/{created['request_id']}/accept")
-    assert response.status_code == 201
+    assert created["status"] == "accepted"
+    response = client.get(f"/api/v1/transfers/{created['transfer_id']}", headers=_auth_headers(token))
+    assert response.status_code == 200
     return response.json()["data"]
 
 
@@ -139,7 +142,7 @@ def test_download_transfer_wrong_direction_returns_409(
     client: TestClient, desktop_client: TestClient
 ) -> None:
     _pair_device_with_token(client)
-    transfer = _accept_upload(client, desktop_client, "valid-token")
+    transfer = _accept_upload(client, "valid-token")
 
     response = client.get(
         f"/api/v1/transfers/{transfer['id']}/download", headers=_auth_headers()
@@ -187,7 +190,7 @@ def test_upload_transfer_writes_file_and_returns_completed(
 ) -> None:
     _set_download_directory(desktop_client, tmp_path)
     _pair_device_with_token(client)
-    transfer = _accept_upload(client, desktop_client, "valid-token", file_name="photo.jpg", file_size=12)
+    transfer = _accept_upload(client, "valid-token", file_name="photo.jpg", file_size=12)
 
     response = client.post(
         f"/api/v1/transfers/{transfer['id']}/upload",
@@ -208,7 +211,7 @@ def test_upload_transfer_renames_on_conflict(
     _set_download_directory(desktop_client, tmp_path)
     (tmp_path / "photo.jpg").write_bytes(b"existing file")
     _pair_device_with_token(client)
-    transfer = _accept_upload(client, desktop_client, "valid-token", file_name="photo.jpg", file_size=12)
+    transfer = _accept_upload(client, "valid-token", file_name="photo.jpg", file_size=12)
 
     response = client.post(
         f"/api/v1/transfers/{transfer['id']}/upload",
@@ -227,7 +230,7 @@ def test_upload_transfer_without_token_is_rejected(
 ) -> None:
     _set_download_directory(desktop_client, tmp_path)
     _pair_device_with_token(client)
-    transfer = _accept_upload(client, desktop_client, "valid-token")
+    transfer = _accept_upload(client, "valid-token")
 
     response = client.post(f"/api/v1/transfers/{transfer['id']}/upload", content=b"file-content")
 
@@ -240,7 +243,7 @@ def test_upload_transfer_not_owned_returns_404(
     _set_download_directory(desktop_client, tmp_path)
     _pair_device_with_token(client, "token-a")
     _pair_device_with_token(client, "token-b")
-    transfer = _accept_upload(client, desktop_client, "token-a")
+    transfer = _accept_upload(client, "token-a")
 
     response = client.post(
         f"/api/v1/transfers/{transfer['id']}/upload",

@@ -1,30 +1,23 @@
 /**
- * Remembers which local file an upload (direction "receive") proposal was
+ * Remembers which local file an upload (direction "receive") transfer is
  * for, since the backend has no concept of the Android device's local
  * filesystem — TransferResponse carries only file_name/file_size, not a URI.
  *
- * Keyed by request_id at proposal time (the only id that exists then), then
- * "promoted" to transfer_id once the desktop accepts and a Transfer row
- * exists. In-memory only — lost on app restart, which is acceptable: V1 has
- * no resume support (docs/11_File_Transfer.md §16), so an upload whose
- * local file reference is gone can't continue regardless.
+ * Keyed by transfer_id directly: a transfer proposal is auto-accepted in the
+ * same call that creates it (backend/app/services/transfer_service.py), so
+ * the transfer_id is already known by the time the file needs registering
+ * — see TransferListScreen's "Upload a file" flow. In-memory only — lost on
+ * app restart, which is acceptable: V1 has no resume support
+ * (docs/11_File_Transfer.md §16), so an upload whose local file reference is
+ * gone can't continue regardless.
  */
 
 import { PickedUploadFile } from './types';
 
-const sourcesByRequestId = new Map<string, PickedUploadFile>();
 const sourcesByTransferId = new Map<number, PickedUploadFile>();
 
-export function registerUploadSource(requestId: string, file: PickedUploadFile): void {
-  sourcesByRequestId.set(requestId, file);
-}
-
-export function promoteUploadSource(requestId: string, transferId: number): void {
-  const file = sourcesByRequestId.get(requestId);
-  if (file) {
-    sourcesByTransferId.set(transferId, file);
-    sourcesByRequestId.delete(requestId);
-  }
+export function registerUploadSource(transferId: number, file: PickedUploadFile): void {
+  sourcesByTransferId.set(transferId, file);
 }
 
 export function getUploadSource(transferId: number): PickedUploadFile | undefined {

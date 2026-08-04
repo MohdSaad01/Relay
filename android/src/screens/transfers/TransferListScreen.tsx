@@ -1,49 +1,39 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, SectionList, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useState } from 'react';
+import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { errorCodes, isErrorWithCode, pick } from '@react-native-documents/picker';
 import { TransfersStackParamList } from '../../navigation/types';
-import { useTransferRequests } from '../../transfers/useTransferRequests';
 import { useTransfers } from '../../transfers/useTransfers';
 import { directionLabel, formatStatus } from '../../transfers/labels';
 import { formatFileSize } from '../../utils/formatFileSize';
-import { TransferRequestResponse, TransferResponse } from '../../api/types';
-import { proposeTransfer } from '../../api/endpoints/transfers';
+import { TransferResponse } from '../../api/types';
+import { getTransfer, proposeTransfer } from '../../api/endpoints/transfers';
 import { ApiError } from '../../api/client';
-import { promoteUploadSource, registerUploadSource } from '../../streaming/uploadSourceRegistry';
+import { registerUploadSource } from '../../streaming/uploadSourceRegistry';
+import { TransferStreamManager } from '../../streaming/TransferStreamManager';
 
 const POLL_INTERVAL_MS = 2000;
 
 type Navigation = NativeStackNavigationProp<TransfersStackParamList, 'TransferList'>;
 
-type SectionItem =
-  | { type: 'request'; data: TransferRequestResponse }
-  | { type: 'transfer'; data: TransferResponse };
-
 /**
- * Two sections over the same two lists TransferManager/TransferRepository
- * already scope to this device: pending requests (awaiting the desktop's
- * decision) and persisted transfers (accepted, in progress or terminal).
- * Polls both while focused so accept/reject decisions and progress show up
- * without a manual pull-to-refresh.
+ * This device's transfer history, persisted transfers only — a proposal is
+ * auto-accepted the moment it's made (backend/app/services/transfer_service.py),
+ * so there is no separate pending-requests view to show here anymore.
  *
  * Also the one entry point for proposing an upload — picking a local file
  * to send to the desktop isn't tied to browsing FilesScreen's shared list
- * the way a download is, so it lives here, keeping transfer-lifecycle
- * actions (propose, withdraw, cancel) together in the Transfers feature.
+ * the way a download is, so it lives here. Tapping "Upload a File" proposes
+ * the transfer and, mirroring FilesScreen's download flow, immediately hands
+ * it to TransferStreamManager to start moving bytes without waiting for a
+ * separate desktop decision.
  */
 export function TransferListScreen() {
   const navigation = useNavigation<Navigation>();
   const {
-    requests,
-    loading: requestsLoading,
-    error: requestsError,
-    refresh: refreshRequests,
-  } = useTransferRequests();
-  const {
     transfers,
-    loading: transfersLoading,
+    loading,
     error: transfersError,
     refresh: refreshTransfers,
   } = useTransfers();
@@ -52,25 +42,10 @@ export function TransferListScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      const timer = setInterval(() => {
-        refreshRequests();
-        refreshTransfers();
-      }, POLL_INTERVAL_MS);
+      const timer = setInterval(refreshTransfers, POLL_INTERVAL_MS);
       return () => clearInterval(timer);
-    }, [refreshRequests, refreshTransfers]),
+    }, [refreshTransfers]),
   );
-
-  // Safety net alongside TransferRequestDetail's own promotion effect: an
-  // upload request can be accepted while the user is looking at this list
-  // rather than that detail screen, and TransferStreamManager needs the
-  // promotion to have happened by the time the user opens the transfer.
-  useEffect(() => {
-    requests.forEach(request => {
-      if (request.status === 'accepted' && request.transfer_id != null) {
-        promoteUploadSource(request.request_id, request.transfer_id);
-      }
-    });
-  }, [requests]);
 
   const handleUpload = useCallback(async () => {
     setUploadError(null);
@@ -92,27 +67,29 @@ export function TransferListScreen() {
 
     setUploading(true);
     try {
-      const response = await proposeTransfer({
+      const request = await proposeTransfer({
         direction: 'receive',
         file_name: picked.name,
         file_size: picked.size,
       });
-      registerUploadSource(response.request_id, { uri: picked.uri, name: picked.name, size: picked.size });
-      navigation.navigate('TransferDetail', { kind: 'request', requestId: response.request_id });
+      await refreshTransfers();
+      if (request.status === 'accepted' && request.transfer_id != null) {
+        registerUploadSource(request.transfer_id, {
+          uri: picked.uri,
+          name: picked.name,
+          size: picked.size,
+        });
+        const transfer = await getTransfer(request.transfer_id);
+        TransferStreamManager.start(transfer);
+      }
     } catch (err) {
       setUploadError(err instanceof ApiError ? err.message : 'Could not propose this upload.');
     } finally {
       setUploading(false);
     }
-  }, [navigation]);
+  }, [refreshTransfers]);
 
-  const loading = requestsLoading || transfersLoading;
-  const error = requestsError ?? transfersError ?? uploadError;
-
-  const sections = [
-    { title: 'Requests', data: requests.map((r): SectionItem => ({ type: 'request', data: r })) },
-    { title: 'Transfers', data: transfers.map((t): SectionItem => ({ type: 'transfer', data: t })) },
-  ].filter(section => section.data.length > 0);
+  const error = transfersError ?? uploadError;
 
   return (
     <View style={styles.container}>
@@ -131,54 +108,24 @@ export function TransferListScreen() {
           <ActivityIndicator size="large" />
         </View>
       ) : (
-        <SectionList<SectionItem>
-          sections={sections}
-          keyExtractor={item =>
-            item.type === 'request' ? `request-${item.data.request_id}` : `transfer-${item.data.id}`
-          }
-          renderSectionHeader={({ section }) => <Text style={styles.sectionHeader}>{section.title}</Text>}
-          renderItem={({ item }) =>
-            item.type === 'request' ? (
-              <RequestRow
-                request={item.data}
-                onPress={() =>
-                  navigation.navigate('TransferDetail', { kind: 'request', requestId: item.data.request_id })
-                }
-              />
-            ) : (
-              <TransferRow
-                transfer={item.data}
-                onPress={() =>
-                  navigation.navigate('TransferDetail', { kind: 'transfer', transferId: item.data.id })
-                }
-              />
-            )
-          }
+        <FlatList<TransferResponse>
+          data={transfers}
+          keyExtractor={item => String(item.id)}
+          renderItem={({ item }) => (
+            <TransferRow
+              transfer={item}
+              onPress={() => navigation.navigate('TransferDetail', { transferId: item.id })}
+            />
+          )}
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
               <Text style={styles.empty}>No transfers yet.</Text>
             </View>
           }
-          contentContainerStyle={sections.length === 0 ? styles.emptyList : undefined}
+          contentContainerStyle={transfers.length === 0 ? styles.emptyList : undefined}
         />
       )}
     </View>
-  );
-}
-
-function RequestRow({ request, onPress }: { request: TransferRequestResponse; onPress: () => void }) {
-  return (
-    <Pressable style={styles.row} onPress={onPress}>
-      <View style={styles.rowInfo}>
-        <Text style={styles.name} numberOfLines={1}>
-          {request.file_name}
-        </Text>
-        <Text style={styles.meta}>
-          {directionLabel(request.direction)} · {formatFileSize(request.file_size)}
-        </Text>
-      </View>
-      <Text style={styles.statusBadge}>{formatStatus(request.status)}</Text>
-    </Pressable>
   );
 }
 
@@ -227,13 +174,6 @@ const styles = StyleSheet.create({
   errorText: {
     color: '#dc2626',
     textAlign: 'center',
-  },
-  sectionHeader: {
-    paddingVertical: 6,
-    paddingHorizontal: 16,
-    backgroundColor: '#f3f4f6',
-    fontWeight: '600',
-    color: '#374151',
   },
   row: {
     flexDirection: 'row',

@@ -21,16 +21,12 @@ export type FilesStackParamList = {
 };
 
 /**
- * A detail screen can be reached from either half of TransferListScreen's
- * two sections: a still-pending (or just-decided) request, or an already
- * persisted transfer. They're different backend resources (TransferManager's
- * in-memory request_id vs. the database's Transfer.id) with different
- * fields, so the param is a discriminated union rather than one shape that
- * papers over the difference.
+ * A transfer proposal is auto-accepted the moment it's made
+ * (backend/app/services/transfer_service.py), so a detail screen only ever
+ * needs to show the persisted Transfer — there is no separate pending
+ * "request" state left to view.
  */
-export type TransferDetailParams =
-  | { kind: 'request'; requestId: string }
-  | { kind: 'transfer'; transferId: number };
+export type TransferDetailParams = { transferId: number };
 
 export type TransfersStackParamList = {
   TransferList: undefined;

@@ -71,3 +71,36 @@ test('refresh() re-fetches the list', async () => {
   expect(latest().files).toEqual([sampleFile]);
   expect(latest().refreshing).toBe(false);
 });
+
+test('refreshSilently() re-fetches without ever setting loading or refreshing', async () => {
+  mockGetAvailableFiles.mockResolvedValueOnce([]);
+  const { latest } = await renderHook();
+
+  mockGetAvailableFiles.mockResolvedValueOnce([sampleFile]);
+  let sawLoadingOrRefreshing = false;
+  await act(async () => {
+    const pending = latest().refreshSilently();
+    if (latest().loading || latest().refreshing) {
+      sawLoadingOrRefreshing = true;
+    }
+    await pending;
+  });
+
+  expect(sawLoadingOrRefreshing).toBe(false);
+  expect(mockGetAvailableFiles).toHaveBeenCalledTimes(2);
+  expect(latest().files).toEqual([sampleFile]);
+  expect(latest().loading).toBe(false);
+  expect(latest().refreshing).toBe(false);
+});
+
+test('refreshSilently() still surfaces a failure message', async () => {
+  mockGetAvailableFiles.mockResolvedValueOnce([sampleFile]);
+  const { latest } = await renderHook();
+
+  mockGetAvailableFiles.mockRejectedValueOnce(new ApiError('Session expired.', 401));
+  await act(async () => {
+    await latest().refreshSilently();
+  });
+
+  expect(latest().error).toBe('Session expired.');
+});

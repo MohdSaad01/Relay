@@ -1,6 +1,6 @@
 import { StyleSheet } from 'react-native';
 
-/** Shared by TransferRequestDetail and TransferProgressDetail — same visual language, different data sources. */
+/** Shared visual language for the Transfers detail screen (TransferProgressDetail). */
 export const detailStyles = StyleSheet.create({
   container: {
     flex: 1,

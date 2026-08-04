@@ -1,21 +1,27 @@
 """TransferService — orchestrates the transfer lifecycle described in
 docs/11_File_Transfer.md §7 and docs/13_Database_Design.md §7.
 
-The two directions no longer follow identical lifecycles. A download
-(`send`) is auto-accepted the moment it's proposed: the desktop user already
-made the sharing decision when they shared the file, so requiring a second
-manual accept for every download is redundant friction — see
-docs/15_QA_NOTEBOOK.md. An upload (`receive`) still goes through the
-desktop's explicit accept/reject review, since the desktop hasn't seen the
-file before. Either way, only an accepted request ever becomes a persisted
-`Transfer` row.
+Both directions are auto-accepted the moment they're proposed. A download
+(`send`) always has been: the desktop user already made the sharing decision
+when they shared the file, so requiring a second manual accept for every
+download was redundant friction — see docs/15_QA_NOTEBOOK.md. An upload
+(`receive`) now follows the exact same reasoning: the desktop explicitly
+paired with the device before it could propose anything, so a second
+per-upload approval step added no real protection, just friction — see the
+Milestone P1 entry in docs/15_QA_NOTEBOOK.md. There is therefore no longer
+any desktop-decision step in this service: proposing a transfer and having
+it accepted are the same call, and `request_transfer` immediately returns an
+already-ACCEPTED request with its `Transfer` row created.
 
 Persistence is delegated to existing services and repositories rather than
 duplicated here: SharedFileService supplies the shared-file snapshot for a
 download, DeviceRepository supplies the fresh device snapshot, and
-TransferRepository owns `Transfer` rows. Pending-request state lives
+TransferRepository owns `Transfer` rows. Pending-request bookkeeping (the
+short-lived, in-memory record `GET /transfers/requests/{id}` polls) lives
 entirely in TransferManager and is never written to the database
-(13_Database_Design.md §7 has no "pending"/"rejected" transfer status).
+(13_Database_Design.md §7 has no "pending"/"rejected" transfer status) — but
+since every request is now decided in the same call that creates it, nothing
+this service creates ever actually sits in TransferManager as PENDING.
 
 This milestone does not implement byte streaming, so the only DB-level state
 transition it performs is `in_progress -> cancelled`; `completed`/`failed`
@@ -66,18 +72,18 @@ class TransferService:
         file_name: str | None,
         file_size: int | None,
     ) -> PendingTransferRequest:
-        """Propose a transfer: a download of a shared file (`send`) or a proposed
-        upload (`receive`).
+        """Propose a transfer: a download of a shared file (`send`) or an
+        upload (`receive`). Both directions are auto-accepted in this same
+        call — the desktop already made the decision that matters (sharing
+        the file, or pairing with the device) before this request could ever
+        be made, so a second manual per-transfer approval is redundant.
 
         Raises ValidationError for a malformed payload, NotFoundError if a
         `send` request names a shared file that does not currently exist.
 
-        A `send` request is auto-accepted here, in the same call: its
-        `Transfer` row is created immediately (via `_create_transfer`, the
-        same path `accept_request` uses) and the returned request already
-        carries `status=ACCEPTED`/`transfer_id` — nothing is ever stored as
-        PENDING for a download. A `receive` request still only lives in
-        TransferManager, PENDING, until the desktop user accepts or rejects it.
+        Its `Transfer` row is created immediately (`_create_transfer`), and
+        the returned request already carries `status=ACCEPTED`/`transfer_id`
+        — nothing is ever stored as PENDING.
         """
         if direction is TransferDirection.SEND:
             if shared_file_id is None:
@@ -103,24 +109,14 @@ class TransferService:
             expires_at=now + timedelta(seconds=settings.TRANSFER_REQUEST_TTL_SECONDS),
         )
 
-        if direction is TransferDirection.SEND:
-            transfer = self._create_transfer(request)
-            request.status = TransferRequestStatus.ACCEPTED
-            request.transfer_id = transfer.id
-            self.transfer_manager.store_decided(request)
-            logger.info(
-                "Transfer auto-accepted (download): request_id=%s transfer_id=%s device_id=%s file=%s",
-                request.request_id,
-                transfer.id,
-                requesting_device.id,
-                snapshot_name,
-            )
-            return request
-
-        self.transfer_manager.create(request)
+        transfer = self._create_transfer(request)
+        request.status = TransferRequestStatus.ACCEPTED
+        request.transfer_id = transfer.id
+        self.transfer_manager.store_decided(request)
         logger.info(
-            "Transfer requested: request_id=%s device_id=%s direction=%s file=%s",
+            "Transfer auto-accepted: request_id=%s transfer_id=%s device_id=%s direction=%s file=%s",
             request.request_id,
+            transfer.id,
             requesting_device.id,
             direction.value,
             snapshot_name,
@@ -145,68 +141,16 @@ class TransferService:
 
     def list_requests(self, requesting_device: Device | None) -> list[PendingTransferRequest]:
         """List pending transfer requests: every one for the desktop, only its
-        own for a paired Android device."""
+        own for a paired Android device.
+
+        Always empty in practice now that both directions are auto-accepted
+        by `request_transfer` — kept for API compatibility (existing clients
+        poll this endpoint) and because TransferManager still supports
+        genuinely pending requests as a building block, even though nothing
+        in this service currently produces one.
+        """
         device_id = requesting_device.id if requesting_device is not None else None
         return self.transfer_manager.list_pending(device_id)
-
-    def withdraw_request(self, request_id: str, requesting_device: Device) -> None:
-        """Withdraw one's own still-pending transfer request before the desktop decides."""
-        request = self.transfer_manager.withdraw(request_id, requesting_device.id)
-        if request is None:
-            raise NotFoundError(f"Transfer request {request_id} was not found.")
-        logger.info(
-            "Transfer request withdrawn: request_id=%s device_id=%s",
-            request_id,
-            requesting_device.id,
-        )
-
-    # --- Decisions (desktop only) --------------------------------------------
-
-    def accept_request(self, request_id: str) -> Transfer:
-        """Accept a pending transfer request (an upload proposal — a download
-        is auto-accepted by `request_transfer` and is never left pending),
-        creating its `Transfer` row via `_create_transfer`.
-
-        If re-validation inside `_create_transfer` fails, the claimed request
-        is put back as REJECTED (rather than silently dropped) so a polling
-        requester still observes a definite outcome.
-        """
-        request = self.transfer_manager.claim_for_decision(request_id)
-        if request is None:
-            raise NotFoundError(f"No pending transfer request found for id {request_id}.")
-
-        try:
-            transfer = self._create_transfer(request)
-        except NotFoundError:
-            request.status = TransferRequestStatus.REJECTED
-            self.transfer_manager.store_decided(request)
-            raise
-
-        request.status = TransferRequestStatus.ACCEPTED
-        request.transfer_id = transfer.id
-        self.transfer_manager.store_decided(request)
-
-        logger.info(
-            "Transfer accepted: request_id=%s transfer_id=%s device_id=%s direction=%s",
-            request_id,
-            transfer.id,
-            transfer.device_id,
-            request.direction.value,
-        )
-        return transfer
-
-    def reject_request(self, request_id: str) -> None:
-        """Reject a pending transfer request. Nothing is persisted — the schema
-        has no "rejected" transfer status."""
-        request = self.transfer_manager.claim_for_decision(request_id)
-        if request is None:
-            raise NotFoundError(f"No pending transfer request found for id {request_id}.")
-
-        request.status = TransferRequestStatus.REJECTED
-        self.transfer_manager.store_decided(request)
-        logger.info(
-            "Transfer request rejected: request_id=%s device_id=%s", request_id, request.device_id
-        )
 
     # --- Transfers (persisted) ------------------------------------------------
 
@@ -292,11 +236,11 @@ class TransferService:
     def _create_transfer(self, request: PendingTransferRequest) -> Transfer:
         """Create and persist the `Transfer` row for an accepted request.
 
-        Shared by `accept_request` (desktop-decided uploads) and
-        `request_transfer` (auto-accepted downloads). Re-resolves the file
-        and device fresh at this moment rather than trusting the request's
-        own snapshot (10_Security.md §9: every request must be validated
-        before proceeding) — raises NotFoundError if either no longer exists.
+        Called by `request_transfer` for both directions, immediately after
+        proposing. Re-resolves the file and device fresh at this moment
+        rather than trusting the request's own snapshot (10_Security.md §9:
+        every request must be validated before proceeding) — raises
+        NotFoundError if either no longer exists.
         """
         file_name, file_size, resolved_shared_file_id = self._resolve_accepted_file(request)
         device = self._resolve_accepted_device(request)

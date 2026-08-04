@@ -23,11 +23,22 @@ export type FileDownloadStatus =
  * that spawned it), otherwise a matching pending request — a purely
  * defensive fallback for the brief window between FilesScreen's propose call
  * and its first refresh — otherwise idle.
+ *
+ * `fileExists` gates the terminal 'completed' case only: the backend's
+ * Transfer.status === 'completed' just means the transfer finished, not that
+ * the saved file is still on the device (the user may have deleted it,
+ * cleared the download folder, or reinstalled the app since). It's optional
+ * and three-valued on purpose — `undefined` means "not checked yet" and is
+ * treated the same as `true` (optimistic: don't flash "Download" while the
+ * on-device check is still in flight), while an explicit `false` downgrades
+ * the status to 'idle' so the file can be downloaded again. See
+ * useDownloadExistence.ts for how a screen supplies this.
  */
 export function deriveDownloadStatus(
   fileId: number,
   requests: TransferRequestResponse[],
   transfers: TransferResponse[],
+  fileExists?: boolean,
 ): FileDownloadStatus {
   const transfer = transfers
     .filter(t => t.shared_file_id === fileId && t.direction === 'send')
@@ -36,7 +47,7 @@ export function deriveDownloadStatus(
   if (transfer) {
     switch (transfer.status) {
       case 'completed':
-        return { kind: 'completed' };
+        return fileExists === false ? { kind: 'idle' } : { kind: 'completed' };
       case 'in_progress':
         return { kind: 'in_progress' };
       case 'failed':

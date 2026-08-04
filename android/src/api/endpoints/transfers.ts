@@ -2,10 +2,14 @@
  * Transfer endpoints Android may call (backend/README.md "Transfer API").
  *
  * Not included here, deliberately:
- * - POST /transfers/requests/{id}/accept|reject — desktop-only decision.
  * - GET /transfers/{id}/download, POST /transfers/{id}/upload — the actual
  *   byte streams. Those need react-native-blob-util, not JSON fetch, and
  *   belong to the transfer-streaming milestone.
+ *
+ * DELETE /transfers/requests/{id} (withdraw) and the desktop-only
+ * accept/reject decision no longer exist on the backend: every proposal is
+ * auto-accepted in the same call that creates it, so there is nothing left
+ * pending to withdraw or decide on.
  */
 
 import { apiClient } from '../client';
@@ -21,14 +25,6 @@ export function proposeTransfer(body: TransferRequestCreate): Promise<TransferRe
 
 export function listTransferRequests(): Promise<TransferRequestResponse[]> {
   return apiClient.get('/transfers/requests');
-}
-
-export function getTransferRequest(requestId: string): Promise<TransferRequestResponse> {
-  return apiClient.get(`/transfers/requests/${requestId}`);
-}
-
-export function withdrawTransferRequest(requestId: string): Promise<void> {
-  return apiClient.del(`/transfers/requests/${requestId}`);
 }
 
 export function listTransfers(): Promise<TransferResponse[]> {

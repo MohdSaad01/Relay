@@ -321,3 +321,211 @@ finished, nothing on Android told the user it had completed.
   particularly the notification's tap-to-open behavior, which cannot be
   exercised by the Jest suite (no real Android notification tray/intent
   system).
+
+---
+
+# Milestone P1 — Upload Workflow Still Required Manual Desktop Approval
+
+## Problem
+
+The download flow's manual-approval friction (see the entry above) was
+already removed, but the mirror-image upload flow was not: proposing an
+upload from Android still left it sitting under the desktop's "Incoming
+Transfer Requests" panel until someone clicked Accept, even though the
+desktop had already paired with that device — the only decision that
+actually matters for whether it should be allowed to send bytes at all.
+
+## Root Cause
+
+- `TransferService.request_transfer` (`app/services/transfer_service.py`)
+  special-cased `direction=send`: only a download's `Transfer` row was
+  created in the same call that proposed it. A `receive` (upload) proposal
+  was still stored `PENDING` in `TransferManager`, requiring a separate
+  desktop-initiated `POST /transfers/requests/{id}/accept` call
+  (`TransferService.accept_request`) before it became a `Transfer` row.
+- `desktop/src/renderer/views/transfers.js` rendered that `PENDING` list as
+  the "Incoming Transfer Requests" table with Accept/Reject buttons — the
+  only reason that table (and the corresponding "Requests" section in
+  Android's `TransferListScreen`) ever had anything to show.
+- `TransferListScreen.handleUpload` (Android) proposed the transfer and
+  navigated to `TransferRequestDetail`, a screen dedicated to watching a
+  still-pending request and letting the user withdraw it — infrastructure
+  that only existed to support this now-redundant approval step.
+
+## Solution
+
+- **Backend:** `request_transfer` now creates the `Transfer` row
+  immediately for *both* directions — the `send`/`receive` branch only
+  decides how the file/size snapshot is resolved, not whether a decision
+  step happens afterward. `accept_request`, `reject_request`, and
+  `withdraw_request` were deleted from `TransferService` (nothing is ever
+  left `PENDING` for them to act on), along with their routes
+  (`POST /transfers/requests/{id}/accept|reject`,
+  `DELETE /transfers/requests/{id}`) in `app/api/v1/transfers.py`.
+  `GET /transfers/requests` and `GET /transfers/requests/{id}` were kept
+  unchanged — Android's download-status derivation already polls the
+  former defensively, and the latter still lets a caller look up a request
+  it just made.
+- **Desktop:** `transfers.js` dropped the `/transfers/requests` fetch and
+  the "Incoming Transfer Requests" table/Accept/Reject wiring entirely —
+  the view now only ever renders the `Transfers` list, which already
+  showed both directions once a `Transfer` row existed.
+- **Android:** `TransferListScreen.handleUpload` now mirrors
+  `FilesScreen.handleDownload` exactly: since the auto-accepted proposal's
+  response already carries a `transfer_id`, it registers the picked file's
+  local content URI under that id (`registerUploadSource`, simplified to
+  take a `transfer_id` directly instead of a request-id-to-transfer-id
+  promotion dance that no longer had a reason to exist), fetches the
+  `Transfer`, and hands it straight to `TransferStreamManager.start()` —
+  no navigation to a pending-request screen in between.
+  `TransferRequestDetail.tsx` and `useTransferRequest.ts` were deleted
+  (nothing is ever left pending to view or withdraw), and
+  `TransferDetailScreen`'s route param collapsed from a
+  `{kind: 'request'|'transfer'}` union to a plain `{transferId: number}`,
+  since only the persisted-transfer view is ever reachable now.
+
+## Verification
+
+- Backend: `backend/tests/services/test_transfer_service.py` and
+  `backend/tests/api/test_transfers.py` rewritten for the upload
+  auto-accept path (mirroring the existing download coverage), plus
+  updated fixture helpers in `backend/tests/api/test_transfer_streaming.py`
+  and `backend/tests/services/test_transfer_stream_service.py` that
+  previously drove a transfer into existence via the now-deleted
+  `accept_request`. Full backend suite: `python -m pytest` — 286 passed, 2
+  skipped. `ruff check app tests` clean.
+- Android: `android/__tests__/streaming/uploadSourceRegistry.test.ts`
+  updated for the simplified by-`transfer_id` API;
+  `android/__tests__/transfers/useTransferRequest.test.tsx` deleted (its
+  subject no longer exists). Full suite: `npx jest` — 21 suites / 118 tests
+  passing. `npx tsc --noEmit` and `npx eslint` clean.
+- Desktop: no automated test suite exists for the plain-JS renderer
+  (unchanged from T1); `transfers.js` was syntax-checked
+  (`node --check`) and traced by hand against the `/transfers`-only
+  response shape it now consumes.
+- Live device E2E (confirming a file picked on Android starts uploading
+  immediately with no desktop interaction, and that the desktop's
+  Transfers view shows it in progress without ever presenting an
+  accept/reject prompt) was not re-run as part of this fix — no physical
+  device/desktop pair was available in the environment the fix was made
+  in. Recommended before closing this out, mirroring the same caveat noted
+  for the download-side fix above.
+
+---
+
+# Milestone P2 — Shared Files Screen Never Re-Validated What It Displayed
+
+## Problem
+
+Three separate issues were raised against the Android Files screen, all
+scoped to `FilesScreen.tsx`/`android/src/files/`:
+
+1. A file downloaded once kept showing "Downloaded" even after the user
+   deleted it, cleared the `Relay` Downloads subfolder, or reinstalled the
+   app.
+2. Every download briefly showed a bare `'...'` button state between
+   tapping Download and the button settling into "Downloading...".
+3. A file newly shared from the desktop did not appear on Android until
+   the user manually pulled to refresh.
+
+## Investigation
+
+- **Issue 1.** Traced `deriveDownloadStatus()`
+  (`android/src/files/downloadStatus.ts`) — it maps a shared file straight
+  to `{ kind: 'completed' }` whenever the most recent matching `Transfer`
+  has `status === 'completed'`. That backend status is written once, when
+  `TransferStreamService`'s download stream finishes, and never revisited
+  afterward (by design — V1 has no resume/retry). Nothing on the Android
+  side ever asked "is the file this status implies actually still there?"
+  — the check plainly did not exist. Confirmed this is a genuinely
+  different condition from the transfer's own state: the `Transfer` row
+  and its `status='completed'` are both *correct* — the file really was
+  downloaded successfully — the staleness is entirely in what the file
+  *system* looks like now, which the backend's database has no way to
+  know about (the download happens entirely on the Android side, after
+  the backend has already finished streaming its bytes).
+- **Issue 2.** Traced the button's label function,
+  `downloadButtonLabel()` in `FilesScreen.tsx`: it returns `'...'`
+  whenever the screen's local `requesting` flag is true, which spans
+  `handleDownload`'s `proposeTransfer()` → `refreshRequests()`/
+  `refreshTransfers()` → `getTransfer()` round trip. Cross-referenced
+  against `backend/app/services/transfer_service.py`'s
+  `_create_transfer()`: a download's `Transfer` row is created with
+  `status=TransferStatus.IN_PROGRESS` synchronously, in the very same
+  `POST /transfers/requests` call `proposeTransfer()` makes — i.e. by the
+  time `requesting` even becomes true, the eventual "Downloading..."
+  state is already a foregone conclusion sitting in the response Android
+  is about to receive. The "..." wasn't covering genuine uncertainty; it
+  was just a slower way of saying "Downloading...".
+- **Issue 3.** Traced `useSharedFiles()` — `getAvailableFiles()` is called
+  once on mount (`useEffect`) and again only via `refresh()`, which is
+  wired to `FilesScreen`'s `<RefreshControl onRefresh={refresh}>` (a
+  manual pull gesture) and nothing else. Compared against
+  `FilesScreen`'s own handling of transfer state, which already polls
+  `useTransferRequests`/`useTransfers` every 2 seconds via a
+  `useFocusEffect` — the shared-file list had no equivalent. Considered
+  three options: (a) a real push channel (WebSockets/SSE) from desktop to
+  Android — rejected, explicitly deferred per `docs/11_File_Transfer.md`
+  §16 and disproportionate to a UX-polish milestone; (b) polling at the
+  same 2-second cadence already used for transfers — rejected as
+  unnecessarily chatty, since the shared-file list changes only when a
+  human on the desktop clicks "Share," nowhere near as often as an active
+  transfer's byte-level progress; (c) refresh-on-focus plus a slower,
+  screen-scoped poll — chosen, since it reuses the exact
+  `useFocusEffect` pattern already in this file and costs one extra
+  `GET /files` every few seconds only while a user is actually looking at
+  the Files screen.
+
+## Solution
+
+- **Issue 1:** Added `android/src/files/downloadExistence.ts`
+  (`downloadedFileExists(fileName)`) and
+  `android/src/files/useDownloadExistence.ts` (a small existence-cache
+  hook, `{ existence, verify }`). `deriveDownloadStatus()` gained an
+  optional 4th parameter, `fileExists`: when the derived status would be
+  `'completed'` and `fileExists === false`, it downgrades to `'idle'`
+  instead — an explicit `true`, or the default `undefined` (not checked
+  yet), leaves `'completed'` alone. `FilesScreen` now verifies existence
+  for every file its polled data reports as completed, on every focus
+  tick, via a small `useEffect` — not a one-time check, since a file can
+  be deleted at any point after a prior check found it present.
+  `downloadedFileExists()` mirrors (rather than imports) the destination
+  logic from `streaming/blobUtil.ts`'s `publishDownload()` — `Relay`
+  subfolder of the public Downloads directory on API 29+, private staging
+  path below it — since `android/src/streaming/**` was out of scope to
+  modify for this milestone.
+- **Issue 2:** `downloadButtonLabel()`'s `requesting` branch now returns
+  `'Downloading...'` instead of `'...'`. `requesting` itself is unchanged
+  — it still exists, still disables the button for the duration of the
+  propose call, and still drives the error message on failure — only the
+  label shown while it's true changed, since the state it represents was
+  never actually ambiguous.
+- **Issue 3:** `useSharedFiles()` gained `refreshSilently()`, sharing the
+  same `load()` core as the existing `refresh()` but never touching
+  `loading`/`refreshing` (so it can't flash the pull-to-refresh spinner).
+  `FilesScreen` calls it immediately on focus and then every 5 seconds
+  while focused, via its own `useFocusEffect` — separate from, and
+  slower than, the screen's existing 2-second transfer-progress poll.
+
+## Verification
+
+- New/updated Android tests: `__tests__/files/downloadExistence.test.ts`
+  (path resolution on and below API 29, missing-file and error cases),
+  `__tests__/files/useDownloadExistence.test.tsx` (records a check's
+  result, dedupes a concurrent in-flight check for the same file, re-checks
+  on a later call rather than caching forever, tracks multiple files
+  independently), new cases in `__tests__/files/downloadStatus.test.ts`
+  (completed stays completed when `fileExists` is omitted/`true`,
+  downgrades to idle when explicitly `false`, ignored for non-completed
+  statuses), and new cases in `__tests__/files/useSharedFiles.test.tsx`
+  (`refreshSilently()` re-fetches without ever setting
+  `loading`/`refreshing`, still surfaces a failure message).
+- Full Android suite: `npx jest` — 23 suites / 134 tests passing.
+  `npx tsc --noEmit` and `npx eslint` clean on all changed/added files.
+- Live device E2E (confirming a deleted download reverts to "Download" the
+  next time Files regains focus, a tap on Download shows "Downloading..."
+  immediately with no visible "..." step, and a file shared from the
+  desktop appears on Android without a manual pull) was not re-run as part
+  of this fix — no physical device/desktop pair was available in the
+  environment the fix was made in. Recommended before closing this out,
+  mirroring the same caveat noted throughout this notebook.

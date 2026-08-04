@@ -89,12 +89,12 @@ As of M10 (Shared Files) and M11/M12 (Transfers/Streaming), this is
 actively enforced: `GET /files` and the dual-audience `/transfers` routes
 use `RequestingDeviceDep`; the Android-only transfer-proposal and
 byte-streaming routes (`POST /transfers/requests`,
-`DELETE /transfers/requests/{id}`, `GET /transfers/{id}/download`,
-`POST /transfers/{id}/upload`) require `CurrentDeviceDep` outright — see
-[Shared Files API](#shared-files-api) and [Transfer API](#transfer-api)
-below. `/settings`, `/devices`, and `/pairing` remain unauthenticated —
-still desktop-only, loopback-trusted endpoints in practice, and whether
-they should ever require a session was raised during M9 and left open.
+`GET /transfers/{id}/download`, `POST /transfers/{id}/upload`) require
+`CurrentDeviceDep` outright — see [Shared Files API](#shared-files-api) and
+[Transfer API](#transfer-api) below. `/settings`, `/devices`, and
+`/pairing` remain unauthenticated — still desktop-only, loopback-trusted
+endpoints in practice, and whether they should ever require a session was
+raised during M9 and left open.
 
 ## Shared File Infrastructure
 
@@ -119,36 +119,45 @@ individual regular files (`docs/11_File_Transfer.md` §6).
 
 ## Transfer Infrastructure
 
-Transfers follow a two-phase lifecycle described in `docs/11_File_Transfer.md`
-§7 and `docs/13_Database_Design.md` §7: a paired Android device *proposes*
-a transfer (a download of a shared file, or a proposed upload), the desktop
-user *accepts or rejects* it, and only an accepted proposal ever becomes a
-persisted `Transfer` row.
+Transfers are described by `docs/11_File_Transfer.md` §7 and
+`docs/13_Database_Design.md` §7: a paired Android device *proposes* a
+transfer — a download of a shared file, or an upload — and it is
+**auto-accepted in that same call**. A download always has been (the
+desktop already made the decision that matters when it shared the file);
+an upload now follows the same reasoning, since the desktop already made
+the decision that matters when it paired with the device — see the
+Milestone P1 entry in `docs/15_QA_NOTEBOOK.md`. There is no longer any
+desktop review step for either direction, and only an accepted proposal
+ever becomes a persisted `Transfer` row.
 
-**Pending requests are runtime-only state**, mirroring the pairing-token
-pattern (`docs/13_Database_Design.md` §9): the `transfers.status` enum has
-no "pending" or "rejected" value, so a proposal the desktop hasn't decided
-on yet is never written to the database. `TransferManager`
-(`app/services/transfer_manager.py`) holds every pending
+**Pending-request bookkeeping is runtime-only state**, mirroring the
+pairing-token pattern (`docs/13_Database_Design.md` §9): the
+`transfers.status` enum has no "pending" or "rejected" value, so a proposal
+is never written to the database until it's accepted. `TransferManager`
+(`app/services/transfer_manager.py`) holds every decided
 `PendingTransferRequest`, keyed by an opaque `request_id`, in a
 lock-guarded, in-memory dict — a process-lifetime singleton
-(`get_transfer_manager()`), the same pattern as `PairingManager`. Unlike
-pairing, which only ever has one active attempt, `TransferManager` supports
-many concurrent pending requests, since multiple files and multiple devices
-can each have a proposal outstanding at once.
+(`get_transfer_manager()`), the same pattern as `PairingManager` — for the
+short grace period a requester's poll needs to observe the outcome. Since
+`request_transfer` now decides every request in the same call that creates
+it, nothing is ever actually left `PENDING` in this store; `TransferManager`
+itself is unchanged (it still supports genuinely pending, multi-device
+state as a building block), but `TransferService` no longer calls the
+methods (`create`, `claim_for_decision`, `withdraw`) that would use that
+capability.
 
-`TransferService` (`app/services/transfer_service.py`) orchestrates the
-lifecycle: `request_transfer` (propose), `accept_request` / `reject_request`
-(desktop decision), `list_requests` / `get_request_or_raise` /
-`withdraw_request` (pending-phase queries), and `list_transfers` /
+`TransferService` (`app/services/transfer_service.py`) orchestrates this:
+`request_transfer` (propose-and-accept in one step), `list_requests` /
+`get_request_or_raise` (pending-phase queries — always empty/immediately
+`accepted` in practice, kept for existing pollers), and `list_transfers` /
 `get_transfer_or_raise` / `cancel_transfer` (persisted-phase queries). It
 delegates persistence to `SharedFileService`, `DeviceRepository`, and
-`TransferRepository` rather than duplicating their logic. `accept_request`
-re-validates and re-snapshots `file_name`/`file_size`/`device_name` at
-accept time, not just at proposal time, per `docs/10_Security.md` §9 —
-if that re-validation fails (e.g. the shared file was removed in the
-meantime), the pending request is marked `REJECTED` rather than silently
-dropped, so a polling requester still observes a definite outcome.
+`TransferRepository` rather than duplicating their logic. `request_transfer`
+re-validates and re-snapshots `file_name`/`file_size`/`device_name` at the
+moment the `Transfer` row is created, not just from the proposal payload,
+per `docs/10_Security.md` §9 — if that re-validation fails (e.g. a `send`
+names a shared file that was removed in the meantime), the call raises
+`NotFoundError` and nothing is persisted.
 
 M11 does not stream bytes — the only DB-level status transition it performs
 on an accepted transfer is `in_progress -> cancelled`. Byte movement, and
@@ -265,7 +274,7 @@ sub-router per resource:
 | `pairing.py` | `/pairing` | `POST /pairing/start`, `GET /pairing/pending/{token}`, `POST /pairing/request`, `POST /pairing/approve`, `POST /pairing/reject`, `GET /pairing/result/{token}` |
 | `discovery.py` | `/discovery` | `GET /discovery/status` |
 | `shared_files.py` | `/files` | `POST /files`, `GET /files`, `GET /files/{id}`, `POST /files/{id}/refresh`, `DELETE /files/{id}` |
-| `transfers.py` | `/transfers` | `POST /transfers/requests`, `GET /transfers/requests`, `GET /transfers/requests/{id}`, `DELETE /transfers/requests/{id}`, `POST /transfers/requests/{id}/accept`, `POST /transfers/requests/{id}/reject`, `GET /transfers`, `GET /transfers/{id}`, `POST /transfers/{id}/cancel`, `GET /transfers/{id}/download`, `POST /transfers/{id}/upload` |
+| `transfers.py` | `/transfers` | `POST /transfers/requests`, `GET /transfers/requests`, `GET /transfers/requests/{id}`, `GET /transfers`, `GET /transfers/{id}`, `POST /transfers/{id}/cancel`, `GET /transfers/{id}/download`, `POST /transfers/{id}/upload` |
 
 A new resource gets its own router module in `app/api/v1/`, included in
 `router.py` — routers are never nested arbitrarily deep, matching one file
@@ -446,13 +455,11 @@ precedent — Android cannot select files or mutate the shared list.
 | `POST /transfers/requests` | 201, 400, 404 | Android |
 | `GET /transfers/requests` | 200 | Dual-audience |
 | `GET /transfers/requests/{id}` | 200, 404 | Dual-audience |
-| `DELETE /transfers/requests/{id}` | 204, 404 | Android |
-| `POST /transfers/requests/{id}/accept` | 201, 404 | Desktop |
-| `POST /transfers/requests/{id}/reject` | 200, 404 | Desktop |
 
-`accept`/`reject` are desktop-only and unauthenticated, matching the
-`/devices`, `/settings`, and `/files`-mutation precedent — the desktop's
-own UI always calls over loopback.
+`POST /transfers/requests` auto-accepts in the same call — the response
+already carries `status=accepted` and a `transfer_id` — for both directions,
+so there is no accept/reject/withdraw endpoint: nothing is ever left for a
+second call to decide on.
 
 **Transfers** (persisted):
 
@@ -479,10 +486,9 @@ changed type, or has changed size since the transfer was accepted
 (download), or an upload that over/under-delivers relative to its declared
 `file_size`.
 
-Typical flow: Android proposes (`POST /transfers/requests`) → desktop
-accepts (`POST /transfers/requests/{id}/accept`, creating the persisted
-`Transfer`) → Android streams bytes (`GET .../download` or
-`POST .../upload`) → either side polls `GET /transfers/{id}` for progress
+Typical flow: Android proposes (`POST /transfers/requests`, auto-accepted,
+creating the persisted `Transfer`) → Android streams bytes (`GET .../download`
+or `POST .../upload`) → either side polls `GET /transfers/{id}` for progress
 (`bytes_transferred`) until `status` reaches a terminal value.
 
 ## Discovery API
@@ -539,7 +545,7 @@ backend/
 │   │   ├── auth_service.py            # Validates a DeviceSession bearer token
 │   │   ├── shared_file_service.py     # Share/list/refresh/unshare the desktop's shared file list
 │   │   ├── transfer_manager.py        # In-memory, lock-guarded pending-transfer-request store (singleton)
-│   │   ├── transfer_service.py        # Transfer lifecycle: propose/accept/reject/cancel; exposed via app/api/v1/transfers.py
+│   │   ├── transfer_service.py        # Transfer lifecycle: propose (auto-accepted)/cancel; exposed via app/api/v1/transfers.py
 │   │   ├── transfer_stream_service.py # Streams bytes for an already-accepted transfer (Milestone 12)
 │   │   ├── active_stream_registry.py  # In-memory guard: one active byte stream per transfer_id (singleton)
 │   │   └── discovery_service.py       # Background UDP broadcaster singleton (Milestone 13)
@@ -630,7 +636,7 @@ All commands below are run from the `backend/` directory.
      `POST /api/v1/pairing/start` (e.g. from Swagger UI) and follow the flow
      described in [Pairing API](#pairing-api)
    * Transfers: no plain GET link is interesting until a device is paired —
-     follow the pairing flow above, then the propose → accept →
+     follow the pairing flow above, then the propose (auto-accepted) →
      download/upload flow described in [Transfer API](#transfer-api)
    * Discovery status: http://localhost:8000/api/v1/discovery/status — the
      background broadcaster starts automatically with the app (see

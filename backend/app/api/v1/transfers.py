@@ -1,20 +1,17 @@
-"""Transfer endpoints: propose, decide on, list, cancel, and stream the bytes
-of file transfers (docs/11_File_Transfer.md §7-8, docs/13_Database_Design.md §7).
+"""Transfer endpoints: propose, list, cancel, and stream the bytes of file
+transfers (docs/11_File_Transfer.md §7-8, docs/13_Database_Design.md §7).
 
 Three sub-resources:
 
 * `/transfers/requests` — the pending, in-memory phase (TransferManager).
-  Android-only (`CurrentDeviceDep`) for proposing (POST) and withdrawing
-  (DELETE) a request; dual-audience (`RequestingDeviceDep`) for
-  listing/inspecting — the desktop sees every pending request, a paired
-  Android device sees only its own. A `send` (download) proposal is
-  auto-accepted inside that same POST — see TransferService.request_transfer
-  — so only a `receive` (upload) proposal is ever actually observed PENDING.
-  The accept/reject decision is desktop-only, unauthenticated, matching the
-  existing /devices, /settings, and /files-mutation precedent (the desktop's
-  own UI always calls over loopback), and now only meaningful for uploads.
-* `/transfers` — the persisted phase (TransferRepository), created only once
-  a request is accepted. Dual-audience throughout, same split as above.
+  Android-only (`CurrentDeviceDep`) for proposing (POST); dual-audience
+  (`RequestingDeviceDep`) for listing/inspecting. Both a `send` (download)
+  and a `receive` (upload) proposal are auto-accepted inside that same POST
+  — see TransferService.request_transfer — so a request is never actually
+  observed PENDING; there is no desktop decision step and therefore no
+  accept/reject/withdraw endpoint.
+* `/transfers` — the persisted phase (TransferRepository), created in the
+  same call that proposes it. Dual-audience throughout, same split as above.
 * `/transfers/{id}/download` and `/transfers/{id}/upload` — the Streaming
   Engine (Milestone 12, TransferStreamService). Android-only, like the
   request sub-resource: the desktop never calls these itself, it just reads
@@ -26,7 +23,7 @@ response by the centralized handlers in app/api/exception_handlers.py
 (Milestone 6).
 """
 
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, Request, status
 from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import (
@@ -55,7 +52,9 @@ router = APIRouter()
 def request_transfer(
     body: TransferRequestCreate, device: CurrentDeviceDep, service: TransferServiceDep
 ) -> ApiResponse:
-    """Propose a transfer: a download of a shared file, or a proposed upload."""
+    """Propose a transfer: a download of a shared file, or an upload. Both are
+    auto-accepted in this same call — the response already carries
+    status=accepted and a transfer_id."""
     request = service.request_transfer(
         device, body.direction, body.shared_file_id, body.file_name, body.file_size
     )
@@ -79,32 +78,6 @@ def get_transfer_request(
     request = service.get_request_or_raise(request_id, device)
     response = TransferRequestResponse.model_validate(request)
     return success(response.model_dump(mode="json"))
-
-
-@router.delete("/requests/{request_id}", status_code=status.HTTP_204_NO_CONTENT)
-def withdraw_transfer_request(
-    request_id: str, device: CurrentDeviceDep, service: TransferServiceDep
-) -> Response:
-    """Withdraw one's own pending transfer request before the desktop decides."""
-    service.withdraw_request(request_id, device)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-@router.post(
-    "/requests/{request_id}/accept", response_model=ApiResponse, status_code=status.HTTP_201_CREATED
-)
-def accept_transfer_request(request_id: str, service: TransferServiceDep) -> ApiResponse:
-    """Accept a pending transfer request, creating its Transfer record."""
-    transfer = service.accept_request(request_id)
-    response = TransferResponse.model_validate(transfer)
-    return success(response.model_dump(mode="json"), message="Transfer request accepted.")
-
-
-@router.post("/requests/{request_id}/reject", response_model=ApiResponse)
-def reject_transfer_request(request_id: str, service: TransferServiceDep) -> ApiResponse:
-    """Reject a pending transfer request. No Transfer record is created."""
-    service.reject_request(request_id)
-    return success({"status": "rejected"}, message="Transfer request rejected.")
 
 
 # --- /transfers (persisted) ---------------------------------------------------

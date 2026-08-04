@@ -48,11 +48,13 @@ def _accept_download(db_session: Session, device: Device, file_path: str) -> Tra
 def _accept_upload(
     db_session: Session, device: Device, file_name: str = "photo.jpg", file_size: int = 12
 ) -> Transfer:
+    """Named `_accept_upload` for parity with `_accept_download` above, even
+    though an upload is now auto-accepted by request_transfer itself."""
     transfer_service = TransferService(db_session, TransferManager())
     request = transfer_service.request_transfer(
         device, TransferDirection.RECEIVE, None, file_name, file_size
     )
-    return transfer_service.accept_request(request.request_id)
+    return transfer_service.get_transfer_or_raise(request.transfer_id, None)
 
 
 def _stream_service(db_session: Session) -> TransferStreamService:

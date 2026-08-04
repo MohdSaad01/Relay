@@ -90,13 +90,23 @@ def test_request_download_creates_accepted_transfer(
     assert transfer["status"] == "in_progress"
 
 
-def test_request_upload_creates_pending_request(client: TestClient) -> None:
+def test_request_upload_creates_accepted_transfer(client: TestClient) -> None:
+    """An upload is now auto-accepted the same way a download is -- no
+    desktop approval step -- so the response already carries transfer_id."""
     _pair_device_with_token(client)
 
     data = _request_upload(client)
 
+    assert data["status"] == "accepted"
     assert data["file_name"] == "photo.jpg"
     assert data["shared_file_id"] is None
+    assert data["transfer_id"] is not None
+
+    transfer = client.get(
+        f"/api/v1/transfers/{data['transfer_id']}", headers=_auth_headers()
+    ).json()["data"]
+    assert transfer["status"] == "in_progress"
+    assert transfer["direction"] == "receive"
 
 
 def test_request_transfer_without_token_is_rejected(client: TestClient) -> None:
@@ -123,14 +133,18 @@ def test_request_download_for_unknown_shared_file_returns_404(client: TestClient
 # --- GET /transfers/requests (dual audience) -----------------------------------
 
 
-def test_list_requests_as_desktop_returns_all(client: TestClient, desktop_client: TestClient) -> None:
+def test_list_requests_never_includes_auto_accepted_uploads(
+    client: TestClient, desktop_client: TestClient
+) -> None:
+    """Every transfer request is auto-accepted now, so it's never observed
+    sitting PENDING -- GET /transfers/requests is always empty."""
     _pair_device_with_token(client)
     _request_upload(client)
 
     response = desktop_client.get("/api/v1/transfers/requests")
 
     assert response.status_code == 200
-    assert len(response.json()["data"]) == 1
+    assert response.json()["data"] == []
 
 
 def test_list_requests_as_android_returns_only_own(client: TestClient) -> None:
@@ -141,82 +155,34 @@ def test_list_requests_as_android_returns_only_own(client: TestClient) -> None:
     response = client.get("/api/v1/transfers/requests", headers=_auth_headers("token-a"))
 
     assert response.status_code == 200
-    assert len(response.json()["data"]) == 1
+    assert response.json()["data"] == []
 
 
-# --- DELETE /transfers/requests/{id} --------------------------------------------
+# --- GET /transfers/requests/{id} -----------------------------------------------
 
 
-def test_withdraw_request_removes_it(client: TestClient) -> None:
+def test_get_transfer_request_returns_the_auto_accepted_request(client: TestClient) -> None:
     _pair_device_with_token(client)
     created = _request_upload(client)
 
-    response = client.delete(
+    response = client.get(
         f"/api/v1/transfers/requests/{created['request_id']}", headers=_auth_headers()
     )
 
-    assert response.status_code == 204
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "accepted"
 
 
-def test_withdraw_request_not_owned_returns_404(client: TestClient) -> None:
+def test_get_transfer_request_not_owned_returns_404(client: TestClient) -> None:
     _pair_device_with_token(client, "token-a")
     _pair_device_with_token(client, "token-b")
     created = _request_upload(client, "token-a")
 
-    response = client.delete(
+    response = client.get(
         f"/api/v1/transfers/requests/{created['request_id']}", headers=_auth_headers("token-b")
     )
 
     assert response.status_code == 404
-
-
-# --- POST /transfers/requests/{id}/accept and /reject (desktop only) -----------
-
-
-def test_accept_request_creates_transfer(client: TestClient, desktop_client: TestClient) -> None:
-    _pair_device_with_token(client)
-    created = _request_upload(client)
-
-    response = desktop_client.post(f"/api/v1/transfers/requests/{created['request_id']}/accept")
-
-    assert response.status_code == 201
-    data = response.json()["data"]
-    assert data["status"] == "in_progress"
-    assert data["file_name"] == "photo.jpg"
-
-
-def test_accept_unknown_request_returns_404(desktop_client: TestClient) -> None:
-    response = desktop_client.post("/api/v1/transfers/requests/missing/accept")
-
-    assert response.status_code == 404
-
-
-def test_accept_already_auto_accepted_download_returns_404(
-    client: TestClient, desktop_client: TestClient, tmp_path: Path
-) -> None:
-    shared_file = _share_file(desktop_client, _make_file(tmp_path))
-    _pair_device_with_token(client)
-    created = client.post(
-        "/api/v1/transfers/requests",
-        json={"direction": "send", "shared_file_id": shared_file["id"]},
-        headers=_auth_headers(),
-    ).json()["data"]
-
-    response = desktop_client.post(f"/api/v1/transfers/requests/{created['request_id']}/accept")
-
-    assert response.status_code == 404
-
-
-def test_reject_request_discards_it(client: TestClient, desktop_client: TestClient) -> None:
-    _pair_device_with_token(client)
-    created = _request_upload(client)
-
-    response = desktop_client.post(f"/api/v1/transfers/requests/{created['request_id']}/reject")
-
-    assert response.status_code == 200
-    poll = client.get(f"/api/v1/transfers/requests/{created['request_id']}", headers=_auth_headers())
-    assert poll.json()["data"]["status"] == "rejected"
-    assert desktop_client.get("/api/v1/transfers").json()["data"] == []
 
 
 # --- GET /transfers, GET /transfers/{id} (dual audience) -----------------------
@@ -224,8 +190,7 @@ def test_reject_request_discards_it(client: TestClient, desktop_client: TestClie
 
 def test_list_transfers_as_desktop_returns_all(client: TestClient, desktop_client: TestClient) -> None:
     _pair_device_with_token(client)
-    created = _request_upload(client)
-    desktop_client.post(f"/api/v1/transfers/requests/{created['request_id']}/accept")
+    _request_upload(client)
 
     response = desktop_client.get("/api/v1/transfers")
 
@@ -233,15 +198,14 @@ def test_list_transfers_as_desktop_returns_all(client: TestClient, desktop_clien
     assert len(response.json()["data"]) == 1
 
 
-def test_get_transfer_not_owned_returns_404(client: TestClient, desktop_client: TestClient) -> None:
+def test_get_transfer_not_owned_returns_404(client: TestClient) -> None:
     _pair_device_with_token(client, "token-a")
     _pair_device_with_token(client, "token-b")
     created = _request_upload(client, "token-a")
-    transfer = desktop_client.post(
-        f"/api/v1/transfers/requests/{created['request_id']}/accept"
-    ).json()["data"]
 
-    response = client.get(f"/api/v1/transfers/{transfer['id']}", headers=_auth_headers("token-b"))
+    response = client.get(
+        f"/api/v1/transfers/{created['transfer_id']}", headers=_auth_headers("token-b")
+    )
 
     assert response.status_code == 404
 
@@ -252,11 +216,8 @@ def test_get_transfer_not_owned_returns_404(client: TestClient, desktop_client: 
 def test_cancel_transfer_marks_cancelled(client: TestClient, desktop_client: TestClient) -> None:
     _pair_device_with_token(client)
     created = _request_upload(client)
-    transfer = desktop_client.post(
-        f"/api/v1/transfers/requests/{created['request_id']}/accept"
-    ).json()["data"]
 
-    response = desktop_client.post(f"/api/v1/transfers/{transfer['id']}/cancel")
+    response = desktop_client.post(f"/api/v1/transfers/{created['transfer_id']}/cancel")
 
     assert response.status_code == 200
     assert response.json()["data"]["status"] == "cancelled"
@@ -267,11 +228,8 @@ def test_cancel_already_cancelled_transfer_returns_409(
 ) -> None:
     _pair_device_with_token(client)
     created = _request_upload(client)
-    transfer = desktop_client.post(
-        f"/api/v1/transfers/requests/{created['request_id']}/accept"
-    ).json()["data"]
-    desktop_client.post(f"/api/v1/transfers/{transfer['id']}/cancel")
+    desktop_client.post(f"/api/v1/transfers/{created['transfer_id']}/cancel")
 
-    response = desktop_client.post(f"/api/v1/transfers/{transfer['id']}/cancel")
+    response = desktop_client.post(f"/api/v1/transfers/{created['transfer_id']}/cancel")
 
     assert response.status_code == 409

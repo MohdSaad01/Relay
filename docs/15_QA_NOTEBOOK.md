@@ -529,3 +529,157 @@ scoped to `FilesScreen.tsx`/`android/src/files/`:
   of this fix — no physical device/desktop pair was available in the
   environment the fix was made in. Recommended before closing this out,
   mirroring the same caveat noted throughout this notebook.
+
+---
+
+# Milestone P3 — Transfer State Consistency & Download Reliability
+
+## Problem
+
+Three separate inconsistencies were raised against the transfer workflow:
+
+1. After a download auto-starts from the Files screen, the Transfers tab
+   sometimes takes ~2-3 seconds to show it.
+2. A transfer the Overview list already shows as `Completed` (e.g.
+   "702.3 KB / 702.3 KB") briefly shows something inconsistent — a smaller
+   byte count and a different status — when its detail screen is opened,
+   before correcting itself 10-15 seconds later.
+3. Multiple downloads all report `Completed`, but only one file actually
+   ends up in `Downloads/Relay`.
+
+## Investigation
+
+- **Issue 1.** Traced `Transfer` persistence first, to rule out the
+  backend: `TransferService._create_transfer`
+  (`backend/app/services/transfer_service.py`) commits the row
+  synchronously inside `POST /transfers/requests`, so it already exists by
+  the time `proposeTransfer()` resolves on Android — the delay could not be
+  a backend or API-response issue. Traced Android's polling next:
+  `TransferListScreen`'s `useFocusEffect`
+  (`android/src/screens/transfers/TransferListScreen.tsx`) and
+  `FilesScreen`'s equivalent request/transfer `useFocusEffect`
+  (`android/src/screens/files/FilesScreen.tsx`) both started a
+  `setInterval(refresh, POLL_INTERVAL_MS)` on regaining focus but never
+  called `refresh()` immediately — the first refresh only happened on the
+  interval's own first tick, up to 2000ms later.
+  `createBottomTabNavigator` (`android/src/navigation/MainTabs.tsx`) keeps
+  tab screens mounted after their first visit, so switching from Files to
+  Transfers after starting a download does not remount
+  `TransferListScreen` and force a fresh fetch — only the delayed interval
+  tick would eventually show it. This is the exact staleness class
+  Milestone P2 already fixed for the shared-file list
+  (`refreshSilently()` called immediately on focus, then on an interval) —
+  that fix was never applied to transfer/request polling.
+- **Issue 2.** Traced `TransferProgressDetail`
+  (`android/src/screens/transfers/TransferProgressDetail.tsx`): it merges
+  the server-polled `Transfer` (`useTransfer`) with
+  `TransferStreamManager`'s live state (`useTransferStream`) whenever
+  `stream?.transferId === transferId`
+  (`useLiveStream`), with no check on whether that local state was actually
+  caught up with the server. Traced `TransferStreamManager.start()`
+  (`android/src/streaming/TransferStreamManager.ts`): once the byte
+  transfer itself finishes (`await activeTask.promise`), a `send` transfer
+  still has to `await publishDownload(...)` (MediaStore copy) and
+  `await notifyDownloadComplete(...)` (notification post) — both I/O-bound
+  — *before* `state` is set to `'completed'` with `bytesTransferred` reset
+  to the full total. Until that finishes, `stream.status` can still read
+  `'streaming'` with whatever partial byte count its last 250ms progress
+  tick observed (for a small/fast file, possibly just one early tick).
+  Meanwhile the backend has already committed the transfer as `completed`
+  the moment its own streaming generator finished
+  (`transfer_stream_service.py`'s `_finalize`), and the Overview list's own
+  `GET /transfers` poll already reflects that. Opening the detail screen
+  during this window showed the stale local view instead of the
+  already-correct server one; it "corrected itself" once
+  `publishDownload`/`notifyDownloadComplete` finished and flipped `state`.
+- **Issue 3.** Traced the full `publishDownload()` path
+  (`android/src/streaming/blobUtil.ts`) into `react-native-blob-util`'s
+  Android implementation
+  (`node_modules/react-native-blob-util/android/src/main/java/com/ReactNativeBlobUtil/ReactNativeBlobUtilMediaCollection.java`):
+  `createNewMediaFile` calls `ContentResolver.insert()` with the requested
+  `DISPLAY_NAME` verbatim — no conflict handling of any kind, every single
+  call. Compared against the backend's own upload path
+  (`backend/app/utils/filesystem.resolve_available_path`), which
+  deliberately resolves a "name (1).ext" alternative before ever writing a
+  file — nothing on the Android download-publish side has an equivalent.
+  Two downloads landing on the same file name is a genuinely reachable
+  case: Milestone P2's own existence-check-driven re-download flow lets a
+  file whose local copy was deleted revert to re-downloadable (same file
+  name, new `Transfer`), and two different shared files can trivially share
+  a basename. `publishDownload()`'s error handling is deliberately
+  best-effort and swallows any `copyToMediaStore` failure (by design — a
+  publish failure must not turn an otherwise-successful byte transfer into
+  a reported failure), which means a MediaStore insert failing against an
+  already-taken name fails *silently*: the file is left at its private,
+  invisible staging path while both the backend `Transfer` and the local
+  stream state still correctly report `completed`, since neither of them
+  is aware `publishDownload` even ran, let alone whether it succeeded.
+  Whether the underlying platform call actually fails outright on a
+  `DISPLAY_NAME` collision, silently reuses the existing row, or something
+  else could not be confirmed without a physical device — but the absence
+  of any conflict handling at all, for a reachable same-name case, was
+  independently verifiable by code alone.
+
+## Root Cause
+
+All three trace to state living in more than one place without a rule for
+which copy wins when they disagree, or without ever noticing a name
+collision at all:
+
+- Issue 1: Android's UI polling had no "refresh now" trigger on regaining
+  focus, only a delayed interval — a gap already closed once (Milestone
+  P2, shared files) but not for transfers.
+- Issue 2: the merge of server state and local stream state had no
+  freshness rule — local state was trusted even after the server state it
+  was supposed to supplement had already become final and more accurate.
+- Issue 3: nothing on the Android side treated a download's destination
+  file name as something that could collide, even though the exact same
+  problem was already solved once, on the backend, for uploads.
+
+## Solution
+
+- **Issue 1:** `TransferListScreen`'s `useFocusEffect` and `FilesScreen`'s
+  request/transfer `useFocusEffect` now call their refresh function(s)
+  immediately on regaining focus, before starting the polling interval —
+  mirroring `useSharedFiles().refreshSilently()`'s existing pattern from
+  Milestone P2.
+- **Issue 2:** `TransferProgressDetail`'s `useLiveStream` now additionally
+  requires `transfer.status === 'in_progress'`. Once the freshly-polled
+  server transfer reaches a terminal status, it wins outright instead of
+  being second-guessed by a potentially-lagging local stream view; while
+  the server transfer is genuinely in progress, the live stream is still
+  preferred exactly as before, for its finer-grained updates.
+- **Issue 3:** Added `resolveAvailableMediaStoreName()`
+  (`android/src/streaming/blobUtil.ts`), the same "name (1).ext" naming
+  convention as the backend's `resolve_available_path`, checked via a raw
+  filesystem read under the public Downloads directory (the same
+  technique, and the same unverified-on-a-physical-device caveat,
+  `files/downloadExistence.ts` already relies on). `publishDownload()` now
+  resolves a conflict-free name before calling `copyToMediaStore`, instead
+  of handing it the requested name unconditionally — removing the
+  collision rather than depending on how the platform would have handled
+  it.
+
+## Verification
+
+- New/updated Android tests: three new cases in
+  `__tests__/streaming/blobUtil.test.ts` covering
+  `resolveAvailableMediaStoreName`'s conflict resolution (renames to
+  "(1)", keeps incrementing past an already-taken "(1)", and leaves a free
+  name unchanged).
+- Full Android suite: `npx jest` — 23 suites / 137 tests passing.
+  `npx tsc --noEmit` and `npx eslint` clean on all changed files.
+- Backend: untouched by this milestone — `python -m pytest` still 286
+  passed, 2 skipped; `ruff check app tests` clean. Confirmed by code trace
+  (not just by the suite staying green) that `Transfer` persistence is
+  synchronous and therefore not a contributor to Issue 1.
+- Live device E2E (confirming the Transfers tab shows a new download
+  immediately after switching tabs, a transfer's detail screen matches
+  Overview the instant it's opened rather than settling a few seconds
+  later, and downloading the same file name twice produces two distinct
+  files in `Downloads/Relay`) was not run as part of this fix — no
+  physical device/desktop pair was available in the environment the fix
+  was made in. Recommended before closing this out, mirroring the same
+  caveat noted throughout this notebook — particularly for Issue 3, since
+  the exact platform behavior on a `DISPLAY_NAME` collision could not be
+  confirmed independently of this fix.

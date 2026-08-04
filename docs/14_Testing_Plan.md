@@ -973,6 +973,158 @@ Regression status:
 
 ---
 
+## P3 — Transfer State Consistency & Download Reliability
+
+### Status
+
+**Completed**
+
+### Summary
+
+Product-polish follow-up investigating three reported inconsistencies
+between backend `Transfer` state, Android's local streaming state, and
+Android's UI. All three were root-caused by full code tracing (backend
+`TransferService`/`TransferStreamService`, Android's focus-driven polling
+hooks, `TransferStreamManager`, and `react-native-blob-util`'s MediaStore
+implementation) rather than treated as independent symptoms, per this
+document's own validation principles. See `docs/15_QA_NOTEBOOK.md`'s
+Milestone P3 entry for the full investigation notes.
+
+### Issues Found
+
+**1. Transfer appears late on the Transfers tab (Medium — minor workflow
+issue):**
+
+Not a backend or API delay: `TransferService._create_transfer`
+(`backend/app/services/transfer_service.py`) commits the `Transfer` row
+synchronously inside `POST /transfers/requests`, so it already exists in
+the database by the time Android's `proposeTransfer()` call resolves.
+
+Root cause was entirely in Android's own polling: `TransferListScreen`'s
+and `FilesScreen`'s `useFocusEffect` blocks for transfer/request polling
+started a `setInterval` on regaining focus but never called the refresh
+function immediately — the first refresh only happened on the interval's
+first tick, up to `POLL_INTERVAL_MS` (2000ms) later. Because
+`createBottomTabNavigator` keeps tab screens mounted after their first
+visit (`unmountOnBlur` is not set), switching from Files to Transfers
+after starting a download does not remount `TransferListScreen`, so
+nothing forced an immediate re-fetch. This is the same class of staleness
+Milestone P2 already fixed for the shared-file list (`refreshSilently()`
+called on focus, before the interval starts) — that fix was never applied
+to the transfer/request polling in either screen.
+
+**2. Transfer detail screen briefly shows stale progress after Overview
+already shows Completed (Medium — incorrect UI behavior):**
+
+`TransferProgressDetail` merges two sources of truth: the server-polled
+`Transfer` (`useTransfer`) and, when this app instance is the one actively
+streaming, `TransferStreamManager`'s live state (`useTransferStream`). It
+preferred the live stream (`useLiveStream = stream?.transferId ===
+transferId`) unconditionally, with no check on whether that local state was
+actually caught up.
+
+`TransferStreamManager.start()`'s local state does not flip to `'completed'`
+(with `bytesTransferred` reset to the full total) until *after* two
+awaited, I/O-bound steps that run once the bytes have already fully
+arrived: `publishDownload()`'s MediaStore copy and
+`notifyDownloadComplete()`'s notification post. Until that finishes, the
+local stream state can still report `'streaming'` with whatever partial
+byte count its last progress tick observed — even though the backend has
+already committed the transfer as `completed` and the Overview list (a
+fresh `GET /transfers`) already reflects that. Opening the detail screen
+during that window showed the stale, partial local state instead of the
+already-accurate server data.
+
+**3. Some downloaded files never appear in `Downloads/Relay` despite their
+transfer reporting Completed (High — broken transfer/data-loss-adjacent):**
+
+`publishDownload()` (`android/src/streaming/blobUtil.ts`) asked
+`copyToMediaStore` to insert the file's display name verbatim, every time,
+with no conflict handling. Unlike the backend's own upload path
+(`resolve_available_path`, "name (1).ext" pattern), nothing on the Android
+download-publish side accounted for two downloads landing on the same file
+name — a genuinely reachable case given Milestone P2's own
+existence-check-driven re-download flow (a file whose local copy was
+deleted reverts to re-downloadable), or simply two different shared files
+that happen to share a basename. A MediaStore insert failing against an
+already-taken name is swallowed by `publishDownload`'s deliberately
+best-effort error handling (by design, so a publish failure never turns an
+otherwise-successful byte transfer into a reported failure), leaving that
+download's file stranded at its private, invisible staging path while both
+the backend `Transfer` and the local stream state still correctly reported
+`completed` — the transfer genuinely succeeded, but the file it produced
+was never surfaced to the user.
+
+### Solution
+
+- **Issue 1:** `TransferListScreen`'s `useFocusEffect` and `FilesScreen`'s
+  request/transfer `useFocusEffect` now call their refresh function(s)
+  immediately on regaining focus, before starting the polling interval —
+  the same pattern Milestone P2 already established for
+  `useSharedFiles().refreshSilently()`.
+- **Issue 2:** `TransferProgressDetail`'s `useLiveStream` now additionally
+  requires the freshly-polled `transfer.status` to still be `'in_progress'`
+  (`stream?.transferId === transferId && transfer.status === 'in_progress'`).
+  Once the server-side transfer reaches a terminal status, it is by
+  definition at least as fresh as anything `TransferStreamManager` can
+  report, so it wins outright instead of being second-guessed by a
+  lagging local view. While the server transfer is genuinely in progress,
+  behavior is unchanged — the live stream is still preferred for its
+  finer-grained, poll-independent updates.
+- **Issue 3:** Added `resolveAvailableMediaStoreName()` in
+  `android/src/streaming/blobUtil.ts`, mirroring the backend's
+  `resolve_available_path` naming convention ("name (1).ext", "name
+  (2).ext", ...). `publishDownload()` now resolves a conflict-free display
+  name (checked via a raw filesystem read under the public Downloads
+  directory, the same technique — and the same unverified-on-a-physical-
+  device caveat — `files/downloadExistence.ts` already relies on) before
+  calling `copyToMediaStore`, instead of handing it the requested name
+  unconditionally.
+
+### Result
+
+Transfer state consistency validation completed with three issues found
+and fixed.
+
+Regression status:
+
+- Android: 23 suites / 137 tests passed (`npx jest`), including three new
+  `publishDownload` conflict-resolution cases in `blobUtil.test.ts`.
+  `npx tsc --noEmit` and `npx eslint` clean on all changed files.
+- Backend: untouched by this milestone (confirmed by code trace that
+  `Transfer` persistence is synchronous and not the source of Issue 1) —
+  286 passed, 2 skipped (`python -m pytest`); `ruff check app tests` clean.
+- Desktop: untouched by this milestone.
+
+### Known Limitations
+
+- None of the three issues could be reproduced live end-to-end — no
+  physical Android device/desktop pair was available in the environment
+  this change was made in, consistent with every prior milestone's own
+  caveat. Issues 1 and 2 were root-caused entirely from Android's own
+  JS-level polling/state-merge logic, which is directly exercisable and
+  covered by the existing hook/manager test suites; the fixes follow
+  directly from that code trace. Issue 3's precise trigger (whether
+  `MediaStore.Downloads.insert()` silently fails, reuses an existing row,
+  or auto-renames on a `DISPLAY_NAME` collision) is native platform
+  behavior that could not be verified without a device — the fix removes
+  the collision entirely rather than depending on knowing how the platform
+  would have handled it, so it holds regardless of that answer.
+- `resolveAvailableMediaStoreName()`'s existence check shares
+  `downloadedFileExists()`'s existing, already-documented limitation
+  (Milestone P2): it relies on a raw filesystem read being able to see a
+  file this app previously published into MediaStore. If that assumption
+  ever proves wrong on a real device, the conflict check would under-detect
+  (treat a taken name as free) rather than over-detect, which is at worst
+  the pre-fix behavior, not a new failure mode.
+- Recommended before closing this out: a live-device pass repeating the
+  three original scenarios (auto-download from Files while watching the
+  Transfers tab; opening a transfer's detail screen immediately after
+  Overview shows it Completed; downloading the same file name twice) to
+  confirm the fixes hold outside of code tracing and unit tests.
+
+---
+
 # 4. Bug Classification
 
 Critical

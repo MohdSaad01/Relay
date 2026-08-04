@@ -77,6 +77,41 @@ export function downloadFile(
 }
 
 /**
+ * Finds a display name under Downloads/Relay that isn't already taken,
+ * resolving a conflict (if any) with the same "name (1).ext", "name (2).ext"
+ * pattern the backend already uses for uploads
+ * (`backend/app/utils/filesystem.resolve_available_path`). Downloads have no
+ * equivalent on the Android side: `copyToMediaStore` is asked to insert
+ * `fileName` verbatim every time, and the same file name is a genuinely
+ * reachable case (re-downloading the same shared file, or two different
+ * shared files that happen to share a basename) — see docs/15_QA_NOTEBOOK.md's
+ * Milestone P3 entry.
+ *
+ * Checked via a raw filesystem read under the public Downloads directory,
+ * the same technique (and same unverified-on-a-physical-device caveat)
+ * `files/downloadExistence.ts` already relies on for its own existence
+ * check.
+ */
+async function resolveAvailableMediaStoreName(fileName: string): Promise<string> {
+  const dir = `${ReactNativeBlobUtil.fs.dirs.DownloadDir}/${PUBLIC_DOWNLOAD_FOLDER}`;
+  const exists = (name: string) => ReactNativeBlobUtil.fs.exists(`${dir}/${name}`).catch(() => false);
+
+  if (!(await exists(fileName))) {
+    return fileName;
+  }
+
+  const dotIndex = fileName.lastIndexOf('.');
+  const base = dotIndex > 0 ? fileName.slice(0, dotIndex) : fileName;
+  const ext = dotIndex > 0 ? fileName.slice(dotIndex) : '';
+  for (let counter = 1; ; counter++) {
+    const candidate = `${base} (${counter})${ext}`;
+    if (!(await exists(candidate))) {
+      return candidate;
+    }
+  }
+}
+
+/**
  * Copies a fully-downloaded file out of its private staging path
  * (app-internal storage, invisible to the Downloads app, any file manager,
  * or media/file search) into the public Downloads/Relay folder via
@@ -89,6 +124,15 @@ export function downloadFile(
  * turn an otherwise-successful transfer into a reported failure — it just
  * leaves the file at its private staging path instead.
  *
+ * The requested display name is resolved to a conflict-free one first
+ * (`resolveAvailableMediaStoreName`) rather than handed to `copyToMediaStore`
+ * verbatim: unlike the backend's own upload path, nothing here previously
+ * accounted for two downloads landing on the same file name, which could
+ * make a later download's MediaStore insert fail against an already-taken
+ * name — silently, since this function swallows every failure — leaving
+ * that file stuck at its private staging path while its Transfer still
+ * reported "completed".
+ *
  * Returns the resulting `content://` MediaStore URI on success, so a caller
  * (the download-complete notification) can offer to open the file directly
  * — or null when publishing didn't happen (pre-API 29) or failed.
@@ -98,8 +142,9 @@ export async function publishDownload(stagingPath: string, fileName: string): Pr
     return null;
   }
   try {
+    const targetName = await resolveAvailableMediaStoreName(fileName);
     const contentUri = await ReactNativeBlobUtil.MediaCollection.copyToMediaStore(
-      { name: fileName, parentFolder: PUBLIC_DOWNLOAD_FOLDER, mimeType: 'application/octet-stream' },
+      { name: targetName, parentFolder: PUBLIC_DOWNLOAD_FOLDER, mimeType: 'application/octet-stream' },
       'Download',
       stagingPath,
     );

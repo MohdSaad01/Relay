@@ -86,7 +86,19 @@ export function TransferProgressDetail({ transferId }: { transferId: number }) {
     );
   }
 
-  const useLiveStream = stream?.transferId === transferId;
+  // Only trust the live stream while the server itself still considers this
+  // transfer in_progress. TransferStreamManager's own state doesn't flip to
+  // 'completed' (with bytesTransferred caught up to the full total) until
+  // after two awaited, I/O-bound steps that run *after* the bytes have
+  // already fully arrived (publishDownload's MediaStore copy,
+  // notifyDownloadComplete) — so stream can stay stuck reporting a small,
+  // stale byte count for several seconds after the server has already
+  // recorded the transfer as done. Once the freshly-polled `transfer` is
+  // itself terminal, it is strictly at least as fresh as anything
+  // TransferStreamManager can report, so it must win outright rather than
+  // being second-guessed by a lagging local view. See docs/15_QA_NOTEBOOK.md's
+  // Milestone P3 entry.
+  const useLiveStream = stream?.transferId === transferId && transfer.status === 'in_progress';
   const bytesTransferred = useLiveStream ? stream.bytesTransferred : transfer.bytes_transferred;
   const totalBytes = useLiveStream ? stream.totalBytes : transfer.file_size;
   const displayStatus = useLiveStream && stream.status === 'streaming' ? 'in_progress' : transfer.status;

@@ -15,6 +15,10 @@ let versionSpy: jest.SpyInstance;
 beforeEach(() => {
   jest.clearAllMocks();
   versionSpy = jest.spyOn(Platform, 'Version', 'get').mockReturnValue(29);
+  // clearAllMocks() resets calls/results but not a mockImplementation set by
+  // an earlier test, so re-pin the shared mock's default here rather than
+  // relying on test order for publishDownload's conflict-check calls.
+  (ReactNativeBlobUtil.fs.exists as jest.Mock).mockResolvedValue(false);
 });
 
 afterEach(() => {
@@ -150,5 +154,47 @@ describe('publishDownload', () => {
     await expect(publishDownload('/mock/documents/Downloads/report.pdf', 'report.pdf')).resolves.toBeNull();
 
     expect(ReactNativeBlobUtil.fs.unlink).not.toHaveBeenCalled();
+  });
+
+  test('resolves a "name (1).ext" alternative when the requested display name is already published', async () => {
+    // Regression test: a second download that happens to share a file name
+    // with an already-published one (a re-download, or two different shared
+    // files with the same basename) used to be handed to copyToMediaStore
+    // verbatim every time — see docs/15_QA_NOTEBOOK.md's Milestone P3 entry.
+    (ReactNativeBlobUtil.fs.exists as jest.Mock).mockImplementation((path: string) =>
+      Promise.resolve(path === '/mock/downloads/Relay/report.pdf'),
+    );
+
+    await publishDownload('/mock/documents/Downloads/report.pdf', 'report.pdf');
+
+    expect(ReactNativeBlobUtil.MediaCollection.copyToMediaStore).toHaveBeenCalledWith(
+      { name: 'report (1).pdf', parentFolder: 'Relay', mimeType: 'application/octet-stream' },
+      'Download',
+      '/mock/documents/Downloads/report.pdf',
+    );
+  });
+
+  test('keeps incrementing past a taken "(1)" alternative until a free name is found', async () => {
+    (ReactNativeBlobUtil.fs.exists as jest.Mock).mockImplementation((path: string) =>
+      Promise.resolve(path === '/mock/downloads/Relay/report.pdf' || path === '/mock/downloads/Relay/report (1).pdf'),
+    );
+
+    await publishDownload('/mock/documents/Downloads/report.pdf', 'report.pdf');
+
+    expect(ReactNativeBlobUtil.MediaCollection.copyToMediaStore).toHaveBeenCalledWith(
+      { name: 'report (2).pdf', parentFolder: 'Relay', mimeType: 'application/octet-stream' },
+      'Download',
+      '/mock/documents/Downloads/report.pdf',
+    );
+  });
+
+  test('does not rename when the requested display name is free', async () => {
+    await publishDownload('/mock/documents/Downloads/report.pdf', 'report.pdf');
+
+    expect(ReactNativeBlobUtil.MediaCollection.copyToMediaStore).toHaveBeenCalledWith(
+      { name: 'report.pdf', parentFolder: 'Relay', mimeType: 'application/octet-stream' },
+      'Download',
+      '/mock/documents/Downloads/report.pdf',
+    );
   });
 });

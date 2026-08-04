@@ -54,6 +54,13 @@ export function FilesScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      // Refresh immediately on regaining focus, not just on the next
+      // interval tick — a download just proposed from this same screen is
+      // already reflected locally (see handleDownload's own refresh below),
+      // but returning to this screen later (e.g. after backgrounding the
+      // app) otherwise waits up to POLL_INTERVAL_MS to show its outcome.
+      refreshRequests();
+      refreshTransfers();
       const timer = setInterval(() => {
         refreshRequests();
         refreshTransfers();

@@ -42,6 +42,13 @@ export function TransferListScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      // Refresh immediately on regaining focus, not just on the next
+      // interval tick — otherwise a transfer started from FilesScreen (which
+      // already has its own fresh copy) doesn't appear here until up to
+      // POLL_INTERVAL_MS later, since a screen kept mounted by the tab
+      // navigator doesn't re-fetch on its own. See docs/15_QA_NOTEBOOK.md's
+      // Milestone P3 entry.
+      refreshTransfers();
       const timer = setInterval(refreshTransfers, POLL_INTERVAL_MS);
       return () => clearInterval(timer);
     }, [refreshTransfers]),

@@ -37,10 +37,12 @@ def _make_file(tmp_path: Path, name: str = "report.pdf", content: bytes = b"file
 
 
 def _accept_download(db_session: Session, device: Device, file_path: str) -> Transfer:
+    """Named `_accept_download` for parity with `_accept_upload` below, even
+    though a download is now auto-accepted by request_transfer itself."""
     shared_file, _ = SharedFileService(db_session).share_file(file_path)
     transfer_service = TransferService(db_session, TransferManager())
     request = transfer_service.request_transfer(device, TransferDirection.SEND, shared_file.id, None, None)
-    return transfer_service.accept_request(request.request_id)
+    return transfer_service.get_transfer_or_raise(request.transfer_id, None)
 
 
 def _accept_upload(

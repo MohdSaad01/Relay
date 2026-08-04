@@ -64,9 +64,11 @@ def _request_upload(
 # --- POST /transfers/requests --------------------------------------------------
 
 
-def test_request_download_creates_pending_request(
+def test_request_download_creates_accepted_transfer(
     client: TestClient, desktop_client: TestClient, tmp_path: Path
 ) -> None:
+    """A download is auto-accepted in the same call that proposes it -- no
+    desktop approval step -- so the response already carries transfer_id."""
     shared_file = _share_file(desktop_client, _make_file(tmp_path))
     _pair_device_with_token(client)
 
@@ -78,8 +80,14 @@ def test_request_download_creates_pending_request(
 
     assert response.status_code == 201
     data = response.json()["data"]
-    assert data["status"] == "pending"
+    assert data["status"] == "accepted"
     assert data["file_name"] == "report.pdf"
+    assert data["transfer_id"] is not None
+
+    transfer = client.get(
+        f"/api/v1/transfers/{data['transfer_id']}", headers=_auth_headers()
+    ).json()["data"]
+    assert transfer["status"] == "in_progress"
 
 
 def test_request_upload_creates_pending_request(client: TestClient) -> None:
@@ -179,6 +187,22 @@ def test_accept_request_creates_transfer(client: TestClient, desktop_client: Tes
 
 def test_accept_unknown_request_returns_404(desktop_client: TestClient) -> None:
     response = desktop_client.post("/api/v1/transfers/requests/missing/accept")
+
+    assert response.status_code == 404
+
+
+def test_accept_already_auto_accepted_download_returns_404(
+    client: TestClient, desktop_client: TestClient, tmp_path: Path
+) -> None:
+    shared_file = _share_file(desktop_client, _make_file(tmp_path))
+    _pair_device_with_token(client)
+    created = client.post(
+        "/api/v1/transfers/requests",
+        json={"direction": "send", "shared_file_id": shared_file["id"]},
+        headers=_auth_headers(),
+    ).json()["data"]
+
+    response = desktop_client.post(f"/api/v1/transfers/requests/{created['request_id']}/accept")
 
     assert response.status_code == 404
 

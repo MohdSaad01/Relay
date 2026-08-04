@@ -52,4 +52,7 @@ module.exports = {
     dirs: { DocumentDir: '/mock/documents' },
     unlink: jest.fn(() => Promise.resolve()),
   },
+  MediaCollection: {
+    copyToMediaStore: jest.fn(() => Promise.resolve('content://media/downloads/1')),
+  },
 };

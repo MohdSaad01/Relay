@@ -1,8 +1,14 @@
 """TransferService — orchestrates the transfer lifecycle described in
-docs/11_File_Transfer.md §7 and docs/13_Database_Design.md §7: a paired
-Android device proposes a transfer (downloading a shared file, or
-proposing an upload), the desktop user accepts or rejects it, and only an
-accepted request ever becomes a persisted `Transfer` row.
+docs/11_File_Transfer.md §7 and docs/13_Database_Design.md §7.
+
+The two directions no longer follow identical lifecycles. A download
+(`send`) is auto-accepted the moment it's proposed: the desktop user already
+made the sharing decision when they shared the file, so requiring a second
+manual accept for every download is redundant friction — see
+docs/15_QA_NOTEBOOK.md. An upload (`receive`) still goes through the
+desktop's explicit accept/reject review, since the desktop hasn't seen the
+file before. Either way, only an accepted request ever becomes a persisted
+`Transfer` row.
 
 Persistence is delegated to existing services and repositories rather than
 duplicated here: SharedFileService supplies the shared-file snapshot for a
@@ -65,8 +71,13 @@ class TransferService:
 
         Raises ValidationError for a malformed payload, NotFoundError if a
         `send` request names a shared file that does not currently exist.
-        Does not touch the database — the request lives only in TransferManager
-        until the desktop user accepts or rejects it.
+
+        A `send` request is auto-accepted here, in the same call: its
+        `Transfer` row is created immediately (via `_create_transfer`, the
+        same path `accept_request` uses) and the returned request already
+        carries `status=ACCEPTED`/`transfer_id` — nothing is ever stored as
+        PENDING for a download. A `receive` request still only lives in
+        TransferManager, PENDING, until the desktop user accepts or rejects it.
         """
         if direction is TransferDirection.SEND:
             if shared_file_id is None:
@@ -91,6 +102,21 @@ class TransferService:
             created_at=now,
             expires_at=now + timedelta(seconds=settings.TRANSFER_REQUEST_TTL_SECONDS),
         )
+
+        if direction is TransferDirection.SEND:
+            transfer = self._create_transfer(request)
+            request.status = TransferRequestStatus.ACCEPTED
+            request.transfer_id = transfer.id
+            self.transfer_manager.store_decided(request)
+            logger.info(
+                "Transfer auto-accepted (download): request_id=%s transfer_id=%s device_id=%s file=%s",
+                request.request_id,
+                transfer.id,
+                requesting_device.id,
+                snapshot_name,
+            )
+            return request
+
         self.transfer_manager.create(request)
         logger.info(
             "Transfer requested: request_id=%s device_id=%s direction=%s file=%s",
@@ -137,40 +163,24 @@ class TransferService:
     # --- Decisions (desktop only) --------------------------------------------
 
     def accept_request(self, request_id: str) -> Transfer:
-        """Accept a pending transfer request, creating its `Transfer` row.
+        """Accept a pending transfer request (an upload proposal — a download
+        is auto-accepted by `request_transfer` and is never left pending),
+        creating its `Transfer` row via `_create_transfer`.
 
-        Re-validates a `send` request's shared file still exists and
-        re-snapshots file_name/file_size/device_name at this moment, so the
-        persisted record reflects what is actually about to be transferred
-        rather than what was true when the request was first made
-        (10_Security.md §9: every request must be validated before proceeding).
-        If that re-validation fails, the claimed request is put back as
-        REJECTED (rather than silently dropped) so a polling requester still
-        observes a definite outcome.
+        If re-validation inside `_create_transfer` fails, the claimed request
+        is put back as REJECTED (rather than silently dropped) so a polling
+        requester still observes a definite outcome.
         """
         request = self.transfer_manager.claim_for_decision(request_id)
         if request is None:
             raise NotFoundError(f"No pending transfer request found for id {request_id}.")
 
         try:
-            file_name, file_size, resolved_shared_file_id = self._resolve_accepted_file(request)
-            device = self._resolve_accepted_device(request)
+            transfer = self._create_transfer(request)
         except NotFoundError:
             request.status = TransferRequestStatus.REJECTED
             self.transfer_manager.store_decided(request)
             raise
-
-        transfer = Transfer(
-            device_id=device.id,
-            shared_file_id=resolved_shared_file_id,
-            direction=request.direction,
-            file_name=file_name,
-            file_size=file_size,
-            device_name=device.device_name,
-            status=TransferStatus.IN_PROGRESS,
-        )
-        self.transfer_repository.create(transfer)
-        self.db.commit()
 
         request.status = TransferRequestStatus.ACCEPTED
         request.transfer_id = transfer.id
@@ -180,7 +190,7 @@ class TransferService:
             "Transfer accepted: request_id=%s transfer_id=%s device_id=%s direction=%s",
             request_id,
             transfer.id,
-            device.id,
+            transfer.device_id,
             request.direction.value,
         )
         return transfer
@@ -278,6 +288,31 @@ class TransferService:
         if file_size is None or file_size < 0:
             raise ValidationError("file_size must be a non-negative integer to propose an upload.")
         return name, file_size
+
+    def _create_transfer(self, request: PendingTransferRequest) -> Transfer:
+        """Create and persist the `Transfer` row for an accepted request.
+
+        Shared by `accept_request` (desktop-decided uploads) and
+        `request_transfer` (auto-accepted downloads). Re-resolves the file
+        and device fresh at this moment rather than trusting the request's
+        own snapshot (10_Security.md §9: every request must be validated
+        before proceeding) — raises NotFoundError if either no longer exists.
+        """
+        file_name, file_size, resolved_shared_file_id = self._resolve_accepted_file(request)
+        device = self._resolve_accepted_device(request)
+
+        transfer = Transfer(
+            device_id=device.id,
+            shared_file_id=resolved_shared_file_id,
+            direction=request.direction,
+            file_name=file_name,
+            file_size=file_size,
+            device_name=device.device_name,
+            status=TransferStatus.IN_PROGRESS,
+        )
+        self.transfer_repository.create(transfer)
+        self.db.commit()
+        return transfer
 
     def _resolve_accepted_file(self, request: PendingTransferRequest) -> tuple[str, int, int | None]:
         """Fresh snapshot of the file being transferred, taken at accept time."""

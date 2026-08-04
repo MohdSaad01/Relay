@@ -11,6 +11,7 @@
  * multipart `FormData`, which the upload route does not parse.
  */
 
+import { Platform } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
 import { ApiError } from '../api/client';
 
@@ -21,6 +22,14 @@ export interface StreamTask {
 
 const CANCEL_ERROR_NAME = 'ReactNativeBlobUtilCanceledFetch';
 const PROGRESS_CONFIG = { interval: 250 };
+
+// MediaStore.Downloads (used by publishDownload, below) was introduced in
+// Android 10 (API 29); there is no equivalent public-storage API on older
+// versions without a legacy WRITE_EXTERNAL_STORAGE permission this app does
+// not request, so downloads below this SDK stay at their private staging
+// path — see TransferStreamManager's downloadStagingPath.
+const MEDIASTORE_MIN_SDK = 29;
+const PUBLIC_DOWNLOAD_FOLDER = 'Relay';
 
 export function isStreamCancelError(err: unknown): boolean {
   return err instanceof Error && err.name === CANCEL_ERROR_NAME;
@@ -65,6 +74,41 @@ export function downloadFile(
   })();
 
   return { promise, cancel: () => task.cancel() };
+}
+
+/**
+ * Copies a fully-downloaded file out of its private staging path
+ * (app-internal storage, invisible to the Downloads app, any file manager,
+ * or media/file search) into the public Downloads/Relay folder via
+ * MediaStore, then removes the staging copy. Requires no storage permission
+ * — MediaStore.Downloads is writable by any app on API 29+ without one.
+ *
+ * Best-effort and never throws: the transfer has already fully received its
+ * bytes by the time this runs (it's only ever called after a download's
+ * StreamTask resolves), and V1 has no retry, so a failure here must not
+ * turn an otherwise-successful transfer into a reported failure — it just
+ * leaves the file at its private staging path instead.
+ *
+ * Returns the resulting `content://` MediaStore URI on success, so a caller
+ * (the download-complete notification) can offer to open the file directly
+ * — or null when publishing didn't happen (pre-API 29) or failed.
+ */
+export async function publishDownload(stagingPath: string, fileName: string): Promise<string | null> {
+  if (Number(Platform.Version) < MEDIASTORE_MIN_SDK) {
+    return null;
+  }
+  try {
+    const contentUri = await ReactNativeBlobUtil.MediaCollection.copyToMediaStore(
+      { name: fileName, parentFolder: PUBLIC_DOWNLOAD_FOLDER, mimeType: 'application/octet-stream' },
+      'Download',
+      stagingPath,
+    );
+    await ReactNativeBlobUtil.fs.unlink(stagingPath).catch(() => undefined);
+    return contentUri;
+  } catch (err) {
+    console.warn('Could not publish download to public storage; file remains in private storage.', err);
+    return null;
+  }
 }
 
 export function uploadFile(

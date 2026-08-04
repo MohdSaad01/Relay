@@ -51,14 +51,18 @@ def _set_download_directory(desktop_client: TestClient, directory: Path) -> None
     assert response.status_code == 200
 
 
-def _accept_download(client: TestClient, desktop_client: TestClient, shared_file_id: int, token: str) -> dict:
+def _accept_download(client: TestClient, shared_file_id: int, token: str) -> dict:
+    """Named `_accept_download` for parity with `_accept_upload` below, even
+    though a download no longer needs a separate desktop accept call -- the
+    propose response already carries the accepted Transfer's id."""
     created = client.post(
         "/api/v1/transfers/requests",
         json={"direction": "send", "shared_file_id": shared_file_id},
         headers=_auth_headers(token),
     ).json()["data"]
-    response = desktop_client.post(f"/api/v1/transfers/requests/{created['request_id']}/accept")
-    assert response.status_code == 201
+    assert created["status"] == "accepted"
+    response = client.get(f"/api/v1/transfers/{created['transfer_id']}", headers=_auth_headers(token))
+    assert response.status_code == 200
     return response.json()["data"]
 
 
@@ -87,7 +91,7 @@ def test_download_transfer_streams_file_bytes(
 ) -> None:
     shared_file = _share_file(desktop_client, _make_file(tmp_path, content=b"file-content"))
     _pair_device_with_token(client)
-    transfer = _accept_download(client, desktop_client, shared_file["id"], "valid-token")
+    transfer = _accept_download(client, shared_file["id"], "valid-token")
 
     response = client.get(
         f"/api/v1/transfers/{transfer['id']}/download", headers=_auth_headers()
@@ -109,7 +113,7 @@ def test_download_transfer_without_token_is_rejected(
 ) -> None:
     shared_file = _share_file(desktop_client, _make_file(tmp_path))
     _pair_device_with_token(client)
-    transfer = _accept_download(client, desktop_client, shared_file["id"], "valid-token")
+    transfer = _accept_download(client, shared_file["id"], "valid-token")
 
     response = client.get(f"/api/v1/transfers/{transfer['id']}/download")
 
@@ -122,7 +126,7 @@ def test_download_transfer_not_owned_returns_404(
     shared_file = _share_file(desktop_client, _make_file(tmp_path))
     _pair_device_with_token(client, "token-a")
     _pair_device_with_token(client, "token-b")
-    transfer = _accept_download(client, desktop_client, shared_file["id"], "token-a")
+    transfer = _accept_download(client, shared_file["id"], "token-a")
 
     response = client.get(
         f"/api/v1/transfers/{transfer['id']}/download", headers=_auth_headers("token-b")
@@ -149,7 +153,7 @@ def test_download_transfer_not_in_progress_returns_409(
 ) -> None:
     shared_file = _share_file(desktop_client, _make_file(tmp_path))
     _pair_device_with_token(client)
-    transfer = _accept_download(client, desktop_client, shared_file["id"], "valid-token")
+    transfer = _accept_download(client, shared_file["id"], "valid-token")
     desktop_client.post(f"/api/v1/transfers/{transfer['id']}/cancel")
 
     response = client.get(
@@ -165,7 +169,7 @@ def test_download_transfer_missing_source_file_returns_400(
     file_path = _make_file(tmp_path)
     shared_file = _share_file(desktop_client, file_path)
     _pair_device_with_token(client)
-    transfer = _accept_download(client, desktop_client, shared_file["id"], "valid-token")
+    transfer = _accept_download(client, shared_file["id"], "valid-token")
     Path(file_path).unlink()
 
     response = client.get(
@@ -252,7 +256,7 @@ def test_upload_transfer_wrong_direction_returns_409(
 ) -> None:
     shared_file = _share_file(desktop_client, _make_file(tmp_path))
     _pair_device_with_token(client)
-    transfer = _accept_download(client, desktop_client, shared_file["id"], "valid-token")
+    transfer = _accept_download(client, shared_file["id"], "valid-token")
 
     response = client.post(
         f"/api/v1/transfers/{transfer['id']}/upload",

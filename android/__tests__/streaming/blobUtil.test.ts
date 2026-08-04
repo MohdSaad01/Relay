@@ -1,13 +1,24 @@
+import { Platform } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
-import { downloadFile, isStreamCancelError, uploadFile } from '../../src/streaming/blobUtil';
+import { downloadFile, isStreamCancelError, publishDownload, uploadFile } from '../../src/streaming/blobUtil';
 
 function lastTask(): any {
   const fetchMock = ReactNativeBlobUtil.fetch as jest.Mock;
   return fetchMock.mock.results[fetchMock.mock.results.length - 1].value;
 }
 
+// Platform.Version is a getter-only property on the real module (returns
+// Platform.constants.osVersion) — plain assignment silently no-ops, so it
+// must be mocked via the accessor form of spyOn instead.
+let versionSpy: jest.SpyInstance;
+
 beforeEach(() => {
   jest.clearAllMocks();
+  versionSpy = jest.spyOn(Platform, 'Version', 'get').mockReturnValue(29);
+});
+
+afterEach(() => {
+  versionSpy.mockRestore();
 });
 
 describe('downloadFile', () => {
@@ -104,5 +115,40 @@ describe('uploadFile', () => {
     lastTask().__emitUploadProgress(10, 100);
 
     expect(onProgress).toHaveBeenCalledWith(10, 100);
+  });
+});
+
+describe('publishDownload', () => {
+  test('copies the staged file into MediaStore Downloads/Relay, removes the staging copy, and returns the content URI', async () => {
+    const contentUri = await publishDownload('/mock/documents/Downloads/report.pdf', 'report.pdf');
+
+    expect(ReactNativeBlobUtil.MediaCollection.copyToMediaStore).toHaveBeenCalledWith(
+      { name: 'report.pdf', parentFolder: 'Relay', mimeType: 'application/octet-stream' },
+      'Download',
+      '/mock/documents/Downloads/report.pdf',
+    );
+    expect(ReactNativeBlobUtil.fs.unlink).toHaveBeenCalledWith('/mock/documents/Downloads/report.pdf');
+    expect(contentUri).toBe('content://media/downloads/1');
+  });
+
+  test('is a no-op below API 29, where MediaStore.Downloads does not exist, and returns null', async () => {
+    versionSpy.mockReturnValue(28);
+
+    const contentUri = await publishDownload('/mock/documents/Downloads/report.pdf', 'report.pdf');
+
+    expect(ReactNativeBlobUtil.MediaCollection.copyToMediaStore).not.toHaveBeenCalled();
+    expect(ReactNativeBlobUtil.fs.unlink).not.toHaveBeenCalled();
+    expect(contentUri).toBeNull();
+  });
+
+  test('does not throw when the MediaStore copy fails, leaving the file at its staging path and returning null', async () => {
+    (ReactNativeBlobUtil.MediaCollection.copyToMediaStore as jest.Mock).mockRejectedValueOnce(
+      new Error('insert failed'),
+    );
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    await expect(publishDownload('/mock/documents/Downloads/report.pdf', 'report.pdf')).resolves.toBeNull();
+
+    expect(ReactNativeBlobUtil.fs.unlink).not.toHaveBeenCalled();
   });
 });

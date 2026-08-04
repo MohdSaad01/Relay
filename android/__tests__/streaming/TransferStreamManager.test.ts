@@ -1,15 +1,17 @@
 jest.mock('../../src/streaming/blobUtil');
 jest.mock('../../src/streaming/foregroundService');
+jest.mock('../../src/streaming/downloadNotification');
 jest.mock('../../src/streaming/uploadSourceRegistry');
 jest.mock('../../src/api/endpoints/transfers');
 jest.mock('../../src/session/SessionManager');
 
 import { TransferStreamManager } from '../../src/streaming/TransferStreamManager';
-import { downloadFile, isStreamCancelError, uploadFile } from '../../src/streaming/blobUtil';
+import { downloadFile, isStreamCancelError, publishDownload, uploadFile } from '../../src/streaming/blobUtil';
 import {
   startTransferNotification,
   stopTransferNotification,
 } from '../../src/streaming/foregroundService';
+import { notifyDownloadComplete } from '../../src/streaming/downloadNotification';
 import { getUploadSource } from '../../src/streaming/uploadSourceRegistry';
 import { cancelTransfer } from '../../src/api/endpoints/transfers';
 import { SessionManager } from '../../src/session/SessionManager';
@@ -19,6 +21,8 @@ import { TransferResponse } from '../../src/api/types';
 
 const mockDownloadFile = downloadFile as jest.Mock;
 const mockUploadFile = uploadFile as jest.Mock;
+const mockPublishDownload = publishDownload as jest.Mock;
+const mockNotifyDownloadComplete = notifyDownloadComplete as jest.Mock;
 const mockGetUploadSource = getUploadSource as jest.Mock;
 const mockCancelTransfer = cancelTransfer as jest.Mock;
 const mockIsStreamCancelError = isStreamCancelError as jest.Mock;
@@ -75,6 +79,7 @@ beforeEach(() => {
   mockIsStreamCancelError.mockImplementation(
     (err: unknown) => err instanceof Error && err.name === 'ReactNativeBlobUtilCanceledFetch',
   );
+  mockPublishDownload.mockResolvedValue(null);
   setApiConfig({ baseUrl: 'http://desktop:8000/api/v1', sessionToken: 'tok' });
 });
 
@@ -103,6 +108,32 @@ test('start() on a send transfer downloads and reaches "completed"', async () =>
   expect(stopTransferNotification).toHaveBeenCalled();
 });
 
+test('start() on a send transfer publishes the finished download to public storage before completing', async () => {
+  mockDownloadFile.mockReturnValue(makeTask(Promise.resolve()));
+
+  await TransferStreamManager.start({ ...sendTransfer, id: 50 });
+
+  expect(mockPublishDownload).toHaveBeenCalledWith(expect.stringContaining('report.pdf'), 'report.pdf');
+});
+
+test('start() on a send transfer shows a download-complete notification with the published content URI', async () => {
+  mockDownloadFile.mockReturnValue(makeTask(Promise.resolve()));
+  mockPublishDownload.mockResolvedValue('content://media/downloads/1');
+
+  await TransferStreamManager.start({ ...sendTransfer, id: 51 });
+
+  expect(mockNotifyDownloadComplete).toHaveBeenCalledWith('report.pdf', 'content://media/downloads/1');
+});
+
+test('start() on a send transfer still shows a completion notification when publishing failed (no content URI)', async () => {
+  mockDownloadFile.mockReturnValue(makeTask(Promise.resolve()));
+  mockPublishDownload.mockResolvedValue(null);
+
+  await TransferStreamManager.start({ ...sendTransfer, id: 52 });
+
+  expect(mockNotifyDownloadComplete).toHaveBeenCalledWith('report.pdf', null);
+});
+
 test('start() on a receive transfer uploads the registered source file', async () => {
   mockGetUploadSource.mockReturnValue({ uri: 'content://picked/report.pdf', name: 'report.pdf', size: 1000 });
   mockUploadFile.mockReturnValue(makeTask(Promise.resolve()));
@@ -116,6 +147,8 @@ test('start() on a receive transfer uploads the registered source file', async (
     expect.any(Function),
   );
   expect(TransferStreamManager.getState()).toMatchObject({ transferId: 2, status: 'completed' });
+  expect(mockPublishDownload).not.toHaveBeenCalled();
+  expect(mockNotifyDownloadComplete).not.toHaveBeenCalled();
 });
 
 test('start() on a receive transfer with no registered source fails without calling uploadFile', async () => {

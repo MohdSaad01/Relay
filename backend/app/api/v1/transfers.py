@@ -7,10 +7,12 @@ Three sub-resources:
   Android-only (`CurrentDeviceDep`) for proposing (POST) and withdrawing
   (DELETE) a request; dual-audience (`RequestingDeviceDep`) for
   listing/inspecting — the desktop sees every pending request, a paired
-  Android device sees only its own. The accept/reject decision is
-  desktop-only, unauthenticated, matching the existing /devices, /settings,
-  and /files-mutation precedent (the desktop's own UI always calls over
-  loopback).
+  Android device sees only its own. A `send` (download) proposal is
+  auto-accepted inside that same POST — see TransferService.request_transfer
+  — so only a `receive` (upload) proposal is ever actually observed PENDING.
+  The accept/reject decision is desktop-only, unauthenticated, matching the
+  existing /devices, /settings, and /files-mutation precedent (the desktop's
+  own UI always calls over loopback), and now only meaningful for uploads.
 * `/transfers` — the persisted phase (TransferRepository), created only once
   a request is accepted. Dual-audience throughout, same split as above.
 * `/transfers/{id}/download` and `/transfers/{id}/upload` — the Streaming

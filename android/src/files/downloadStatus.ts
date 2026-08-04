@@ -13,13 +13,16 @@ export type FileDownloadStatus =
   | { kind: 'failed'; message: string | null };
 
 /**
- * A proposed download (direction "send") only exists as a pending
- * TransferRequest until the desktop accepts it, at which point it becomes a
- * persisted Transfer and drops out of the requests list (TransferManager
- * only ever lists still-PENDING requests). So the authoritative source is
- * whichever of the two actually references this file right now: a matching
- * Transfer if one exists (it supersedes the request that spawned it),
- * otherwise a matching pending request, otherwise idle.
+ * A proposed download (direction "send") is auto-accepted by the backend in
+ * the same call that proposes it, so it becomes a persisted Transfer
+ * immediately and is never observed sitting in the pending-requests list
+ * (TransferManager only ever lists still-PENDING requests, and a download's
+ * request is never left PENDING — see TransferService.request_transfer). The
+ * authoritative source is whichever of the two actually references this file
+ * right now: a matching Transfer if one exists (it supersedes the request
+ * that spawned it), otherwise a matching pending request — a purely
+ * defensive fallback for the brief window between FilesScreen's propose call
+ * and its first refresh — otherwise idle.
  */
 export function deriveDownloadStatus(
   fileId: number,

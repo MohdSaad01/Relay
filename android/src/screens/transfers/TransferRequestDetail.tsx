@@ -16,10 +16,15 @@ type Navigation = NativeStackNavigationProp<TransfersStackParamList, 'TransferDe
 
 /**
  * A still-pending (or just-decided) transfer request — the "accept/reject
- * visibility" half of this milestone. There is no accept/reject button
- * here: that decision is desktop-only (backend/README.md's Transfer API),
- * so this screen only ever displays whatever the desktop has decided, and
- * lets the user withdraw their own still-pending request.
+ * visibility" half of this milestone. In practice this is now only ever
+ * reached for an upload proposal: a download is auto-accepted the moment
+ * it's proposed (TransferService.request_transfer) and FilesScreen starts
+ * its stream directly rather than navigating here, so this request_id would
+ * already be in the "accepted" state below by the time anything could
+ * observe it pending. There is no accept/reject button here regardless:
+ * that decision is desktop-only (backend/README.md's Transfer API), so this
+ * screen only ever displays whatever the desktop has decided, and lets the
+ * user withdraw their own still-pending request.
  */
 export function TransferRequestDetail({
   requestId,

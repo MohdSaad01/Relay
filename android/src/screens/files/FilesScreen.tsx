@@ -13,20 +13,24 @@ import { useSharedFiles } from '../../files/useSharedFiles';
 import { deriveDownloadStatus, FileDownloadStatus } from '../../files/downloadStatus';
 import { useTransferRequests } from '../../transfers/useTransferRequests';
 import { useTransfers } from '../../transfers/useTransfers';
-import { proposeTransfer } from '../../api/endpoints/transfers';
+import { getTransfer, proposeTransfer } from '../../api/endpoints/transfers';
 import { ApiError } from '../../api/client';
 import { AvailableFileResponse } from '../../api/types';
 import { formatFileSize } from '../../utils/formatFileSize';
+import { TransferStreamManager } from '../../streaming/TransferStreamManager';
 
 const POLL_INTERVAL_MS = 2000;
 
 /**
  * Browses the desktop's shared file list and lets the user *initiate* a
- * download. Tapping Download only proposes the transfer (POST
- * /transfers/requests) — from there, this screen's per-file status is
- * derived from the same pending-requests/transfers lists TransferListScreen
- * polls (see downloadStatus.ts), rather than a local flag that only ever
- * reflected the propose call's own success/failure.
+ * download. Tapping Download proposes the transfer (POST /transfers/requests)
+ * — the backend auto-accepts it in that same call, so the response already
+ * carries a transfer_id — and immediately hands it to TransferStreamManager
+ * to start moving bytes, without waiting for the user to visit the Transfers
+ * tab. This screen's per-file status is still derived from the same
+ * pending-requests/transfers lists TransferListScreen polls (see
+ * downloadStatus.ts), rather than a local flag that only ever reflected the
+ * propose call's own success/failure.
  */
 export function FilesScreen() {
   const { files, loading, refreshing, error, refresh } = useSharedFiles();
@@ -54,8 +58,12 @@ export function FilesScreen() {
         return next;
       });
       try {
-        await proposeTransfer({ direction: 'send', shared_file_id: file.id });
-        await refreshRequests();
+        const request = await proposeTransfer({ direction: 'send', shared_file_id: file.id });
+        await Promise.all([refreshRequests(), refreshTransfers()]);
+        if (request.status === 'accepted' && request.transfer_id != null) {
+          const transfer = await getTransfer(request.transfer_id);
+          TransferStreamManager.start(transfer);
+        }
       } catch (err) {
         setRequestErrors(prev => ({
           ...prev,
@@ -69,7 +77,7 @@ export function FilesScreen() {
         });
       }
     },
-    [refreshRequests],
+    [refreshRequests, refreshTransfers],
   );
 
   if (loading) {

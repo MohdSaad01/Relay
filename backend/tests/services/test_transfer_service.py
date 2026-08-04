@@ -32,16 +32,27 @@ def _register_device(db_session: Session, identifier: str = "device-uuid-1") -> 
 # --- request_transfer ----------------------------------------------------------
 
 
-def test_request_transfer_download_snapshots_shared_file(db_session: Session, tmp_path: Path) -> None:
+def test_request_transfer_download_auto_accepts_and_creates_transfer(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """A download no longer waits for the desktop's decision: request_transfer
+    itself creates the Transfer row and returns an already-ACCEPTED request."""
     device = _register_device(db_session)
     shared_file, _ = SharedFileService(db_session).share_file(_make_file(tmp_path))
     service = _service(db_session)
 
     request = service.request_transfer(device, TransferDirection.SEND, shared_file.id, None, None)
 
-    assert request.status is TransferRequestStatus.PENDING
+    assert request.status is TransferRequestStatus.ACCEPTED
     assert request.file_name == "report.pdf"
     assert request.shared_file_id == shared_file.id
+    assert request.transfer_id is not None
+
+    transfer = service.get_transfer_or_raise(request.transfer_id, None)
+    assert transfer.status is TransferStatus.IN_PROGRESS
+    assert transfer.device_id == device.id
+    assert transfer.shared_file_id == shared_file.id
+    assert transfer.file_name == "report.pdf"
 
 
 def test_request_transfer_download_raises_for_unknown_shared_file(db_session: Session) -> None:
@@ -132,6 +143,17 @@ def test_withdraw_request_raises_when_not_owned(db_session: Session) -> None:
         service.withdraw_request(request.request_id, other)
 
 
+def test_withdraw_request_raises_for_auto_accepted_download(db_session: Session, tmp_path: Path) -> None:
+    """A download is never PENDING, so there is nothing left to withdraw."""
+    device = _register_device(db_session)
+    shared_file, _ = SharedFileService(db_session).share_file(_make_file(tmp_path))
+    service = _service(db_session)
+    request = service.request_transfer(device, TransferDirection.SEND, shared_file.id, None, None)
+
+    with pytest.raises(NotFoundError):
+        service.withdraw_request(request.request_id, device)
+
+
 def test_list_requests_scopes_to_device(db_session: Session) -> None:
     device_a = _register_device(db_session, identifier="device-a")
     device_b = _register_device(db_session, identifier="device-b")
@@ -143,22 +165,33 @@ def test_list_requests_scopes_to_device(db_session: Session) -> None:
     assert len(service.list_requests(None)) == 2
 
 
-# --- accept_request / reject_request --------------------------------------------
-
-
-def test_accept_request_creates_transfer(db_session: Session, tmp_path: Path) -> None:
+def test_list_requests_never_includes_auto_accepted_downloads(db_session: Session, tmp_path: Path) -> None:
     device = _register_device(db_session)
     shared_file, _ = SharedFileService(db_session).share_file(_make_file(tmp_path))
     service = _service(db_session)
-    request = service.request_transfer(device, TransferDirection.SEND, shared_file.id, None, None)
+    service.request_transfer(device, TransferDirection.SEND, shared_file.id, None, None)
+    service.request_transfer(device, TransferDirection.RECEIVE, None, "a.jpg", 100)
+
+    pending = service.list_requests(device)
+
+    assert [r.file_name for r in pending] == ["a.jpg"]
+
+
+# --- accept_request / reject_request --------------------------------------------
+
+
+def test_accept_request_creates_transfer(db_session: Session) -> None:
+    device = _register_device(db_session)
+    service = _service(db_session)
+    request = service.request_transfer(device, TransferDirection.RECEIVE, None, "photo.jpg", 2048)
 
     transfer = service.accept_request(request.request_id)
 
     assert transfer.id is not None
     assert transfer.status is TransferStatus.IN_PROGRESS
     assert transfer.device_id == device.id
-    assert transfer.shared_file_id == shared_file.id
-    assert transfer.file_name == "report.pdf"
+    assert transfer.shared_file_id is None
+    assert transfer.file_name == "photo.jpg"
 
 
 def test_accept_request_raises_for_unknown_request(db_session: Session) -> None:
@@ -168,21 +201,34 @@ def test_accept_request_raises_for_unknown_request(db_session: Session) -> None:
         service.accept_request("missing")
 
 
-def test_accept_request_raises_when_shared_file_removed_meanwhile(
+def test_accept_request_raises_for_already_auto_accepted_download(
     db_session: Session, tmp_path: Path
 ) -> None:
+    """A download's request_id is never PENDING (it's auto-accepted by
+    request_transfer), so accept_request -- desktop's upload-review path --
+    can never claim it either."""
     device = _register_device(db_session)
-    shared_file_service = SharedFileService(db_session)
-    shared_file, _ = shared_file_service.share_file(_make_file(tmp_path))
+    shared_file, _ = SharedFileService(db_session).share_file(_make_file(tmp_path))
     service = _service(db_session)
     request = service.request_transfer(device, TransferDirection.SEND, shared_file.id, None, None)
-    shared_file_service.unshare_file(shared_file.id)
+
+    with pytest.raises(NotFoundError):
+        service.accept_request(request.request_id)
+
+
+def test_accept_request_raises_when_device_removed_meanwhile(db_session: Session) -> None:
+    device_repository = DeviceRepository(db_session)
+    device = _register_device(db_session)
+    service = _service(db_session)
+    request = service.request_transfer(device, TransferDirection.RECEIVE, None, "photo.jpg", 2048)
+    device_repository.delete(device)
+    db_session.commit()
 
     with pytest.raises(NotFoundError):
         service.accept_request(request.request_id)
 
     # The request is not silently dropped -- it becomes observable as rejected.
-    rejected = service.get_request_or_raise(request.request_id, device)
+    rejected = service.get_request_or_raise(request.request_id, None)
     assert rejected.status is TransferRequestStatus.REJECTED
 
 
@@ -203,6 +249,18 @@ def test_reject_request_raises_for_unknown_request(db_session: Session) -> None:
 
     with pytest.raises(NotFoundError):
         service.reject_request("missing")
+
+
+def test_reject_request_raises_for_already_auto_accepted_download(
+    db_session: Session, tmp_path: Path
+) -> None:
+    device = _register_device(db_session)
+    shared_file, _ = SharedFileService(db_session).share_file(_make_file(tmp_path))
+    service = _service(db_session)
+    request = service.request_transfer(device, TransferDirection.SEND, shared_file.id, None, None)
+
+    with pytest.raises(NotFoundError):
+        service.reject_request(request.request_id)
 
 
 # --- list_transfers / get_transfer_or_raise / cancel_transfer ------------------

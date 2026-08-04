@@ -10,10 +10,15 @@
  * (one active stream per transfer_id — this goes further and limits the
  * whole app to one at a time, keeping the V1 UI simple).
  *
- * Triggered by TransferProgressDetail when it observes an in_progress
- * transfer that isn't already streaming — see that screen for why nothing
- * auto-starts a stream the user hasn't looked at (V1 has no push/background
- * fetch trigger, by design, matching the "no push notifications" scope).
+ * Started from two places: FilesScreen calls it the moment a download is
+ * proposed (the backend auto-accepts it in that same call, so the file's
+ * bytes should start moving immediately — no waiting for the user to visit
+ * the Transfers tab), and TransferProgressDetail calls it opportunistically
+ * whenever it observes an in_progress transfer that isn't already streaming
+ * — the fallback that resumes a live view if the user navigates to a
+ * transfer's detail screen without having started it from FilesScreen (e.g.
+ * an accepted upload, or a download started from another app instance).
+ * Both call sites are safe to call redundantly — see start()'s own guards.
  */
 
 import { PermissionsAndroid } from 'react-native';
@@ -23,9 +28,10 @@ import { cancelTransfer } from '../api/endpoints/transfers';
 import { ApiError } from '../api/client';
 import { TransferResponse } from '../api/types';
 import { SessionManager } from '../session/SessionManager';
-import { downloadFile, isStreamCancelError, StreamTask, uploadFile } from './blobUtil';
+import { downloadFile, isStreamCancelError, publishDownload, StreamTask, uploadFile } from './blobUtil';
 import { clearUploadSource, getUploadSource } from './uploadSourceRegistry';
 import { startTransferNotification, stopTransferNotification, updateTransferNotification } from './foregroundService';
+import { notifyDownloadComplete } from './downloadNotification';
 import { StreamState } from './types';
 
 type Listener = () => void;
@@ -51,7 +57,11 @@ function setState(next: StreamState): void {
   notify();
 }
 
-function downloadDestinationPath(fileName: string): string {
+// Private app-internal storage — never the final resting place a user
+// browses to. It's just where bytes land while the stream is in flight;
+// start() moves the finished file into public storage via publishDownload
+// once the download completes. See blobUtil.ts's publishDownload for why.
+function downloadStagingPath(fileName: string): string {
   return `${ReactNativeBlobUtil.fs.dirs.DocumentDir}/Downloads/${fileName}`;
 }
 
@@ -136,7 +146,7 @@ export const TransferStreamManager = {
         activeTask = downloadFile(
           `${baseUrl}/transfers/${transfer.id}/download`,
           headers,
-          downloadDestinationPath(transfer.file_name),
+          downloadStagingPath(transfer.file_name),
           onProgress,
         );
       } else {
@@ -155,6 +165,10 @@ export const TransferStreamManager = {
       }
 
       await activeTask.promise;
+      if (transfer.direction === 'send') {
+        const contentUri = await publishDownload(downloadStagingPath(transfer.file_name), transfer.file_name);
+        await notifyDownloadComplete(transfer.file_name, contentUri);
+      }
       if (state?.transferId === transfer.id) {
         setState({ ...state, status: 'completed', bytesTransferred: state.totalBytes });
       }

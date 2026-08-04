@@ -20,6 +20,28 @@ remains before a real release is **packaging and distribution**
 build yet — plus the enhancements listed under
 [Known Limitations](#known-limitations) below.
 
+## Features
+
+* **Local-first, peer-to-peer transfer** — files move directly between the
+  desktop and the phone over LAN/hotspot; no cloud storage, account, or
+  internet server is ever involved.
+* **Automatic discovery** — Android finds the desktop on the network via UDP
+  broadcast, or pairs instantly by scanning a QR code.
+* **One-time pairing handshake** — Android submits a pairing request, the
+  desktop approves or rejects it, and Android receives a session token used
+  for every request afterward.
+* **Desktop-managed sharing** — the desktop chooses which local files are
+  shared; Android sees a sanitized list (no local paths) and can request a
+  download or propose an upload.
+* **Explicit approval on every transfer** — the desktop accepts or rejects
+  each transfer proposal before any bytes move; nothing transfers silently.
+* **Chunked HTTP streaming** in both directions, with cooperative
+  cancellation and automatic filename-conflict resolution on upload.
+* **Android foreground service** keeps in-progress transfers alive with a
+  live progress notification, plus a separate "download complete"
+  notification (via Notifee) with tap-to-open support on Android 10+.
+* **Desktop system tray integration** for background operation.
+
 ## Architecture
 
 Three components, one local network, no server in between:
@@ -49,6 +71,16 @@ Layering rule, enforced throughout the backend: API routes call services
 only, services call repositories only, repositories are the only code that
 touches SQLAlchemy. See `docs/02_Architecture.md`.
 
+## Tech Stack
+
+Finalized for Version 1 (`docs/03_Tech_Stack.md`); Claude Code must not
+replace any of these without developer approval.
+
+* **Desktop:** Electron, HTML, CSS, JavaScript
+* **Backend:** Python 3.13+, FastAPI, SQLAlchemy, SQLite, Pydantic, Uvicorn
+* **Android:** React Native (TypeScript)
+* **Development:** Git, Ruff, Pytest
+
 ## Project Structure
 
 ```text
@@ -70,6 +102,19 @@ Relay/
 ├── CLAUDE.md           Instructions for Claude Code working in this repo
 └── README.md           This file
 ```
+
+## Requirements
+
+* **Windows 10/11** — the desktop app (Electron + embedded backend) targets
+  Windows; the Android client connects to it over the same Wi-Fi network or
+  a phone hotspot.
+* **Python 3.13+** for the backend.
+* **Node.js >= 22.11.0** and npm for the desktop app and Android tooling.
+* **For Android builds:** Android Studio with the Android SDK, JDK 17,
+  CMake 4.1.2 (installed via the SDK Manager), Windows Long Paths enabled,
+  and an Android device or emulator — see "Windows: native build
+  requirements" in `android/README.md`.
+* **Git**
 
 ## Setup
 
@@ -156,6 +201,11 @@ issued at the end of the pairing handshake (`docs/10_Security.md`).
 6. Android streams the file's bytes to or from the desktop over HTTP, with
    either side polling transfer status until it reaches a terminal state.
 
+## Screenshots
+
+_Coming soon — screenshots of the desktop UI and Android app will be added
+here before release._
+
 ## Milestones
 
 | # | Milestone | Status |
@@ -206,6 +256,7 @@ Deliberately out of scope for Version 1 (`docs/11_File_Transfer.md` §16,
 * `08_Architecture_Decisions.md`
 * `09_Networking.md`, `10_Security.md`, `11_File_Transfer.md`
 * `12_Packaging_Deployment.md`, `13_Database_Design.md`, `14_Testing_Plan.md`
+* `15_QA_NOTEBOOK.md` — manual QA notes and verification steps
 
 `backend/README.md` documents the backend's internals in depth (services,
 API layer, dependency injection, request flow). `CLAUDE.md` documents

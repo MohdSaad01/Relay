@@ -165,24 +165,48 @@ async function resolveAvailableMediaStoreName(fileName: string): Promise<string>
  * Returns the resulting `content://` MediaStore URI on success, so a caller
  * (the download-complete notification) can offer to open the file directly
  * — or null when publishing didn't happen (pre-API 29) or failed.
+ *
+ * `copyToMediaStore` is not trusted at face value: on at least one real
+ * device (RMX3997, Android 16/API 36 — see docs/15_QA_NOTEBOOK.md's
+ * Milestone P8.1 entry), the underlying react-native-blob-util native call
+ * resolves with a seemingly-valid content URI while the file it points to
+ * never actually lands (or is immediately truncated) in the public folder —
+ * no exception is thrown, so this function's own try/catch never saw it.
+ * The publish is therefore verified by statting the real destination path
+ * (the same raw-filesystem technique `resolveAvailableMediaStoreName` and
+ * `files/downloadExistence.ts` already use) and comparing its size against
+ * the staged file's — only a byte-for-byte match counts as success.
  */
 export async function publishDownload(stagingPath: string, fileName: string): Promise<string | null> {
   if (Number(Platform.Version) < MEDIASTORE_MIN_SDK) {
     return null;
   }
   try {
+    const stagedSize = Number((await ReactNativeBlobUtil.fs.stat(stagingPath)).size);
     const targetName = await resolveAvailableMediaStoreName(fileName);
     const contentUri = await ReactNativeBlobUtil.MediaCollection.copyToMediaStore(
       { name: targetName, parentFolder: PUBLIC_DOWNLOAD_FOLDER, mimeType: 'application/octet-stream' },
       'Download',
       stagingPath,
     );
+    if (!(await isPublishedAt(targetName, stagedSize))) {
+      console.warn(
+        'copyToMediaStore reported success but the file is missing or incomplete at its public destination; leaving it in private storage.',
+      );
+      return null;
+    }
     await ReactNativeBlobUtil.fs.unlink(stagingPath).catch(() => undefined);
     return contentUri;
   } catch (err) {
     console.warn('Could not publish download to public storage; file remains in private storage.', err);
     return null;
   }
+}
+
+async function isPublishedAt(fileName: string, expectedBytes: number): Promise<boolean> {
+  const dir = `${ReactNativeBlobUtil.fs.dirs.DownloadDir}/${PUBLIC_DOWNLOAD_FOLDER}`;
+  const stat = await ReactNativeBlobUtil.fs.stat(`${dir}/${fileName}`).catch(() => null);
+  return stat != null && Number(stat.size) === expectedBytes;
 }
 
 export function uploadFile(

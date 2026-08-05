@@ -19,7 +19,10 @@ let channelReady: Promise<void> | null = null;
 function ensureChannel(): Promise<void> {
   if (!channelReady) {
     channelReady = notifee
-      .createChannel({ id: CHANNEL_ID, name: 'Relay Downloads', importance: AndroidImportance.DEFAULT })
+      // notifee's own default is to play no sound at all unless a channel
+      // explicitly opts in (see docs/15_QA_NOTEBOOK.md's Milestone P8.1
+      // entry) — 'default' plays the system's default notification sound.
+      .createChannel({ id: CHANNEL_ID, name: 'Relay Downloads', importance: AndroidImportance.DEFAULT, sound: 'default' })
       .then(() => undefined)
       .catch(err => {
         // Don't let one failed attempt (e.g. a transient native-bridge

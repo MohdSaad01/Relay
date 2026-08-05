@@ -19,6 +19,11 @@ beforeEach(() => {
   // an earlier test, so re-pin the shared mock's default here rather than
   // relying on test order for publishDownload's conflict-check calls.
   (ReactNativeBlobUtil.fs.exists as jest.Mock).mockResolvedValue(false);
+  // Default: the staged file and its published copy both report the same
+  // size, so publishDownload's own post-copy verification (see Milestone
+  // P8.1) passes by default — individual tests override this to simulate a
+  // copy that silently didn't actually land.
+  (ReactNativeBlobUtil.fs.stat as jest.Mock).mockResolvedValue({ size: 100 });
 });
 
 afterEach(() => {
@@ -204,6 +209,39 @@ describe('publishDownload', () => {
 
     await expect(publishDownload('/mock/documents/Downloads/report.pdf', 'report.pdf')).resolves.toBeNull();
 
+    expect(ReactNativeBlobUtil.fs.unlink).not.toHaveBeenCalled();
+  });
+
+  // Regression test for Milestone P8.1: on a real device (RMX3997, Android
+  // 16/API 36), copyToMediaStore resolved with a seemingly-valid content URI
+  // while the file it pointed to was never actually written (a bug in
+  // react-native-blob-util's native writeToMediaFile — see
+  // docs/15_QA_NOTEBOOK.md's Milestone P8.1 entry) — with no exception for
+  // this function's own try/catch to see. publishDownload must not trust the
+  // library's return value alone.
+  test('treats a copy that reports success but never actually lands at its destination as a failure', async () => {
+    (ReactNativeBlobUtil.fs.stat as jest.Mock).mockImplementation((path: string) =>
+      path === '/mock/documents/Downloads/report.pdf'
+        ? Promise.resolve({ size: 100 })
+        : Promise.reject(new Error('ENOENT')),
+    );
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const contentUri = await publishDownload('/mock/documents/Downloads/report.pdf', 'report.pdf');
+
+    expect(contentUri).toBeNull();
+    expect(ReactNativeBlobUtil.fs.unlink).not.toHaveBeenCalled();
+  });
+
+  test('treats a published file whose size does not match the staged file as a failure', async () => {
+    (ReactNativeBlobUtil.fs.stat as jest.Mock).mockImplementation((path: string) =>
+      Promise.resolve({ size: path === '/mock/documents/Downloads/report.pdf' ? 100 : 0 }),
+    );
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const contentUri = await publishDownload('/mock/documents/Downloads/report.pdf', 'report.pdf');
+
+    expect(contentUri).toBeNull();
     expect(ReactNativeBlobUtil.fs.unlink).not.toHaveBeenCalled();
   });
 

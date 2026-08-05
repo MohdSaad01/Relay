@@ -1534,3 +1534,168 @@ streaming/auth path this milestone investigated.
   `devices.last_seen_at` do not mention the flush-timing change; a doc
   update is recommended but was not made automatically, per `CLAUDE.md`'s
   documentation-ownership rule.
+
+---
+
+# Milestone P8.1 — Physical Device Verification (Post-P8)
+
+## Problem
+
+P8's own Known Limitations flagged that its fixes (bounded write-timeout
+disconnect detection, the auth-bookkeeping lock fix) were never verified
+against a real Android device. This milestone re-ran the full transfer
+matrix (`.txt`, `.pdf`, `.docx`, `.pptx`, `.jpg`, `.png`, `.zip`, `.mp3`) on
+device RMX3997 — the same physical device P7/P8 used — over its own Wi-Fi
+hotspot (not loopback/USB), the exact condition P8's Known Limitations
+called out as necessary to exercise real backpressure.
+
+## Backend result: PASS
+
+All 8 required file types (plus a few repeats from tap-coordinate mistakes,
+13 downloads total including the two most implicated in the original P8
+report — `.jpg` and `.mp3`) completed cleanly: `Download completed:
+transfer_id=N bytes=<declared size>` for every one, byte-for-byte matching
+the shared file's declared size. Zero occurrences of `Download connection
+closed early` and zero occurrences of `database is locked` across the
+entire session. P8's fix holds on the real device it was written for.
+
+## Android result: two defects found, neither caused by P8
+
+Per this milestone's own instructions, testing stopped at the first
+failure (`.txt`) for root-cause investigation before continuing.
+
+### Defect 1 — publishDownload() reported success for a file that was never actually published
+
+**Symptom:** immediately after a `.txt` download, the Files screen showed
+"Saved to Downloads/Relay" and an "Open" button, then silently reverted to
+"Download" a few seconds later.
+
+**Investigation:** `adb shell content query --uri
+content://media/external/downloads` and a raw `ls` on
+`/storage/emulated/0/Download/Relay/` both confirmed, on two independent
+reproductions (transfer_id 35 and 36), that the file never existed at its
+public destination — only at its private staging path
+(`files/Downloads/test.txt`, confirmed present via `run-as`). Traced into
+`node_modules/react-native-blob-util`'s native Android implementation
+(`ReactNativeBlobUtilMediaCollection.java`, `writeToMediaFile()`): after
+correctly writing the source file's bytes into the new MediaStore `Uri` via
+a `ParcelFileDescriptor` opened in write mode, the method redundantly opens
+`resolver.openOutputStream(fileUri)` a *second* time and immediately closes
+it without writing anything — dead code, evidenced by a commented-out
+`IS_PENDING` dance sitting right next to it that suggests an abandoned
+refactor. On this device (RMX3997, ColorOS/RealmeUI, Android 16/API 36),
+that redundant open-close truncates or orphans the just-written MediaStore
+row, but throws no exception — so `publishDownload()`'s own try/catch
+(`blobUtil.ts`) never saw a failure to report, and the transfer's local
+state proceeded straight to `'completed'` with a URI pointing at nothing.
+This is deterministic (hit on every attempt, both `.txt` downloads), not a
+timing flake, and affects every file type identically since the code path
+is direction-agnostic.
+
+This bug lives entirely in third-party library code, not Relay's own, and
+P8 touched zero Android/frontend files — confirmed unrelated to P8's
+backend fix.
+
+**Decision:** presented three options to the developer (accurately report
+the failure without fixing the underlying publish; reimplement the
+MediaStore write in Relay's own code to bypass the buggy library call
+entirely; or leave it undiagnosed-fixed and only document it). Developer
+chose the first — the smallest, lowest-risk fix, matching this milestone's
+"do not redesign" instruction. `publishDownload()` (`blobUtil.ts`) now
+stats the real destination path after `copyToMediaStore` resolves and only
+treats the copy as successful if the published file's size matches the
+staged file's; otherwise it warns and returns `null`, leaving the file at
+its (already-existing) private-storage fallback rather than lying about
+where it ended up. **This does not make the underlying publish actually
+work on this device** — files downloaded here still won't appear in the
+Downloads app or `Downloads/Relay` until the react-native-blob-util bug
+itself is fixed or worked around, which was explicitly out of scope for
+this fix.
+
+### Defect 2 — the download-complete notification channel was created with no sound
+
+**Symptom:** a "Relay" notification did appear for each completed download
+(confirmed via the notification shade — "✓ test.pdf downloaded
+successfully" — and via `adb shell dumpsys notification`), but per this
+milestone's own matrix item ("Notification has sound"), sound was
+suspect.
+
+**Investigation:** `adb shell dumpsys notification` showed the
+`relay-downloads` channel with `mSound=null` and `mAudioAttributes=null` —
+compare the app's *other* channel
+(`com.supersami.foregroundservice.channel`, the transfer-progress
+notification), which explicitly carries
+`mSound=content://settings/system/notification_sound`. `downloadNotification.ts`'s
+`ensureChannel()` called `notifee.createChannel(...)` without a `sound`
+field. notifee's own type declaration
+(`NotificationAndroid.d.ts`) documents this exactly: *"The default value is
+to play no sound. To play the default system sound use 'default'."* This is
+Relay's own code (added in Milestone P4), not a third-party bug, and a
+one-line fix with no meaningful alternative to weigh — applied directly
+rather than re-raising as a decision.
+
+**Solution:** `ensureChannel()` now passes `sound: 'default'` to
+`createChannel()`.
+
+**Verified at the code level, not audibly on this device:** confirmed via
+the running Metro bundle (`grep`'d for `sound.*default`) and a new unit
+test (`downloadNotification.test.ts`) asserting `createChannel` is called
+with `sound: 'default'`. Could **not** be confirmed audibly on the
+RMX3997 test device itself: Android notification channel settings
+(including sound) are fixed at first creation and are not updated by a
+later `createChannel()` call with the same channel ID — this device's
+`relay-downloads` channel already existed from earlier (pre-fix) test runs
+in this same session, and `dumpsys notification` still showed `mSound=null`
+after the fix was live and reloaded. This is expected Android platform
+behavior, not a flaw in the fix — a fresh install (or manually deleting the
+channel via Settings) is required to observe the sound on this specific
+device. Recommended before fully closing this out.
+
+## Files changed
+
+- `android/src/streaming/blobUtil.ts` — `publishDownload()` verifies the
+  publish actually landed before trusting it (Defect 1).
+- `android/src/streaming/downloadNotification.ts` — channel now created
+  with `sound: 'default'` (Defect 2).
+- `android/__tests__/streaming/blobUtil.test.ts` — two new regression
+  tests for Defect 1.
+- `android/__tests__/streaming/downloadNotification.test.ts` — one new
+  regression test for Defect 2.
+
+## Testing summary
+
+- Backend: unaffected by either Android-side fix; the existing `pytest`
+  suite (286 passed, 2 skipped per P8) was not re-run since no backend file
+  changed in this milestone — only re-verified live against the physical
+  device as described above.
+- Android: `npx jest` — 25 suites / 156 tests passing (155 + 1 new; two new
+  cases added to `blobUtil.test.ts`, one to `downloadNotification.test.ts`,
+  net +3 across the two files after accounting for the pre-existing count).
+  `npx tsc --noEmit` clean. `npx eslint` clean on all changed files.
+- ADB: full manual matrix executed live (see Backend/Android results
+  above) — this milestone's verification was physical-device-only by
+  design, not simulated.
+- `.mp4`: not tested — no sample file was available in the environment and
+  no tool (`ffmpeg` or equivalent) was present to synthesize one; explicitly
+  optional ("if available") per this milestone's brief.
+
+## Known Limitations
+
+- The react-native-blob-util `writeToMediaFile` bug itself (Defect 1's root
+  cause) is not fixed — only its silent-false-success symptom is. Files
+  downloaded on this specific device/OS combination will continue to land
+  only in private app storage, invisible to the Downloads app or any file
+  manager, until either the library is patched/upgraded or Relay's own code
+  is changed to bypass the buggy call with a working alternative (deferred;
+  see the three options presented to the developer above).
+- Defect 2's fix is unverified audibly on this device for the reason
+  described above (channel immutability) — verified at the code/test level
+  only.
+- The app's own debug instrumentation (`'[QR-DEBUG] ...'` console logging in
+  `src/api/client.ts`, invoked on every single HTTP request/response) is
+  extremely high-volume — high enough that it evicted the device's logcat
+  ring buffer within roughly a minute of normal polling traffic during this
+  session's investigation, repeatedly losing the exact moment being
+  diagnosed. Left untouched as out of scope for this milestone, but flagged
+  since it measurably slowed root-causing Defect 1 and would do the same to
+  any future on-device investigation.

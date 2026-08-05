@@ -57,6 +57,18 @@ test('notifyDownloadComplete creates the channel once and displays a completion 
   );
 });
 
+// Regression test for Milestone P8.1: notifee plays no sound at all unless a
+// channel explicitly opts in ("The default value is to play no sound. To
+// play the default system sound use 'default'." -- notifee's own
+// NotificationAndroid.d.ts) -- confirmed on a physical device via `adb shell
+// dumpsys notification` showing the channel's mSound as null. See
+// docs/15_QA_NOTEBOOK.md's Milestone P8.1 entry.
+test('the download-complete channel is created with the default system sound', async () => {
+  await notifyDownloadComplete('report.pdf', null);
+
+  expect(mockCreateChannel).toHaveBeenCalledWith(expect.objectContaining({ sound: 'default' }));
+});
+
 test('notifyDownloadComplete includes the content URI as data and a press action that opens it', async () => {
   await notifyDownloadComplete('report.pdf', 'content://media/downloads/1');
 

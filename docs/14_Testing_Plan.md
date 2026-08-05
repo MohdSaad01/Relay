@@ -1125,6 +1125,497 @@ Regression status:
 
 ---
 
+## P4 — Notifications & Final Download Experience
+
+### Status
+
+**Completed**
+
+### Summary
+
+Product-polish follow-up covering the final stage of the Android download
+experience: the completion notification (reported as never appearing) and
+the completed-download UX on the Files screen (no action available once a
+file finishes downloading). Scoped entirely to
+`android/src/streaming/downloadNotification.ts`,
+`android/src/files/downloadExistence.ts`, the new
+`android/src/files/downloadActions.ts`, and
+`android/src/screens/files/FilesScreen.tsx`. No pairing, discovery,
+authentication, streaming protocol, or backend code was touched.
+
+### Issues Found
+
+**1. Download completion notification never appears (Medium — incorrect UI
+behavior, no crash):**
+
+Investigated the full pipeline per this milestone's checklist (permission,
+channel, Notifee initialization, callback execution, foreground/background
+behavior, Android version differences) by tracing
+`downloadNotification.ts`, `TransferStreamManager.start()`,
+`@notifee/react-native`'s Android permission model, and
+`@supersami/rn-foreground-service`'s native `stop()` path
+(`node_modules/@supersami/rn-foreground-service/android/.../ForegroundService.java`)
+to rule out the foreground-service notification's teardown clearing the
+separate Notifee notification — confirmed it only calls `stopSelf()`
+against its own foreground notification, not `NotificationManager.cancelAll()`,
+so it cannot be the cause. No physical device or emulator was available in
+this environment (consistent with every prior milestone's own caveat, and
+with T1's original finding that the Android SDK/tooling is unavailable
+here), so root-causing relied on code tracing rather than live
+reproduction.
+
+Two concrete, code-verifiable defects were found in
+`downloadNotification.ts`, both invisible to the existing test suite
+because it mocks `@notifee/react-native` entirely and therefore never
+exercises a failure path:
+
+- `notifyDownloadComplete()` was awaited unguarded by
+  `TransferStreamManager.start()`, unlike its sibling `publishDownload()`
+  (`blobUtil.ts`), which is deliberately best-effort. Any failure inside it
+  — channel creation, the notification post itself, or Android silently
+  dropping the post because `POST_NOTIFICATIONS` (required at this app's
+  `targetSdkVersion` of 36) was never granted — propagated up through
+  `TransferStreamManager.start()`'s own `try/catch` and flipped an
+  otherwise-successfully-downloaded transfer to `'failed'`, on top of the
+  notification simply not showing.
+- `ensureChannel()` cached the *promise* returned by `notifee.createChannel()`
+  on the very first call, including a rejected one. Once a single
+  channel-creation attempt failed for any reason, every later
+  `notifyDownloadComplete()` call for the rest of the app session reused
+  that same rejected promise and failed identically, with no chance to
+  retry.
+
+Root cause is therefore a combination of (a) no error containment around a
+call that can legitimately fail on a real device — most plausibly a denied
+or not-yet-granted `POST_NOTIFICATIONS` permission, which Android 13+
+enforces silently (no exception, the notification is just never shown) and
+which this app's permission request (`PermissionsAndroid.request(...)`) in
+`TransferStreamManager.start()` never checks the result of — and (b) that
+one such failure would have permanently disabled notifications for the rest
+of the session. The permission gate itself is OS behavior this app cannot
+override; the code defects compounding it (transfer wrongly marked failed,
+no retry after one glitch) are what this milestone fixed.
+
+**2. No action available on a completed download (Low/Medium — minor
+workflow issue):**
+
+`FilesScreen`'s completed-download row rendered a disabled, dead-end green
+"Downloaded" button — tapping it did nothing. Investigated what the
+existing architecture already supports for Open/Share/Show-location:
+
+- **Open** — supported. `react-native-blob-util` (already a dependency for
+  the streaming code) exposes `android.actionViewIntent(path, mime,
+  chooserTitle)`, an `ACTION_VIEW` intent with FileProvider content-URI
+  handling built in.
+- **Share** — investigated and found genuinely unsupported by anything
+  already in this codebase. React Native's own built-in `Share` module
+  discards its `url` field entirely on Android
+  (`node_modules/react-native/Libraries/Share/Share.js` only forwards
+  `title`/`message` to the native side), and `react-native-blob-util` only
+  exposes the `ACTION_VIEW` "open with" intent above, not `ACTION_SEND`.
+  Implementing real sharing would require a new native dependency, which is
+  outside this UX-polish milestone's scope (CLAUDE.md Rule 2 — no new
+  technology without justification) — not implemented, flagged for the
+  developer to decide on for a future milestone.
+- **Show location** — implemented as a small informational caption rather
+  than a tappable action, since there is no reliable, version-independent
+  Android intent to "reveal in file manager" across devices; a static
+  "Saved to Downloads/Relay" line needs no new capability and is always
+  accurate.
+
+### Solution
+
+- **Issue 1:** `notifyDownloadComplete()` (`downloadNotification.ts`) is
+  now genuinely best-effort, matching `publishDownload()`'s contract — its
+  body is wrapped in `try/catch`, logging via `console.warn` on failure
+  instead of throwing. `ensureChannel()` now clears its cached promise on a
+  failed `createChannel()` call instead of keeping the rejection cached
+  forever, so the very next `notifyDownloadComplete()` call retries from
+  scratch. No change was needed (or made) to the permission-request flow
+  itself — `PermissionsAndroid.request(POST_NOTIFICATIONS)` in
+  `TransferStreamManager.start()` was already correctly placed early, and
+  Android's runtime permission model is not something this app can bypass;
+  the fix ensures a denial degrades to "silently no notification" (the
+  correct, already-graceful outcome) rather than "silently no notification
+  *and* the transfer wrongly reported failed."
+- **Issue 2:** Added `android/src/files/downloadActions.ts`
+  (`openDownloadedFile(fileName, mimeType)`), reusing
+  `react-native-blob-util`'s `actionViewIntent` and the on-device path
+  already computed by `downloadExistence.ts` (exported as
+  `downloadedFilePath` rather than duplicated a third time).
+  `FilesScreen`'s completed-download row now renders an actionable "Open"
+  button plus a "Saved to Downloads/Relay" caption in place of the old
+  dead-end disabled pill — but only once `useDownloadExistence` has
+  explicitly confirmed (`=== true`, not the softer "not checked yet"
+  default `deriveDownloadStatus` otherwise tolerates) that the file is
+  still on disk, per this milestone's requirement that a completed-download
+  action never appears for a file that doesn't genuinely exist. A failed
+  `Open` attempt (e.g. no installed app can handle the file's MIME type)
+  surfaces as an inline row error, reusing the same error-caption slot the
+  screen already had for a failed download request.
+
+### Verification
+
+- Android: 24 suites / 142 tests passing (`npx jest`; 137 existing + 5
+  new — 2 regression tests for the notification defects in
+  `downloadNotification.test.ts`, 3 for `openDownloadedFile` in the new
+  `downloadActions.test.ts`). `npx tsc --noEmit` and `npx eslint .` clean.
+  A test-only `__resetNotificationChannelForTests()` export was added to
+  `downloadNotification.ts` so the channel-cache regression test doesn't
+  depend on test execution order within its file.
+- Backend, Desktop: untouched by this milestone.
+
+### Known Limitations
+
+- Neither issue could be reproduced live end-to-end — no physical Android
+  device or emulator was available in this environment, consistent with
+  every prior milestone's own caveat (and T1/T4's specific note that the
+  Android SDK/tooling itself is unavailable here). Issue 1's root cause is
+  therefore a code-verified defect (asymmetric error handling, permanent
+  channel-cache poisoning) plus a plausible, well-documented Android
+  permission interaction (`POST_NOTIFICATIONS` silently gating all
+  notifications on this app's `targetSdkVersion` 36) rather than a
+  confirmed single reproduction on hardware. Recommended before closing
+  this out: a live-device pass confirming a completion notification now
+  appears after denying, then granting, `POST_NOTIFICATIONS`, and that the
+  transfer never shows "failed" in either case.
+- "Share" remains unimplemented — see Issue 2's investigation above. Not a
+  regression (there was never a Share action), but flagged as a genuine
+  architectural gap if the developer wants it in a future milestone.
+- The "Open" action reuses `downloadExistence.ts`'s existing path
+  convention, which already has a documented gap (Milestone P3): it checks
+  for the file under its *original* shared name, not any "(1)"-suffixed
+  name `resolveAvailableMediaStoreName` may have used to resolve a naming
+  conflict. A conflict-renamed file would therefore not offer an Open
+  action even though a copy exists on disk under a different name — a
+  pre-existing limitation this milestone did not extend, not a new one it
+  introduced.
+
+---
+
+## P5 — Live Synchronization & UX Responsiveness
+
+### Status
+
+**Completed**
+
+### Summary
+
+Product-polish follow-up investigating perceived responsiveness across the
+Android app's existing polling architecture — explicitly not a redesign:
+no WebSockets, no push notifications, no new sync system. Scoped to
+`android/src/screens/files/FilesScreen.tsx`,
+`android/src/screens/transfers/TransferListScreen.tsx`,
+`android/src/screens/transfers/TransferProgressDetail.tsx`, and a new
+`android/src/transfers/mergeLiveTransferState.ts`. No backend, streaming
+protocol, authentication, pairing, discovery, or desktop code was touched.
+
+Reviewed every polling loop and every point where the UI already knows an
+outcome locally but was still waiting on a poll to reflect it — Files
+screen, Transfer list, Transfer detail, and polling efficiency across all
+three, per this milestone's own checklist.
+
+### Issues Found
+
+**1. A redundant extra request fires on every screen mount (Low —
+performance issue):**
+
+`useSharedFiles()`, `useTransferRequests()`, and `useTransfers()` each
+already fetch once on mount via their own internal `useEffect`. Milestone
+P3 additionally made `FilesScreen`/`TransferListScreen` call their refresh
+functions immediately on `useFocusEffect` so a screen regaining focus after
+being backgrounded doesn't wait for the next poll tick. A screen's *first*
+focus coincides with that same mount, so on every fresh mount both the
+hook's own fetch and the screen's immediate focus-refresh fired back to
+back — one silently redundant `GET` per list, every time a tab is first
+visited (three on `FilesScreen`: shared files, requests, transfers; one on
+`TransferListScreen`: transfers).
+
+**2. A newly proposed download/upload waited on an unrelated list refresh
+before its bytes started moving (Medium — minor workflow issue):**
+
+`FilesScreen.handleDownload` and `TransferListScreen.handleUpload` both
+`await`ed `refreshRequests()`/`refreshTransfers()` — which only update the
+polled list state so the row's button label switches correctly — *before*
+calling `getTransfer()` and handing the result to
+`TransferStreamManager.start()`. The list refresh and the stream start
+don't depend on each other, but were run sequentially, delaying when the
+transfer's bytes actually started moving by a full extra round trip on
+every single download or upload.
+
+**3. Transfer detail screen's status badge and Cancel button lagged behind
+bytes already at 100% (Medium — incorrect UI behavior / UI jitter):**
+
+Milestone P3 fixed the case where the *server* is ahead of the local
+stream (server already `completed`, local stream still reporting a stale
+partial byte count) by making the server win outright once terminal. The
+opposite gap was never covered: when the *local* stream itself reaches a
+terminal outcome (`completed`/`failed`/`cancelled`) before the next 2-second
+server poll catches up, `TransferProgressDetail`'s old merge logic
+(`useLiveStream && stream.status === 'streaming' ? 'in_progress' :
+transfer.status`) fell through to the still-stale server `transfer.status`
+(`'in_progress'`) for the status badge, even though `bytesTransferred` was
+already correctly showing the live stream's full total (100%). The Cancel
+button, gated on the same stale `transfer.status === 'in_progress'`, stayed
+visible and tappable for the same window — tapping it in that state would
+route to the REST `cancel()` call against an already-finished transfer
+instead of being hidden.
+
+### Root Cause
+
+All three issues trace back to the same theme this document's prior
+milestones already established: local knowledge the app already has
+(a hook's own initial fetch, a just-proposed transfer's `transfer_id`, a
+just-finished local stream's outcome) wasn't being used as early as it
+safely could be — either duplicating a fetch that had already happened, or
+delaying work that didn't need to wait, or trusting a stale poll over a
+local view that was, in that specific window, actually more current.
+
+### Solution
+
+- **Issue 1:** `FilesScreen` and `TransferListScreen` each gained a
+  `useRef` flag (`isFirstTransfersFocus`/`isFirstFilesFocus`, `isFirstFocus`)
+  that skips the immediate refresh call on a screen's first `useFocusEffect`
+  firing only, leaving every subsequent focus (returning to an
+  already-mounted screen) refreshing immediately exactly as Milestone P3
+  established. The underlying hooks (`useSharedFiles`, `useTransferRequests`,
+  `useTransfers`) were left unchanged — they still fetch on mount
+  unconditionally, which is the more robust default for any future caller
+  that doesn't happen to pair them with a focus-driven refresh.
+- **Issue 2:** Both handlers now kick off the list-refresh call(s) without
+  `await`ing them immediately, run `getTransfer()`/`TransferStreamManager.start()`
+  concurrently, and only `await` the refresh promise afterward (still before
+  the `finally` block clears the button's `requesting`/`uploading` flag) —
+  preserving the exact same anti-flicker ordering (the button's local
+  "Downloading.../Requesting..." label never hands off to the polled label
+  before the polled list has actually caught up), while no longer forcing
+  the stream to wait on a request it doesn't need.
+- **Issue 3:** Added `android/src/transfers/mergeLiveTransferState.ts`, a
+  pure function (mirroring the project's existing `downloadStatus.ts`
+  pattern) that computes `{ status, bytesTransferred, totalBytes, showCancel }`
+  from a `TransferResponse` and a `StreamState | null`: the server still wins
+  outright once terminal (P3, unchanged); while the server reports
+  `in_progress`, a live stream's own terminal status now wins over the stale
+  `in_progress` too. `TransferProgressDetail` was simplified to consume this
+  single merged view instead of separately re-deriving
+  `bytesTransferred`/`totalBytes`/`displayStatus`/the Cancel button's
+  condition inline. A new `useEffect` also triggers one immediate `refresh()`
+  the moment the local stream reaches a terminal outcome while the server
+  still shows `in_progress` — closing the gap from the local side too,
+  instead of only waiting for the existing 2-second poll to catch up.
+
+### Verification
+
+- New `android/__tests__/transfers/mergeLiveTransferState.test.ts` (7 cases):
+  no stream, a stream for a different transfer, server-terminal-wins even
+  against a matching "streaming" stream, server in_progress with a
+  streaming local view, and all three "local stream finished ahead of a
+  stale server in_progress" cases (completed/cancelled/failed), each
+  asserting both the displayed status and `showCancel`.
+- Full Android suite: `npx jest` — 25 suites / 149 tests passing (149 =
+  142 existing + 7 new). `npx tsc --noEmit` clean. `npx eslint .` clean
+  across the whole project, not just changed files.
+- No component-level test harness exists for `FilesScreen`,
+  `TransferListScreen`, or `TransferProgressDetail` in this codebase (only
+  their extracted pure-logic modules and hooks are unit tested — consistent
+  with every prior Files/Transfers milestone in this document). Issues 1
+  and 2's screen-level changes were verified by code trace against the
+  existing hook test suites (confirming exactly one fetch fires per hook on
+  mount) plus `tsc`/`eslint`, matching this codebase's established
+  convention rather than introducing a new testing pattern out of scope for
+  a UX-polish milestone.
+- Backend, Desktop: untouched by this milestone.
+
+### Known Limitations
+
+- None of the three fixes could be verified live end-to-end — no physical
+  Android device/desktop pair was available in the environment this change
+  was made in, consistent with every prior milestone's own caveat.
+  Recommended before closing this out: confirm on a real device that (a) no
+  duplicate network request fires in a request-logging proxy when a tab is
+  first visited, (b) a download/upload's progress bar visibly starts
+  moving sooner after tapping Download/Upload, and (c) the transfer detail
+  screen's status badge and Cancel button disappear at the same moment the
+  progress bar reaches 100%, not a few seconds later.
+- Issue 1's fix is a `useRef` guard scoped to each screen, not a change to
+  the underlying hooks' own contract (they still always fetch on mount).
+  If a future screen reuses one of these hooks *without* pairing it with an
+  immediate focus-driven refresh, no duplicate-fetch risk exists for that
+  caller — but if it reuses the same "hook fetch on mount + immediate focus
+  refresh" pattern, it will need to add its own equivalent first-focus guard
+  rather than inheriting one from the hook.
+- Polling cadences (2s for transfers/requests, 5s for shared files) and the
+  existence-check effect's dependency on the faster 2s poll (so a
+  just-completed download's on-device existence gets verified promptly, not
+  only every 5s) were deliberately left unchanged — reducing either would
+  reduce genuine responsiveness for exactly the flows this milestone cares
+  about, which the milestone's own constraints rule out ("Do not reduce
+  correctness").
+
+---
+
+## P6 — File Browser UX Refinement
+
+### Status
+
+**Completed**
+
+### Summary
+
+Product-polish follow-up refining the Files screen to behave more like a
+modern cloud-storage app, scoped entirely to
+`android/src/screens/files/FilesScreen.tsx` and
+`android/src/files/downloadActions.ts` (a documentation-only change). No
+backend, API, streaming, transfer-protocol, or architectural change was
+made, per this milestone's explicit constraints. Investigated all four
+areas from the milestone brief: the disabled "Downloaded" primary action,
+the completed-file experience, shared-file freshness after P5, and a
+consistency audit across every Files row state.
+
+### Issues Found
+
+**1. A completed download could briefly show a disabled, dead-end
+"Downloaded" pill (Medium — incorrect UI behavior):**
+
+`FileRow`'s `canOpen` gate required `fileExists === true` from
+`useDownloadExistence` before offering the "Open" action added in
+Milestone P4. But `deriveDownloadStatus` (`downloadStatus.ts`) already
+treats `fileExists === undefined` ("not checked yet") as good enough to
+report `'completed'` — an explicit `false` is the only value that
+downgrades it to `'idle'`. The two checks disagreed: for the brief window
+between a transfer's status reaching `'completed'` and
+`useDownloadExistence`'s async `verify()` call resolving, the row's status
+was `'completed'` but `canOpen` was still `false`, so `FileRow` fell
+through to its disabled-pill branch with the label "Downloaded" — a
+primary action that did nothing, exactly the pattern this milestone's
+brief asked to remove. Confirmed by code trace: `canOpen`'s stricter
+`=== true` check re-litigated a question `deriveDownloadStatus` had
+already answered more permissively, rather than trusting that answer.
+
+**2. A stale "couldn't open this file" message could linger after a row
+stopped offering Open (Low — cosmetic/confusing UI):**
+
+`openErrors` state was only ever cleared at the start of a successful
+`handleOpen` call. If an open attempt failed and the row later left the
+`'completed'` state (either because `handleOpen`'s failure path re-verified
+existence and found the file genuinely gone, or because a later poll
+picked up a fresh status), the old open-failure message stayed displayed
+next to a button that no longer said "Open" — a stale error describing an
+action the row was no longer offering.
+
+### Root Cause
+
+Both issues trace to the same shape as several prior entries in this
+document: `FileRow` computed its own, second opinion (`canOpen`,
+`errorMessage`) instead of consistently deferring to the single-source-of-
+truth checks (`deriveDownloadStatus`'s own `fileExists` tolerance, and
+which state a message was raised for) that already existed nearby.
+
+### Solution
+
+- **Issue 1:** `FileRow`'s `canOpen` is now simply `status.kind ===
+  'completed'` — no separate `fileExists` re-check. This is safe because
+  `deriveDownloadStatus` already guarantees `'completed'` excludes a file
+  `useDownloadExistence` has explicitly confirmed missing; it only differs
+  from the old check by *also* trusting the same "not checked yet" default
+  `deriveDownloadStatus` itself already trusts, removing the disagreement
+  that produced the dead-end pill. The `fileExists` prop was removed from
+  `FileRow` entirely (it was only ever used for this one comparison). The
+  rare case where Open is offered but the file was in fact deleted in that
+  unchecked window now surfaces as a normal in-row error (see Issue 2's
+  fix) rather than never being offered at all.
+- Also removed as part of the same change: the now-dead
+  `status.kind === 'completed'` branches in `disabled` and the downloadButton's
+  style array, both left over from before `canOpen` covered the `'completed'`
+  case unconditionally — that Pressable branch can no longer render while
+  `status.kind === 'completed'`, so the extra checks were unreachable.
+- The disabled-pill wording gap was also used to add a small, related
+  consistency improvement: a `'failed'` download now labels its retry
+  button "Retry" instead of the same "Download" label shown for a file
+  that was never attempted, making the two states easier to tell apart at
+  a glance.
+- **Issue 2:** `handleOpen`'s failure path now calls `verify(file.file_name)`
+  before setting the error message, so a genuinely-missing file re-syncs
+  `useDownloadExistence`'s cache (downgrading the row back to a
+  re-downloadable `'idle'` state on the next render) instead of staying
+  stuck offering an `Open` that will keep failing. `handleDownload` now
+  also clears any existing `openErrors` entry for the file at the start of
+  a fresh download attempt, matching its existing `requestErrors` clearing.
+  `FileRow`'s `errorMessage` computation now only reads `openError` while
+  `canOpen` is still true, so a message describing a failed *open* can no
+  longer be shown once the row has moved past offering that action.
+
+### Other Areas Investigated
+
+- **Completed-file experience (Investigate item 2).** Reviewed the full
+  completed-download row (name, size/MIME meta, "Saved to Downloads/Relay"
+  caption, Open button) added across Milestones P3/P4, plus the Transfers
+  tab's list row and `TransferProgressDetail`'s own completed-state view
+  (status text, 100% progress bar, no Cancel button, no failure text) for
+  unnecessary buttons, duplicated information, or unclear affordances.
+  Found no further defects: the Files-screen row was already minimal
+  before this milestone's fixes above, and the Transfers-tab views show
+  exactly one thing each (a status badge on the list row; a status/progress
+  summary on the detail screen) with no dead or duplicated elements.
+  `TransferListScreen.tsx` and `TransferProgressDetail.tsx` were reviewed
+  but deliberately left unchanged — adding an "Open" action there would be
+  a new feature extending this milestone's Files-screen-scoped brief, not a
+  fix for a defect found during the review.
+- **File freshness (Investigate item 3).** Reviewed `useSharedFiles.ts` and
+  `FilesScreen`'s focus/poll wiring established by Milestones P2 and P5
+  (focus-driven immediate refresh from the second focus onward, then a 5s
+  background poll while the screen stays focused). Found no defect and no
+  justification to increase polling frequency, per this milestone's own
+  constraint — the existing strategy already closes the "newly shared file
+  invisible until pull-to-refresh" gap P2 fixed, and P5's first-focus guard
+  already removed the one redundant fetch. No change made.
+- **Consistency audit (Investigate item 4).** Walked every reachable Files
+  row state (never downloaded, pending, downloading, completed, local file
+  deleted, failed, cancelled) against wording, color, and button placement.
+  Confirmed: idle/failed both render the same blue button in the same
+  position (now labeled "Download"/"Retry" respectively, see Issue 1's
+  fix); pending/in_progress render the same disabled blue button
+  ("Requested"/"Downloading..."); completed renders the green Open button
+  plus its caption; a deleted local file and a cancelled transfer both
+  correctly fall back to the plain idle "Download" state via
+  `deriveDownloadStatus`'s existing downgrade rules (P2, P3) rather than
+  any new dead-end state. No icons are used anywhere in this screen, so
+  none were added here either — consistent with the "no new dependencies"
+  constraint.
+
+### Verification
+
+- Full Android suite: `npx jest` — 25 suites / 149 tests passing (no
+  suites added or removed; existing coverage in `downloadStatus.test.ts`,
+  `downloadActions.test.ts`, and `useDownloadExistence.test.tsx` already
+  exercises the `deriveDownloadStatus`/`useDownloadExistence` behavior this
+  milestone's fix now consistently defers to). `npx tsc --noEmit` and
+  `npx eslint` (on the changed files) both clean.
+- No component-level render test harness exists for `FilesScreen` in this
+  codebase (consistent with every prior Files milestone in this document —
+  only the extracted pure-logic modules and hooks are unit tested). The
+  `canOpen`/error-message changes were verified by code trace against the
+  existing `deriveDownloadStatus` test suite (confirming its `fileExists`
+  tolerance already matches what `FileRow` now trusts) plus a clean
+  `tsc`/`eslint` pass.
+- Backend, Desktop: untouched by this milestone.
+
+### Known Limitations
+
+- Not verified live end-to-end — no physical Android device/desktop pair
+  was available in the environment this change was made in, consistent
+  with every prior milestone's own caveat. Recommended before closing this
+  out: confirm on a real device that a download's row transitions straight
+  from "Downloading..." to a live "Open" button with no intermediate
+  disabled "Downloaded" state, that deleting the saved file and returning
+  to the app reverts the row to "Download," and that a failed download
+  shows "Retry" rather than "Download."
+- "Share" (`ACTION_SEND`) remains unimplemented, per the same investigation
+  recorded in Milestone P4 — still out of scope without a new native
+  dependency.
+
+---
+
 # 4. Bug Classification
 
 Critical

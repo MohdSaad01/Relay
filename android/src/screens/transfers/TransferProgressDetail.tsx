@@ -7,6 +7,7 @@ import { formatFileSize } from '../../utils/formatFileSize';
 import { ApiError } from '../../api/client';
 import { TransferStreamManager } from '../../streaming/TransferStreamManager';
 import { useTransferStream } from '../../streaming/useTransferStream';
+import { mergeLiveTransferState } from '../../transfers/mergeLiveTransferState';
 import { detailStyles as styles } from './detailStyles';
 
 const POLL_INTERVAL_MS = 2000;
@@ -38,6 +39,17 @@ export function TransferProgressDetail({ transferId }: { transferId: number }) {
       TransferStreamManager.start(transfer);
     }
   }, [transfer]);
+
+  // The moment this app's own stream reaches a terminal outcome while the
+  // server still shows in_progress (the exact gap mergeLiveTransferState
+  // bridges locally, below), refresh once immediately instead of waiting for
+  // the next poll tick — this just catches the server-side Transfer row
+  // (bytes_transferred, completed_at, failure_reason) up to match sooner.
+  useEffect(() => {
+    if (transfer?.status === 'in_progress' && stream?.transferId === transferId && stream.status !== 'streaming') {
+      refresh();
+    }
+  }, [transfer?.status, stream?.transferId, stream?.status, transferId, refresh]);
 
   // Keep polling the server while genuinely in_progress, so: (a) a stream
   // running in this same app instance still gets its final "completed"
@@ -86,23 +98,12 @@ export function TransferProgressDetail({ transferId }: { transferId: number }) {
     );
   }
 
-  // Only trust the live stream while the server itself still considers this
-  // transfer in_progress. TransferStreamManager's own state doesn't flip to
-  // 'completed' (with bytesTransferred caught up to the full total) until
-  // after two awaited, I/O-bound steps that run *after* the bytes have
-  // already fully arrived (publishDownload's MediaStore copy,
-  // notifyDownloadComplete) — so stream can stay stuck reporting a small,
-  // stale byte count for several seconds after the server has already
-  // recorded the transfer as done. Once the freshly-polled `transfer` is
-  // itself terminal, it is strictly at least as fresh as anything
-  // TransferStreamManager can report, so it must win outright rather than
-  // being second-guessed by a lagging local view. See docs/15_QA_NOTEBOOK.md's
-  // Milestone P3 entry.
-  const useLiveStream = stream?.transferId === transferId && transfer.status === 'in_progress';
-  const bytesTransferred = useLiveStream ? stream.bytesTransferred : transfer.bytes_transferred;
-  const totalBytes = useLiveStream ? stream.totalBytes : transfer.file_size;
-  const displayStatus = useLiveStream && stream.status === 'streaming' ? 'in_progress' : transfer.status;
-  const progress = totalBytes > 0 ? bytesTransferred / totalBytes : 0;
+  // See mergeLiveTransferState for the freshness rules: the server wins
+  // outright once terminal (Milestone P3), but while it still reports
+  // in_progress, the local stream's own terminal outcome — once it has one —
+  // wins over a stale server 'in_progress' too (Milestone P5).
+  const merged = mergeLiveTransferState(transfer, stream);
+  const progress = merged.totalBytes > 0 ? merged.bytesTransferred / merged.totalBytes : 0;
 
   return (
     <View style={styles.container}>
@@ -112,16 +113,16 @@ export function TransferProgressDetail({ transferId }: { transferId: number }) {
       <Text style={styles.meta}>
         {directionLabel(transfer.direction)} · {formatFileSize(transfer.file_size)}
       </Text>
-      <Text style={styles.status}>{formatStatus(displayStatus)}</Text>
+      <Text style={styles.status}>{formatStatus(merged.status)}</Text>
 
       <View style={styles.progressTrack}>
         <View style={[styles.progressFill, { width: `${Math.min(100, Math.round(progress * 100))}%` }]} />
       </View>
       <Text style={styles.meta}>
-        {formatFileSize(bytesTransferred)} / {formatFileSize(totalBytes)}
+        {formatFileSize(merged.bytesTransferred)} / {formatFileSize(merged.totalBytes)}
       </Text>
 
-      {transfer.status === 'in_progress' && (
+      {merged.showCancel && (
         <Pressable style={styles.dangerButton} onPress={handleCancel} disabled={cancelling}>
           <Text style={styles.dangerButtonText}>{cancelling ? 'Cancelling...' : 'Cancel'}</Text>
         </Pressable>
@@ -131,7 +132,7 @@ export function TransferProgressDetail({ transferId }: { transferId: number }) {
         <Text style={styles.error}>{transfer.failure_reason}</Text>
       )}
 
-      {useLiveStream && stream.status === 'failed' && stream.error && (
+      {stream?.transferId === transferId && stream.status === 'failed' && stream.error && (
         <Text style={styles.error}>{stream.error}</Text>
       )}
 

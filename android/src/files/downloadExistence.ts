@@ -21,7 +21,12 @@ import ReactNativeBlobUtil from 'react-native-blob-util';
 const MEDIASTORE_MIN_SDK = 29;
 const PUBLIC_DOWNLOAD_FOLDER = 'Relay';
 
-function downloadedFilePath(fileName: string): string {
+/**
+ * Exported for downloadActions.ts's "Open" action, which needs the actual
+ * on-device path to hand to react-native-blob-util's actionViewIntent, not
+ * just a yes/no existence check.
+ */
+export function downloadedFilePath(fileName: string): string {
   const { DownloadDir, DocumentDir } = ReactNativeBlobUtil.fs.dirs;
   return Number(Platform.Version) >= MEDIASTORE_MIN_SDK
     ? `${DownloadDir}/${PUBLIC_DOWNLOAD_FOLDER}/${fileName}`
@@ -35,4 +40,16 @@ export async function downloadedFileExists(fileName: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Human-readable description of where a completed download was saved, for
+ * FilesScreen's "Saved to ..." caption -- purely informational text, not
+ * something used to build a path or intent, so it doesn't need to match
+ * downloadedFilePath()'s exact value.
+ */
+export function downloadedFileLocationLabel(): string {
+  return Number(Platform.Version) >= MEDIASTORE_MIN_SDK
+    ? `Downloads/${PUBLIC_DOWNLOAD_FOLDER}`
+    : "Relay's app storage (not visible to other apps on this Android version)";
 }

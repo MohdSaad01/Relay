@@ -1,6 +1,6 @@
 import { Linking } from 'react-native';
 import notifee, { EventType } from '@notifee/react-native';
-import { notifyDownloadComplete } from '../../src/streaming/downloadNotification';
+import { __resetNotificationChannelForTests, notifyDownloadComplete } from '../../src/streaming/downloadNotification';
 
 const mockCreateChannel = notifee.createChannel as jest.Mock;
 const mockDisplayNotification = notifee.displayNotification as jest.Mock;
@@ -23,6 +23,28 @@ const backgroundHandler = mockOnBackgroundEvent.mock.calls[0][0] as (event: {
 beforeEach(() => {
   jest.clearAllMocks();
   jest.spyOn(Linking, 'openURL').mockResolvedValue(true);
+  // ensureChannel()'s cache is module-level state that would otherwise leak
+  // between tests in this file (it persists for as long as the module stays
+  // loaded, same as it would for a real app session) -- reset it so every
+  // test starts from "channel not yet created".
+  __resetNotificationChannelForTests();
+});
+
+test('a failed channel creation is retried on the next call, not cached forever', async () => {
+  // Regression test: ensureChannel() used to cache the *rejected* promise
+  // from a failed createChannel() call, so one transient failure permanently
+  // disabled every future notification for the rest of the app session.
+  const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+  mockCreateChannel.mockRejectedValueOnce(new Error('boom'));
+
+  await notifyDownloadComplete('first.pdf', null);
+  expect(mockDisplayNotification).not.toHaveBeenCalled();
+
+  await notifyDownloadComplete('second.pdf', null);
+
+  expect(mockCreateChannel).toHaveBeenCalledTimes(2);
+  expect(mockDisplayNotification).toHaveBeenCalledWith(expect.objectContaining({ body: expect.stringContaining('second.pdf') }));
+  warnSpy.mockRestore();
 });
 
 test('notifyDownloadComplete creates the channel once and displays a completion notification', async () => {
@@ -95,4 +117,20 @@ test('the background event handler also opens the content URI on press', async (
   });
 
   expect(Linking.openURL).toHaveBeenCalledWith('content://media/downloads/1');
+});
+
+test('notifyDownloadComplete swallows a displayNotification failure instead of throwing', async () => {
+  // Regression test: notifyDownloadComplete used to be awaited unguarded by
+  // TransferStreamManager.start() -- any failure here (a denied
+  // POST_NOTIFICATIONS permission, a native-bridge error, etc.) propagated
+  // up and flipped an otherwise-successful download to 'failed'. This
+  // asymmetry with publishDownload's own best-effort contract (blobUtil.ts)
+  // was the bug; notifyDownloadComplete must never reject.
+  const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+  mockDisplayNotification.mockRejectedValueOnce(new Error('boom'));
+
+  await expect(notifyDownloadComplete('report.pdf', null)).resolves.toBeUndefined();
+
+  expect(warnSpy).toHaveBeenCalled();
+  warnSpy.mockRestore();
 });

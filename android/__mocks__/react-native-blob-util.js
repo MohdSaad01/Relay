@@ -56,4 +56,7 @@ module.exports = {
   MediaCollection: {
     copyToMediaStore: jest.fn(() => Promise.resolve('content://media/downloads/1')),
   },
+  android: {
+    actionViewIntent: jest.fn(() => Promise.resolve(true)),
+  },
 };

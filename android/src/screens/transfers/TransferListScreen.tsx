@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -39,6 +39,11 @@ export function TransferListScreen() {
   } = useTransfers();
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // useTransfers() already fetches once on mount, and this screen's first
+  // focus coincides with that same mount, so the immediate refresh below is
+  // only needed from the second focus onward — otherwise every mount fired
+  // a redundant extra GET /transfers right alongside the hook's own fetch.
+  const isFirstFocus = useRef(true);
 
   useFocusEffect(
     useCallback(() => {
@@ -48,7 +53,11 @@ export function TransferListScreen() {
       // POLL_INTERVAL_MS later, since a screen kept mounted by the tab
       // navigator doesn't re-fetch on its own. See docs/15_QA_NOTEBOOK.md's
       // Milestone P3 entry.
-      refreshTransfers();
+      if (isFirstFocus.current) {
+        isFirstFocus.current = false;
+      } else {
+        refreshTransfers();
+      }
       const timer = setInterval(refreshTransfers, POLL_INTERVAL_MS);
       return () => clearInterval(timer);
     }, [refreshTransfers]),
@@ -79,7 +88,11 @@ export function TransferListScreen() {
         file_name: picked.name,
         file_size: picked.size,
       });
-      await refreshTransfers();
+      // Refresh the list and start the actual stream in parallel — the same
+      // reasoning as FilesScreen.handleDownload: getTransfer()/start() don't
+      // need the refreshed list, so waiting for it first only delayed when
+      // the upload's bytes actually started moving.
+      const refreshPromise = refreshTransfers();
       if (request.status === 'accepted' && request.transfer_id != null) {
         registerUploadSource(request.transfer_id, {
           uri: picked.uri,
@@ -89,6 +102,7 @@ export function TransferListScreen() {
         const transfer = await getTransfer(request.transfer_id);
         TransferStreamManager.start(transfer);
       }
+      await refreshPromise;
     } catch (err) {
       setUploadError(err instanceof ApiError ? err.message : 'Could not propose this upload.');
     } finally {

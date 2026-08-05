@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -12,6 +12,8 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useSharedFiles } from '../../files/useSharedFiles';
 import { deriveDownloadStatus, FileDownloadStatus } from '../../files/downloadStatus';
 import { useDownloadExistence } from '../../files/useDownloadExistence';
+import { downloadedFileLocationLabel } from '../../files/downloadExistence';
+import { openDownloadedFile } from '../../files/downloadActions';
 import { useTransferRequests } from '../../transfers/useTransferRequests';
 import { useTransfers } from '../../transfers/useTransfers';
 import { getTransfer, proposeTransfer } from '../../api/endpoints/transfers';
@@ -43,6 +45,13 @@ const FILES_POLL_INTERVAL_MS = 5000;
  * propose call's own success/failure — further gated by useDownloadExistence
  * so a 'completed' transfer whose saved file was since deleted doesn't keep
  * claiming "Downloaded" forever.
+ *
+ * A completed download's row never shows a dead-end disabled state: once
+ * deriveDownloadStatus reports 'completed' (which by construction already
+ * excludes a file useDownloadExistence has confirmed missing — see that
+ * function's own fileExists handling), the row's primary action is always
+ * the live "Open" button, matching how modern cloud-storage apps treat a
+ * downloaded file as still the thing you tap, not a disabled receipt.
  */
 export function FilesScreen() {
   const { files, loading, refreshing, error, refresh, refreshSilently } = useSharedFiles();
@@ -51,6 +60,15 @@ export function FilesScreen() {
   const { existence, verify } = useDownloadExistence();
   const [requestingIds, setRequestingIds] = useState<Record<number, boolean>>({});
   const [requestErrors, setRequestErrors] = useState<Record<number, string>>({});
+  const [openErrors, setOpenErrors] = useState<Record<number, string>>({});
+  // useTransferRequests/useTransfers/useSharedFiles each already fetch once
+  // on mount, and a screen's first focus coincides with that same mount —
+  // so the immediate refresh below is only needed from the *second* focus
+  // onward (e.g. returning to this screen after backgrounding the app).
+  // Without this guard, every mount fired one redundant extra request per
+  // list right alongside the hook's own initial fetch.
+  const isFirstTransfersFocus = useRef(true);
+  const isFirstFilesFocus = useRef(true);
 
   useFocusEffect(
     useCallback(() => {
@@ -59,8 +77,12 @@ export function FilesScreen() {
       // already reflected locally (see handleDownload's own refresh below),
       // but returning to this screen later (e.g. after backgrounding the
       // app) otherwise waits up to POLL_INTERVAL_MS to show its outcome.
-      refreshRequests();
-      refreshTransfers();
+      if (isFirstTransfersFocus.current) {
+        isFirstTransfersFocus.current = false;
+      } else {
+        refreshRequests();
+        refreshTransfers();
+      }
       const timer = setInterval(() => {
         refreshRequests();
         refreshTransfers();
@@ -71,7 +93,11 @@ export function FilesScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      refreshSilently();
+      if (isFirstFilesFocus.current) {
+        isFirstFilesFocus.current = false;
+      } else {
+        refreshSilently();
+      }
       const timer = setInterval(refreshSilently, FILES_POLL_INTERVAL_MS);
       return () => clearInterval(timer);
     }, [refreshSilently]),
@@ -96,13 +122,30 @@ export function FilesScreen() {
         delete next[file.id];
         return next;
       });
+      // Clear any stale "couldn't open" message from a prior completed
+      // download of this file — a fresh download attempt makes it
+      // irrelevant, and leaving it would otherwise linger next to a button
+      // that no longer offers Open.
+      setOpenErrors(prev => {
+        const next = { ...prev };
+        delete next[file.id];
+        return next;
+      });
       try {
         const request = await proposeTransfer({ direction: 'send', shared_file_id: file.id });
-        await Promise.all([refreshRequests(), refreshTransfers()]);
+        // Kick off the list refresh (drives this row's polled status/label)
+        // and the actual stream start in parallel rather than sequentially —
+        // getTransfer()/start() don't depend on the refreshed lists, so
+        // waiting for them first only delayed when bytes actually started
+        // moving. requestingIds still isn't cleared until refreshPromise
+        // settles below, so the button's "Downloading..." label hands off to
+        // the polled status without a gap.
+        const refreshPromise = Promise.all([refreshRequests(), refreshTransfers()]);
         if (request.status === 'accepted' && request.transfer_id != null) {
           const transfer = await getTransfer(request.transfer_id);
           TransferStreamManager.start(transfer);
         }
+        await refreshPromise;
       } catch (err) {
         setRequestErrors(prev => ({
           ...prev,
@@ -117,6 +160,32 @@ export function FilesScreen() {
       }
     },
     [refreshRequests, refreshTransfers],
+  );
+
+  const handleOpen = useCallback(
+    async (file: AvailableFileResponse) => {
+      setOpenErrors(prev => {
+        const next = { ...prev };
+        delete next[file.id];
+        return next;
+      });
+      try {
+        await openDownloadedFile(file.file_name, file.mime_type);
+      } catch {
+        // Open is offered optimistically (see canOpen below), so a failure
+        // here can mean either "no app handles this file type" or "the file
+        // was deleted in the brief window before the last existence check."
+        // Re-verify so a genuinely-missing file downgrades back to a
+        // re-downloadable 'idle' row instead of staying stuck offering an
+        // "Open" that will keep failing.
+        verify(file.file_name);
+        setOpenErrors(prev => ({
+          ...prev,
+          [file.id]: 'Could not open this file. It may have been moved, deleted, or need another app.',
+        }));
+      }
+    },
+    [verify],
   );
 
   if (loading) {
@@ -143,8 +212,10 @@ export function FilesScreen() {
             file={item}
             requesting={requestingIds[item.id] ?? false}
             requestError={requestErrors[item.id]}
+            openError={openErrors[item.id]}
             status={deriveDownloadStatus(item.id, requests, transfers, existence[item.file_name])}
             onDownload={() => handleDownload(item)}
+            onOpen={() => handleOpen(item)}
           />
         )}
         ListEmptyComponent={
@@ -175,8 +246,8 @@ function downloadButtonLabel(requesting: boolean, status: FileDownloadStatus): s
       return 'Requested';
     case 'in_progress':
       return 'Downloading...';
-    case 'completed':
-      return 'Downloaded';
+    case 'failed':
+      return 'Retry';
     default:
       return 'Download';
   }
@@ -186,17 +257,37 @@ function FileRow({
   file,
   requesting,
   requestError,
+  openError,
   status,
   onDownload,
+  onOpen,
 }: {
   file: AvailableFileResponse;
   requesting: boolean;
   requestError?: string;
+  openError?: string;
   status: FileDownloadStatus;
   onDownload: () => void;
+  onOpen: () => void;
 }) {
-  const disabled = requesting || status.kind === 'pending' || status.kind === 'in_progress' || status.kind === 'completed';
-  const errorMessage = requestError ?? (status.kind === 'failed' ? status.message ?? 'This download failed.' : undefined);
+  const disabled = requesting || status.kind === 'pending' || status.kind === 'in_progress';
+  // deriveDownloadStatus only ever reports 'completed' when the file isn't
+  // confirmed missing (see its own fileExists handling) — so "completed"
+  // alone is enough to offer Open. This is deliberately the same optimistic
+  // "not checked yet counts as present" tolerance deriveDownloadStatus
+  // already applies, rather than a second, stricter check re-litigating the
+  // same question — that mismatch used to leave the row on a disabled,
+  // dead-end "Downloaded" pill for the brief window before the on-device
+  // check resolved.
+  const canOpen = status.kind === 'completed';
+  // openError only applies while Open is still the row's action — once a
+  // failed-open re-verify (see handleOpen) or a later poll downgrades the
+  // row past 'completed', that message would otherwise linger next to a
+  // button that no longer says Open.
+  const errorMessage =
+    requestError ??
+    (canOpen ? openError : undefined) ??
+    (status.kind === 'failed' ? status.message ?? 'This download failed.' : undefined);
 
   return (
     <View style={styles.row}>
@@ -208,15 +299,18 @@ function FileRow({
           {formatFileSize(file.file_size)}
           {file.mime_type ? ` · ${file.mime_type}` : ''}
         </Text>
+        {canOpen && <Text style={styles.savedLocation}>Saved to {downloadedFileLocationLabel()}</Text>}
         {errorMessage && <Text style={styles.rowError}>{errorMessage}</Text>}
       </View>
-      <Pressable
-        style={[styles.downloadButton, status.kind === 'completed' && styles.downloadButtonDone]}
-        onPress={onDownload}
-        disabled={disabled}
-      >
-        <Text style={styles.downloadButtonText}>{downloadButtonLabel(requesting, status)}</Text>
-      </Pressable>
+      {canOpen ? (
+        <Pressable style={[styles.downloadButton, styles.downloadButtonDone]} onPress={onOpen}>
+          <Text style={styles.downloadButtonText}>Open</Text>
+        </Pressable>
+      ) : (
+        <Pressable style={styles.downloadButton} onPress={onDownload} disabled={disabled}>
+          <Text style={styles.downloadButtonText}>{downloadButtonLabel(requesting, status)}</Text>
+        </Pressable>
+      )}
     </View>
   );
 }
@@ -257,6 +351,11 @@ const styles = StyleSheet.create({
   meta: {
     marginTop: 2,
     color: '#666',
+  },
+  savedLocation: {
+    marginTop: 2,
+    color: '#16a34a',
+    fontSize: 12,
   },
   rowError: {
     marginTop: 4,

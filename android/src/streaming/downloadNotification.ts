@@ -20,9 +20,27 @@ function ensureChannel(): Promise<void> {
   if (!channelReady) {
     channelReady = notifee
       .createChannel({ id: CHANNEL_ID, name: 'Relay Downloads', importance: AndroidImportance.DEFAULT })
-      .then(() => undefined);
+      .then(() => undefined)
+      .catch(err => {
+        // Don't let one failed attempt (e.g. a transient native-bridge
+        // error) permanently disable this channel for the rest of the app
+        // session -- without this, `channelReady` would cache the rejected
+        // promise forever, and every later notifyDownloadComplete() call
+        // would keep failing the exact same way with no chance to recover.
+        channelReady = null;
+        throw err;
+      });
   }
   return channelReady;
+}
+
+/**
+ * Test-only: resets the module-level channel cache so each test can start
+ * from "channel not yet created" instead of leaking state left behind by
+ * whichever earlier test in the same file happened to run first.
+ */
+export function __resetNotificationChannelForTests(): void {
+  channelReady = null;
 }
 
 /**
@@ -31,19 +49,33 @@ function ensureChannel(): Promise<void> {
  * opens that file directly; otherwise tapping it just opens the app, since
  * there's no shareable URI to hand to another app's viewer (e.g. below API
  * 29, or the pre-API-29 fallback path).
+ *
+ * Deliberately best-effort, matching publishDownload's own contract in
+ * blobUtil.ts: this runs only after a transfer's bytes have already fully
+ * arrived, so a failure here (channel creation, the notification post
+ * itself, or a denied POST_NOTIFICATIONS permission causing Android to drop
+ * the post silently) must never turn an otherwise-successful download into
+ * a reported failure. Before this, TransferStreamManager.start() awaited
+ * this call unguarded -- any thrown error here was caught by start()'s own
+ * try/catch and flipped the transfer to 'failed', even though the file had
+ * already been saved correctly.
  */
 export async function notifyDownloadComplete(fileName: string, contentUri: string | null): Promise<void> {
-  await ensureChannel();
-  await notifee.displayNotification({
-    title: 'Relay',
-    body: `✓ ${fileName} downloaded successfully`,
-    data: contentUri ? { contentUri } : undefined,
-    android: {
-      channelId: CHANNEL_ID,
-      smallIcon: 'ic_launcher',
-      pressAction: { id: contentUri ? OPEN_DOWNLOAD_ACTION : 'default' },
-    },
-  });
+  try {
+    await ensureChannel();
+    await notifee.displayNotification({
+      title: 'Relay',
+      body: `✓ ${fileName} downloaded successfully`,
+      data: contentUri ? { contentUri } : undefined,
+      android: {
+        channelId: CHANNEL_ID,
+        smallIcon: 'ic_launcher',
+        pressAction: { id: contentUri ? OPEN_DOWNLOAD_ACTION : 'default' },
+      },
+    });
+  } catch (err) {
+    console.warn('Could not show the download-complete notification.', err);
+  }
 }
 
 async function handlePress(detail: { notification?: { data?: Record<string, unknown> } }): Promise<void> {

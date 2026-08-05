@@ -1709,6 +1709,115 @@ first.
 
 ---
 
+## P8 — Streaming Failure Root Cause Investigation (Backend)
+
+### Status
+
+**Completed** (backend fix + local reproduction; physical-device
+re-verification still required — see Known Limitations)
+
+### Summary
+
+Physical re-verification of P7 surfaced a different, backend-side failure:
+a `.mp3` consistently disconnected at exactly 3,145,728 bytes, a `.jpg` hung
+indefinitely, and the backend then logged hundreds of `sqlite3.
+OperationalError: database is locked`. P7's fix (a client-side recovery for
+a false-negative completion check) does not apply here — no complete file
+ever reached disk for it to rescue. Investigated the full path (FastAPI
+dependency lifecycle, Starlette's `StreamingResponse`, the OS/event loop,
+SQLite locking) before writing any fix, per the milestone's own instruction.
+Full investigation notes, evidence, and every ruled-out alternative are in
+`docs/15_QA_NOTEBOOK.md`'s Milestone P8 entry; this section records the
+verification result.
+
+### Root Cause
+
+Two independent defects, both confirmed by direct code reading and a real
+raw-socket reproduction (not `TestClient`, which cannot simulate an actual
+dropped connection):
+
+1. `TransferStreamService._generate_download` only learned a client had
+   disconnected via Starlette's `send()` raising `OSError` — which depends
+   on the OS/event loop noticing a dead socket. On this project's Windows
+   target, that notice was measured to take up to 19 seconds under light
+   traffic, and did not arrive at all within 60+ seconds while the server
+   was otherwise idle (one test even saw an 80 MiB file "complete"
+   successfully server-side against a peer that had been gone the whole
+   time). This — not the byte count itself — is the actual cause of the
+   indefinite hang; 3,145,728 is simply 3 × `STREAM_CHUNK_SIZE_BYTES`, i.e.
+   how much the client had read before disconnecting, not a backend limit.
+2. `AuthService.authenticate()` flushed `last_used_at`/`last_seen_at`
+   updates to SQLite on every authenticated request, including plain
+   `GET`s that never commit — taking SQLite's single process-wide write
+   lock for the full duration of every such request. Confirmed as a real,
+   unnecessary lock acquisition; not independently proven sufficient on its
+   own to produce the reported storm (see Known Limitations), but a direct
+   contributor given how long Bug 1 leaves a transfer stuck and re-polled.
+
+### Solution
+
+- `backend/app/api/v1/transfers.py` / `transfer_stream_service.py`: the
+  download route now uses a small `StreamingResponse` subclass that bounds
+  each chunk's `send()` with `anyio.fail_after(Settings.
+  STREAM_WRITE_TIMEOUT_SECONDS)` (new setting, default 15s) instead of
+  waiting on the OS to ever report the dead connection. On timeout, the new
+  `TransferStreamService.abort_stalled_download` finalizes the transfer and
+  releases the active-stream guard directly.
+- `backend/app/services/auth_service.py`: `authenticate()` now mutates the
+  already-tracked `session`/`device` ORM objects directly instead of
+  routing through repository `update()` calls that flush immediately —
+  removing the eager per-request write-lock acquisition while preserving
+  the method's existing "informational bookkeeping, may be lost on a
+  read-only route" design.
+
+No architecture changes, no new dependencies.
+
+### Regression Tests Added
+
+None — the failure mode (an abruptly dropped real TCP connection) is not
+reachable through `TestClient`'s in-process ASGI transport, which every
+existing test in `tests/api/test_transfer_streaming.py` uses. Verified
+instead via a real `uvicorn` process and a raw-socket reproduction script
+(see `docs/15_QA_NOTEBOOK.md`'s Milestone P8 entry for the methodology).
+Adding an automated regression test for this would require standing up a
+real socket-level test harness, judged out of scope for this milestone's
+"smallest correct fix" instruction; recommended as a follow-up.
+
+### Verification
+
+- `pytest -q` (backend): 286 passed, 2 skipped — unchanged, confirming no
+  existing behavior regressed.
+- Raw-socket reproduction (abrupt RST mid-download, matching a hotspot
+  drop) re-run against the fix: transfer no longer depends on the OS/event
+  loop's own, unreliable disconnect signal to leave `in_progress`.
+- 2,000 concurrent authenticated `GET /transfers` requests overlapping a
+  live 80 MiB download, before and after the auth-bookkeeping fix: no
+  regression, and the fix removes a proven unnecessary lock acquisition.
+
+### Known Limitations
+
+- **Physical-device re-verification is still required** — this milestone's
+  own instruction. Everything above was verified against the real backend
+  process using a raw-socket simulation of an abrupt disconnect, not the
+  real Android app over a real hotspot. Repeat the P7.1-style matrix
+  (`.txt`, `.pdf`, `.docx`, `.pptx`, `.jpg`, `.png`, `.zip`, `.mp3`, `.mp4`
+  if available) on device RMX3997 and confirm: completes, appears in
+  `Downloads/Relay`, opens, notification arrives, backend logs no
+  premature disconnect, no database-lock storm.
+- The write-timeout fix's exact firing behavior could not be reliably
+  triggered on this machine's Windows loopback (the OS sometimes buffers an
+  entire large file without ever blocking `send()`, even against a dead
+  peer) — a real Wi-Fi link has genuine bandwidth/latency and should
+  exhibit backpressure far sooner, but this is unverified in the field.
+- The SQLite lock-acquisition fix is a proven, real improvement but was not
+  independently shown to be sufficient on its own to eliminate
+  `database is locked` under this machine's (fast, low-latency) conditions.
+  If the storm recurs on-device after this fix, `backend/app/database/
+  session.py` not configuring `PRAGMA journal_mode=WAL` is the next place
+  to look.
+
+---
+
 # 4. Bug Classification
 
 Critical

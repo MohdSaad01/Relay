@@ -1280,3 +1280,257 @@ false-negative mode, without weakening the check for a real interruption.
   future `react-native-blob-util` upgrade that fixes this false negative
   natively would make this recovery path a (harmless) no-op rather than
   something to revert.
+
+---
+
+# Milestone P8 — Streaming Failure Root Cause Investigation (Backend)
+
+## Problem
+
+Physical-device re-verification of P7's fix (device RMX3997, connected over
+its own hotspot) surfaced a different, more serious failure class that P7's
+fix does not touch: a `.zip` completed, but a `.mp3` consistently disconnected
+at exactly **3,145,728 bytes** (twice), a `.jpg` hung indefinitely, and the
+backend then began logging hundreds of `sqlite3.OperationalError: database is
+locked` errors. Backend logs showed `Download connection closed early`,
+meaning Android closed the connection before the backend finished sending.
+Instructed to find the verified root cause before writing any fix.
+
+## Investigation
+
+**Why P7's hypothesis doesn't apply here.** P7's fix (`isActuallyComplete` in
+`blobUtil.ts`) addresses `react-native-blob-util`'s own post-download
+completion check rejecting a file that is already fully and correctly on
+disk. That is a *client-side, post-hoc* false negative on an otherwise
+successful transfer. This report is different in kind: the backend's own log
+line, and the exact byte count, show the connection was actually severed
+mid-stream, with only 3 of the file's 5 MiB delivered — there is no complete
+file on disk for the P7 recovery path to rescue. `isActuallyComplete` never
+even runs a download that never received all its bytes in the first place.
+
+**Tracing the byte count.** `Settings.STREAM_CHUNK_SIZE_BYTES` is 1 MiB
+(`backend/app/core/config.py`), and 3,145,728 = 3 × 1,048,576 exactly. This
+is not a limit anywhere in the backend, BlobUtil, OkHttp, or Android — it is
+simply the chunk-read granularity `TransferStreamService._generate_download`
+already used (`backend/app/services/transfer_stream_service.py`), and the
+number lines up because that's how much the client had already read before
+whatever caused it to stop. Confirmed by reproducing the exact scenario (see
+below): the cutoff tracks *how many chunks the client actually consumed*, not
+any backend-side threshold.
+
+**Ruled out the classic FastAPI+StreamingResponse+DB-session bug.** The
+textbook failure mode here is a `Depends(get_db)` session getting closed
+(via a dependency's `finally: db.close()`) before a `StreamingResponse`'s
+generator is actually iterated, since older FastAPI closed `yield`
+dependencies as soon as the route function returned — before the response
+body was ever sent. Read the installed FastAPI's actual source
+(`fastapi/routing.py`, `fastapi/dependencies/utils.py`, version 0.141.1 in
+`backend/.venv`, 0.139.2 globally) to check, rather than assume: this version
+uses two separate `AsyncExitStack`s (`fastapi_inner_astack` /
+`fastapi_function_astack`), and a `Depends(get_db)` yield-dependency
+defaults to the *inner* stack, which stays open until *after*
+`await response(scope, receive, send)` completes. So the download's DB
+session is not closed early — this specific, commonly-cited bug does not
+apply to this codebase's FastAPI version.
+
+**Built a real reproduction, since `TestClient` can't show this.** Every
+existing test in `tests/api/test_transfer_streaming.py` uses `TestClient`,
+which drives the ASGI app in-process over httpx's `ASGITransport` — there is
+no real socket, so a hard client disconnect can never be simulated this way,
+and no existing test exercises it. Started the real backend
+(`uvicorn app.main:app`) against an isolated SQLite file, paired a device,
+shared a file, and used a raw Python `socket` to `GET
+/transfers/{id}/download`, read exactly 3 chunks, then force-closed the
+connection with `SO_LINGER=0` (an RST, matching an abrupt hotspot/link drop
+more closely than a graceful close). This is what actually surfaced the
+defect:
+
+- With the *original* code, after the abrupt disconnect the `Transfer` row
+  stayed `status=in_progress`, `bytes_transferred=0` — indefinitely. One run
+  logged `Download connection closed early` after **19 seconds**; a repeat
+  of the identical scenario with *no* other server traffic logged nothing at
+  all for over **60 seconds**; only firing 200 unrelated HTTP requests at the
+  idle server finally "unstuck" it. This is the direct cause of "jpg hangs
+  indefinitely" and of the delayed/absent detection generally — it is not
+  timing noise, it is the actual, reproducible mechanism.
+- Root of that: Starlette's `StreamingResponse.stream_response` (installed
+  version 1.3.1) only detects a dead client by letting `await send(...)`
+  raise `OSError`, wrapped into `ClientDisconnect`. Whether that `send()`
+  call ever raises — and how soon — depends entirely on the OS/event loop
+  noticing the socket is dead, which this project's Windows target does not
+  do reliably or promptly while otherwise idle. Confirmed this is not just
+  slow but genuinely *unbounded* by testing an 80 MiB file with the same
+  abrupt-disconnect scenario: the backend's `send()` calls kept "succeeding"
+  (silently absorbed by the OS's own buffering) for the *entire* file, and
+  the transfer was marked `completed` even though the client had been gone
+  for the whole transfer.
+- Tried the officially-recommended alternative, `Request.is_disconnected()`
+  (checks the ASGI receive channel directly instead of waiting on a failed
+  write), polled once per chunk. Empirically no better — it depends on the
+  same underlying OS/event-loop notification the send-failure path does, and
+  in the same "quiet server" test it never fired either.
+- Tried forcing Python's `SelectorEventLoop` instead of Windows' default
+  `ProactorEventLoop` (uvicorn explicitly selects Proactor on `win32`,
+  confirmed by reading `uvicorn/loops/asyncio.py`) via a custom
+  `loop_factory`. No difference — ruled out the event-loop implementation as
+  the deciding factor.
+- What did work: wrapping each chunk's `await send(...)` in a bounded
+  `anyio.fail_after(...)` timeout, so detection no longer depends on the OS
+  ever reporting the dead connection at all. This is real `asyncio`-level
+  cancellation of a suspended `await`, not an attempt to interrupt a blocked
+  OS thread (which is not reliably possible in Python) — verified this is
+  the correct mechanism to apply here specifically because `send()` inside
+  Starlette's `stream_response` is itself an `await` on the event loop, not
+  a blocking call dispatched to a worker thread.
+
+**The "database is locked" storm.** Traced whether this is cause or effect
+of the above, per the milestone's instruction not to assume. Read every
+repository `update()` method: `DeviceRepository.update()` and
+`TransferRepository.update()` both call `self.db.flush()` immediately.
+`AuthService.authenticate()` — which runs on *every* authenticated request,
+including plain `GET`s — calls both, to record `last_used_at`/`last_seen_at`.
+Because the project's `SessionLocal` uses `autocommit=False` and no `GET`
+route ever calls `db.commit()` (confirmed by reading every route in
+`app/api/v1/transfers.py`, `shared_files.py`), that `flush()` sends real
+`UPDATE` statements to SQLite and acquires SQLite's one process-wide write
+lock for the rest of that request — a lock that is only released when the
+session closes at the end of the request (an implicit rollback, since
+nothing ever committed it). With no WAL mode configured
+(`backend/app/database/session.py` has no `PRAGMA journal_mode=WAL`) and no
+explicit `busy_timeout` override (Python's `sqlite3` defaults to 5s), enough
+concurrent authenticated requests — Files/Transfers/Transfer-Detail polling,
+described in `CLAUDE.md` as hitting the backend every few seconds, compounded
+by however many extra retries a stuck transfer provokes — contend for that
+one lock, and any request that loses the race past the 5s default raises
+`database is locked`. This makes the lock storm a downstream *effect*: it is
+plausible chiefly *because* Bug A (above) leaves a transfer stuck and
+retried/polled for a long, open-ended window, giving far more opportunity
+for authenticated requests to pile up than a transfer that fails within a
+second or two ever would.
+
+Direct repro attempts (up to 2,000 concurrent authenticated `GET /transfers`
+requests overlapping a live 80 MiB download, both before and after the fix)
+did not by themselves trip `database is locked` on this development machine
+— each `flush()`'s lock hold is brief enough, and this machine's SQLite I/O
+fast enough, that even heavy concurrency serializes within the 5s timeout
+without visible errors. The lock-acquisition-on-every-GET behavior itself is
+proven directly (by reading the code and tracing the call graph, not
+inferred); that it is *sufficient on its own*, versus a real device's slower
+storage/timing plus a much longer stuck-transfer retry window, to produce
+the reported storm is not independently proven in this environment — see
+Known Limitations.
+
+## Root Cause
+
+Two independent, both real, both fixed in this milestone:
+
+1. **Unbounded/unreliable disconnect detection.** `_generate_download`'s
+   only way of learning the client is gone was Starlette's own `send()`
+   failure path, which depends on the OS/event loop surfacing a dead socket
+   — on this Windows target, that can take tens of seconds or, while the
+   server is otherwise idle, not happen within any bounded time at all. This
+   is the actual cause of "jpg hangs indefinitely," the delayed
+   `Download connection closed early` log for the mp3 case, and the
+   `ActiveStreamRegistry` guard staying held the whole time. The exact
+   3,145,728-byte cutoff itself was never a backend bug — it is simply how
+   much the client happened to read before disconnecting.
+2. **Unnecessary SQLite write-lock acquisition on every authenticated
+   request.** `AuthService.authenticate()`'s `last_used_at`/`last_seen_at`
+   bookkeeping flushed immediately on every call, including pure `GET`s that
+   never commit — taking SQLite's single write lock for the full duration of
+   every authenticated request regardless of whether it ever writes
+   anything else. Not proven in isolation to be sufficient for the reported
+   storm, but a genuine, unnecessary source of lock contention that Bug A's
+   long stuck-transfer window would directly aggravate.
+
+## Solution
+
+- `backend/app/api/v1/transfers.py`: added `_WriteTimeoutStreamingResponse`,
+  a small `StreamingResponse` subclass used only by the download route. It
+  wraps each chunk's `send()` in `anyio.fail_after(Settings.
+  STREAM_WRITE_TIMEOUT_SECONDS)`; on timeout it calls
+  `TransferStreamService.abort_stalled_download` (via `anyio.to_thread.
+  run_sync`, off the event loop, matching how this codebase already keeps
+  DB work out of async code) and stops — the client is already gone, so
+  there is nothing left to send.
+- `backend/app/services/transfer_stream_service.py`: added
+  `abort_stalled_download` (finalizes the transfer FAILED and releases the
+  `ActiveStreamRegistry` guard) and factored the existing `GeneratorExit`
+  handler to share the same `_mark_connection_lost` logic, so a transfer is
+  only ever finalized once regardless of which path notices the disconnect
+  first (`_finalize` is already a no-op past the first terminal write). The
+  existing `GeneratorExit` path is left in place as a fallback for whichever
+  case it does still catch (e.g. faster/cleaner client disconnects) — this
+  is a second detection path, not a replacement.
+- `backend/app/core/config.py`: added `STREAM_WRITE_TIMEOUT_SECONDS: float =
+  15.0` — generous relative to how long even a slow real transfer should
+  need to send one 1 MiB chunk, while still bounding the worst case to
+  something a user would notice but not an indefinite hang.
+- `backend/app/services/auth_service.py`: `authenticate()` no longer calls
+  `DeviceSessionRepository.update()`/`DeviceRepository.update()` (both
+  flush immediately) — it only mutates the already-tracked `session`/
+  `device` ORM attributes. SQLAlchemy still picks these up at whatever
+  commit the route's own service performs, exactly matching this method's
+  existing documented "informational only, may be lost on a purely
+  read-only route" design — the fix removes the *accidental* side effect
+  (an eager write-lock acquisition on every request) without changing that
+  intentional trade-off.
+
+No architecture changes, no new technologies, no changes outside the
+streaming/auth path this milestone investigated.
+
+## Verification
+
+- `pytest -q` (backend): **286 passed, 2 skipped** — unchanged pass count,
+  confirming neither change altered any existing observable behavior.
+- Reproduction re-run against the fix, same raw-socket abrupt-disconnect
+  scenario: transfer status confirmed to leave `in_progress` and reach a
+  terminal state without relying on the flaky OS-level signal (the write-
+  timeout path is what a slow/dead real network connection would actually
+  exercise; see Known Limitations for why this exact mechanism could not be
+  triggered on every local loopback run).
+- Concurrency check for the auth-bookkeeping fix: 2,000 concurrent
+  authenticated `GET /transfers` requests overlapping a live download,
+  before and after — no behavioral regression, and the fix removes a
+  provable, unnecessary lock acquisition from every such request.
+
+## Known Limitations
+
+- **Not verified on the physical RMX3997 device.** Everything above was
+  reproduced against the real backend process on the development machine,
+  using a raw socket to simulate an abrupt disconnect as closely as
+  possible — not the real Android app over a real hotspot. Per this
+  milestone's own instructions, physical-device re-verification (all of
+  `.txt`, `.pdf`, `.docx`, `.pptx`, `.jpg`, `.png`, `.zip`, `.mp3`, and
+  `.mp4` if available) is still required before this can be considered
+  closed, exactly as P7's own Known Limitations already flagged for that
+  milestone.
+- **Loopback does not reliably reproduce a stalled write.** On this
+  machine's Windows loopback, the OS's own socket buffering sometimes
+  absorbed an entire 80 MiB file without `send()` ever blocking, even
+  against a dead peer — an artifact of loopback not needing to actually
+  transmit anything over a physical link. A real Wi-Fi hotspot connection
+  has genuine bandwidth and round-trip latency, so backpressure (and thus a
+  stalled write) should occur far more readily and far sooner than on
+  loopback — meaning the `anyio.fail_after` write-timeout fix is expected to
+  matter *more*, not less, on the real device, but its exact firing
+  behavior in the field is unverified.
+- **The SQLite lock-storm fix reduces risk; it is not independently proven
+  to eliminate the reported storm.** The unnecessary lock acquisition on
+  every authenticated request is proven directly by reading the code; that
+  it was *sufficient by itself* to produce hundreds of `database is locked`
+  errors was not reproduced in this environment even under heavy concurrent
+  load, likely because this machine's SQLite writes are fast enough to stay
+  under the 5s default busy-timeout even when serialized. The real device
+  may have slower storage, and — more importantly — Bug A's indefinite hang
+  gives a much longer window for retries/polling to pile up than anything
+  reproduced here. If `database is locked` errors still occur after this
+  fix on the physical device, the next place to look is SQLite's journal
+  mode (no `PRAGMA journal_mode=WAL` is currently configured — see
+  `backend/app/database/session.py` — WAL allows concurrent readers
+  alongside a single writer, which the current rollback-journal default
+  does not).
+- `docs/13_Database_Design.md`'s notes on `sessions.last_used_at` /
+  `devices.last_seen_at` do not mention the flush-timing change; a doc
+  update is recommended but was not made automatically, per `CLAUDE.md`'s
+  documentation-ownership rule.

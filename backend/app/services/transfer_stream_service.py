@@ -136,7 +136,23 @@ class TransferStreamService:
 
     def _generate_download(self, transfer_id: int, file_path: str) -> Iterator[bytes]:
         """The actual chunked read loop. Assumes the caller already acquired
-        the active-stream guard; always releases it exactly once, on exit."""
+        the active-stream guard; always releases it exactly once, on exit.
+
+        The `except GeneratorExit` below is Starlette's own disconnect
+        signal, delivered when the ASGI response is torn down after a
+        failed `send()`. docs/15_QA_NOTEBOOK.md's Milestone P8 entry found
+        that on this project's Windows target, the OS/event loop can take
+        tens of seconds -- or, while the process is otherwise idle, an
+        unbounded amount of time -- to notice a client that dropped the
+        connection mid-stream, which leaves this generator suspended at
+        `yield` and never delivers GeneratorExit at all in the meantime.
+        That is what `app/api/v1/transfers.py`'s `_WriteTimeoutStreamingResponse`
+        is for: it bounds each chunk's `send()` with a hard timeout and, on
+        expiry, calls `abort_stalled_download` below directly rather than
+        waiting on this generator to ever be resumed. The two paths share
+        `_mark_connection_lost` so a transfer is only ever finalized once
+        (`_finalize` is itself a no-op past the first terminal write).
+        """
         chunk_size = get_settings().STREAM_CHUNK_SIZE_BYTES
         bytes_sent = 0
         bytes_since_update = 0
@@ -162,12 +178,7 @@ class TransferStreamService:
             self._finalize(transfer_id, TransferStatus.COMPLETED, bytes_sent)
             logger.info("Download completed: transfer_id=%s bytes=%s", transfer_id, bytes_sent)
         except GeneratorExit:
-            logger.warning(
-                "Download connection closed early: transfer_id=%s bytes_sent=%s", transfer_id, bytes_sent
-            )
-            self._finalize(
-                transfer_id, TransferStatus.FAILED, bytes_sent, failure_reason="Connection lost during transfer."
-            )
+            self._mark_connection_lost(transfer_id, bytes_sent)
             raise
         except OSError as exc:
             logger.error("Download failed: transfer_id=%s error=%s", transfer_id, exc)
@@ -176,6 +187,27 @@ class TransferStreamService:
             )
         finally:
             self.active_stream_registry.release(transfer_id)
+
+    def abort_stalled_download(self, transfer_id: int, bytes_sent: int) -> None:
+        """Called by `_WriteTimeoutStreamingResponse` (app/api/v1/transfers.py)
+        when a chunk's `send()` doesn't complete within the configured write
+        timeout — see `_generate_download`'s docstring for why relying on
+        GeneratorExit alone isn't enough. Finalizes the transfer and releases
+        the active-stream guard directly; the generator itself is left to be
+        garbage collected whenever the stalled write's OS-level wait finally
+        resolves, since by then there's nothing left for it to do (`_finalize`
+        is a no-op once the transfer has already reached FAILED).
+        """
+        self._mark_connection_lost(transfer_id, bytes_sent)
+        self.active_stream_registry.release(transfer_id)
+
+    def _mark_connection_lost(self, transfer_id: int, bytes_sent: int) -> None:
+        logger.warning(
+            "Download connection closed early: transfer_id=%s bytes_sent=%s", transfer_id, bytes_sent
+        )
+        self._finalize(
+            transfer_id, TransferStatus.FAILED, bytes_sent, failure_reason="Connection lost during transfer."
+        )
 
     # --- Upload (RECEIVE: Android -> desktop) ---------------------------------
 

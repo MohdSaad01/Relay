@@ -72,6 +72,16 @@ class Settings(BaseSettings):
     # user-editable preference, so it lives here rather than in app_settings.
     STREAM_CHUNK_SIZE_BYTES: int = 1_048_576  # 1 MiB
 
+    # Milestone P8 (docs/15_QA_NOTEBOOK.md): how long a single download
+    # chunk's `send()` may take before it's treated as a dead connection.
+    # Bounds a stall that the OS/event loop can otherwise leave undetected
+    # for an unbounded amount of time (see transfer_stream_service.py's
+    # _generate_download docstring). Generous relative to a real transfer —
+    # 1 MiB should complete in well under a second on any link this app
+    # targets — while still bounding the worst case to a human-noticeable
+    # but not indefinite wait.
+    STREAM_WRITE_TIMEOUT_SECONDS: float = 15.0
+
     # Device Discovery (09_Networking.md §4, Milestone 13): the desktop
     # broadcasts a periodic UDP announcement so nearby Android devices can
     # find it without manual configuration. Static deployment/protocol

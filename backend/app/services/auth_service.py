@@ -10,6 +10,19 @@ being responsible for a transaction boundary on every protected request. On
 a purely read-only route the bookkeeping update can therefore be rolled back
 on session close instead of persisting — acceptable, since these two fields
 are informational only and never participate in a security decision.
+
+For that same reason, the bookkeeping below only mutates the already-tracked
+`session`/`device` ORM objects — it deliberately does not route through
+DeviceSessionRepository.update/DeviceRepository.update, both of which flush
+immediately. SQLAlchemy picks up attribute changes on tracked objects at the
+next flush/commit on its own; forcing one here would send the UPDATE (and
+take SQLite's one write lock) on every single authenticated request,
+including pure GETs that never commit — exactly the mechanism
+docs/15_QA_NOTEBOOK.md's Milestone P8 traced as the source of concurrent
+"database is locked" errors under polling. The one exception is the expired-
+session branch below, which still calls repository.delete + commit
+directly: that failure path ends the request right there, with no later
+commit to ride along with.
 """
 
 from sqlalchemy.orm import Session
@@ -62,7 +75,5 @@ class AuthService:
         device = session.device
         session.last_used_at = now
         device.last_seen_at = now
-        self.device_session_repository.update(session)
-        self.device_repository.update(device)
 
         return device

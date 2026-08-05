@@ -23,8 +23,10 @@ response by the centralized handlers in app/api/exception_handlers.py
 (Milestone 6).
 """
 
+import anyio
 from fastapi import APIRouter, Request, status
 from fastapi.responses import StreamingResponse
+from starlette.types import Receive, Scope, Send
 
 from app.api.dependencies import (
     CurrentDeviceDep,
@@ -33,6 +35,7 @@ from app.api.dependencies import (
     TransferStreamServiceDep,
 )
 from app.api.responses import success
+from app.core.config import get_settings
 from app.models.enums import TransferDirection, TransferStatus
 from app.schemas.common import ApiResponse
 from app.schemas.transfer import (
@@ -41,8 +44,52 @@ from app.schemas.transfer import (
     TransferResponse,
 )
 from app.services.exceptions import ConflictError
+from app.services.transfer_stream_service import TransferStreamService
 
 router = APIRouter()
+
+
+class _WriteTimeoutStreamingResponse(StreamingResponse):
+    """A download StreamingResponse where a stalled `send()` is treated as a
+    lost connection, instead of waiting on Starlette/the OS to notice.
+
+    Milestone P8 (docs/15_QA_NOTEBOOK.md) found that on this project's
+    Windows target, a client that drops the connection mid-download can
+    leave `send()` hung indefinitely — the OS/event loop doesn't reliably
+    surface the dead socket while the process is otherwise idle. Wrapping
+    each chunk's `send()` in `anyio.fail_after` turns that into a bounded,
+    deterministic timeout (`Settings.STREAM_WRITE_TIMEOUT_SECONDS`) instead.
+    On expiry, `abort_stalled_download` finalizes the transfer directly
+    (see its docstring) and the response simply stops — the client is
+    already gone, so there's nothing left to send.
+    """
+
+    def __init__(self, *args: object, stream_service: TransferStreamService, transfer_id: int, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self._stream_service = stream_service
+        self._transfer_id = transfer_id
+
+    async def stream_response(self, send: Send) -> None:
+        await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
+        bytes_sent = 0
+        async for chunk in self.body_iterator:
+            if not isinstance(chunk, bytes | memoryview):
+                chunk = chunk.encode(self.charset)
+            try:
+                with anyio.fail_after(get_settings().STREAM_WRITE_TIMEOUT_SECONDS):
+                    await send({"type": "http.response.body", "body": chunk, "more_body": True})
+            except TimeoutError:
+                await anyio.to_thread.run_sync(
+                    self._stream_service.abort_stalled_download, self._transfer_id, bytes_sent
+                )
+                return
+            bytes_sent += len(chunk)
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        await self.stream_response(send)
+        if self.background is not None:
+            await self.background()
 
 
 # --- /transfers/requests (pending, in-memory) --------------------------------
@@ -134,10 +181,12 @@ def download_transfer(
         "Content-Length": str(transfer.file_size),
         "Content-Disposition": f'attachment; filename="{quoted_file_name}"',
     }
-    return StreamingResponse(
+    return _WriteTimeoutStreamingResponse(
         stream_service.stream_download(transfer, file_path),
         media_type=stream_service.guess_media_type(transfer.file_name),
         headers=headers,
+        stream_service=stream_service,
+        transfer_id=transfer_id,
     )
 
 

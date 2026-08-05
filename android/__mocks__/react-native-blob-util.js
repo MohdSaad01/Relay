@@ -52,6 +52,7 @@ module.exports = {
     dirs: { DocumentDir: '/mock/documents', DownloadDir: '/mock/downloads' },
     unlink: jest.fn(() => Promise.resolve()),
     exists: jest.fn(() => Promise.resolve(false)),
+    stat: jest.fn(() => Promise.reject(new Error('ENOENT'))),
   },
   MediaCollection: {
     copyToMediaStore: jest.fn(() => Promise.resolve('content://media/downloads/1')),

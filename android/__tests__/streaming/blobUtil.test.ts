@@ -27,14 +27,14 @@ afterEach(() => {
 
 describe('downloadFile', () => {
   test('resolves when the response is 2xx', async () => {
-    const { promise } = downloadFile('http://x/transfers/1/download', {}, '/dest/a.txt', jest.fn());
+    const { promise } = downloadFile('http://x/transfers/1/download', {}, '/dest/a.txt', 100, jest.fn());
     lastTask().__resolve(200);
 
     await expect(promise).resolves.toBeUndefined();
   });
 
   test('rejects with a descriptive ApiError and deletes the partial file on a non-2xx response', async () => {
-    const { promise } = downloadFile('http://x/transfers/1/download', {}, '/dest/a.txt', jest.fn());
+    const { promise } = downloadFile('http://x/transfers/1/download', {}, '/dest/a.txt', 100, jest.fn());
     lastTask().__resolve(404);
 
     await expect(promise).rejects.toMatchObject({ status: 404, message: 'This transfer no longer exists.' });
@@ -42,7 +42,7 @@ describe('downloadFile', () => {
   });
 
   test('rejects with the backend message when the error body has one', async () => {
-    const { promise } = downloadFile('http://x/transfers/1/download', {}, '/dest/a.txt', jest.fn());
+    const { promise } = downloadFile('http://x/transfers/1/download', {}, '/dest/a.txt', 100, jest.fn());
     lastTask().__resolve(400, { message: 'The source file is no longer available.' });
 
     await expect(promise).rejects.toMatchObject({
@@ -53,7 +53,7 @@ describe('downloadFile', () => {
 
   test('reports progress via the progress callback', () => {
     const onProgress = jest.fn();
-    downloadFile('http://x/transfers/1/download', {}, '/dest/a.txt', onProgress);
+    downloadFile('http://x/transfers/1/download', {}, '/dest/a.txt', 100, onProgress);
 
     lastTask().__emitProgress(50, 100);
 
@@ -61,8 +61,59 @@ describe('downloadFile', () => {
   });
 
   test('cancel() rejects with an error isStreamCancelError recognizes', async () => {
-    const { promise, cancel } = downloadFile('http://x/transfers/1/download', {}, '/dest/a.txt', jest.fn());
+    const { promise, cancel } = downloadFile('http://x/transfers/1/download', {}, '/dest/a.txt', 100, jest.fn());
 
+    cancel();
+
+    let caught: unknown;
+    try {
+      await promise;
+    } catch (err) {
+      caught = err;
+    }
+    expect(isStreamCancelError(caught)).toBe(true);
+  });
+
+  // Regression tests for Milestone P7: react-native-blob-util's native
+  // FileStorage completion check ("Download interrupted") can false-negative
+  // on larger, multi-chunk downloads even though every byte already reached
+  // disk — see docs/15_QA_NOTEBOOK.md's Milestone P7 entry.
+  describe('a native "Download interrupted" rejection', () => {
+    test('is swallowed when the file on disk already matches the declared size', async () => {
+      (ReactNativeBlobUtil.fs.stat as jest.Mock).mockResolvedValueOnce({ size: 100 });
+
+      const { promise } = downloadFile('http://x/transfers/1/download', {}, '/dest/a.pdf', 100, jest.fn());
+      lastTask().__reject(new Error('Download interrupted.'));
+
+      await expect(promise).resolves.toBeUndefined();
+      expect(ReactNativeBlobUtil.fs.stat).toHaveBeenCalledWith('/dest/a.pdf');
+    });
+
+    test('still rejects when the file on disk is short of the declared size (a genuine interruption)', async () => {
+      (ReactNativeBlobUtil.fs.stat as jest.Mock).mockResolvedValueOnce({ size: 42 });
+
+      const { promise } = downloadFile('http://x/transfers/1/download', {}, '/dest/a.pdf', 100, jest.fn());
+      const err = new Error('Download interrupted.');
+      lastTask().__reject(err);
+
+      await expect(promise).rejects.toBe(err);
+    });
+
+    test('still rejects when stat() itself fails (e.g. the file was never created)', async () => {
+      (ReactNativeBlobUtil.fs.stat as jest.Mock).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const { promise } = downloadFile('http://x/transfers/1/download', {}, '/dest/a.pdf', 100, jest.fn());
+      const err = new Error('Download interrupted.');
+      lastTask().__reject(err);
+
+      await expect(promise).rejects.toBe(err);
+    });
+  });
+
+  test('cancel() still rejects with the cancel error even if the partial file happens to match the declared size', async () => {
+    (ReactNativeBlobUtil.fs.stat as jest.Mock).mockResolvedValueOnce({ size: 100 });
+
+    const { promise, cancel } = downloadFile('http://x/transfers/1/download', {}, '/dest/a.pdf', 100, jest.fn());
     cancel();
 
     let caught: unknown;

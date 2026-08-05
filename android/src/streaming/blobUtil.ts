@@ -55,13 +55,22 @@ export function downloadFile(
   url: string,
   headers: Record<string, string>,
   destPath: string,
+  expectedBytes: number,
   onProgress: (received: number, total: number) => void,
 ): StreamTask {
   const task = ReactNativeBlobUtil.config({ path: destPath, overwrite: true }).fetch('GET', url, headers);
   task.progress(PROGRESS_CONFIG, onProgress);
 
   const promise = (async () => {
-    const response = await task;
+    let response;
+    try {
+      response = await task;
+    } catch (err) {
+      if (await isActuallyComplete(err, destPath, expectedBytes)) {
+        return;
+      }
+      throw err;
+    }
     const status = response.info().status;
     if (status < 200 || status >= 300) {
       // The response body was already written to destPath regardless of
@@ -74,6 +83,26 @@ export function downloadFile(
   })();
 
   return { promise, cancel: () => task.cancel() };
+}
+
+/**
+ * react-native-blob-util's native FileStorage completion check compares
+ * bytes-written against the response's parsed Content-Length and rejects
+ * with "Download interrupted" on any mismatch. On real (non-loopback)
+ * connections that check has been observed to false-negative on larger,
+ * multi-chunk downloads even though every byte already reached destPath —
+ * see docs/15_QA_NOTEBOOK.md's Milestone P7 entry. Trust the file that's
+ * actually on disk over that check: if it's already the declared size, the
+ * download really did finish and this rejection is spurious. A genuine
+ * cancellation is exempt — it must always propagate, never be masked by a
+ * coincidentally-complete partial file.
+ */
+async function isActuallyComplete(err: unknown, destPath: string, expectedBytes: number): Promise<boolean> {
+  if (isStreamCancelError(err)) {
+    return false;
+  }
+  const stat = await ReactNativeBlobUtil.fs.stat(destPath).catch(() => null);
+  return stat != null && Number(stat.size) === expectedBytes;
 }
 
 /**

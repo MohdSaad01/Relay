@@ -97,6 +97,7 @@ test('start() on a send transfer downloads and reaches "completed"', async () =>
     'http://desktop:8000/api/v1/transfers/1/download',
     { Authorization: 'Bearer tok' },
     expect.stringContaining('report.pdf'),
+    1000,
     expect.any(Function),
   );
   expect(TransferStreamManager.getState()).toMatchObject({

@@ -1092,3 +1092,191 @@ which row state an error message was actually raised for).
 - "Share" (`ACTION_SEND`) remains unimplemented — unchanged from Milestone
   P4's investigation, still out of scope without adding a new native
   dependency.
+
+---
+
+# Milestone P7 — Android Download Publishing: Only `.txt` Files Reached Downloads/Relay
+
+## Problem
+
+On a physical Android device, `.txt` downloads consistently completed,
+appeared in `Downloads/Relay`, fired the completion notification, and
+opened correctly. Every other tested type (`.pdf`, `.docx`, `.pptx`,
+`.jpg`, `.png`) instead: showed the Files screen return to a plain
+"Download" state, showed "Download interrupted" on the Transfer detail
+screen, never produced a file in `Downloads/Relay`, and never showed a
+notification. Backend logs were clean for every type tested — `POST
+/transfers/requests` → 201, `GET /transfers/{id}/download` → 200, and
+`Download completed: transfer_id=... bytes=...` at the correct byte count
+— so the divergence had to be client-side, after the bytes had already
+fully arrived.
+
+## Investigation
+
+Traced the full pipeline per the milestone brief:
+`TransferStreamManager.start()` → `blobUtil.downloadFile()`
+(`react-native-blob-util`'s native `FileStorage` response handling) →
+`blobUtil.publishDownload()` → `MediaCollection.copyToMediaStore()` →
+`downloadNotification.notifyDownloadComplete()`.
+
+- **`TransferStreamManager.start()`
+  (`android/src/streaming/TransferStreamManager.ts`).** For a `send`
+  (download) transfer, the sequence is: `await activeTask.promise` (the
+  native download), then — only if that resolves — `publishDownload()`,
+  then `notifyDownloadComplete()`, then `setState({ status: 'completed' })`.
+  If `activeTask.promise` *rejects*, execution jumps straight to the
+  `catch` block: `publishDownload` and `notifyDownloadComplete` are never
+  reached, and `state.status` is set to `'failed'` with `state.error` set
+  to the rejection's message. This single branch point explains all three
+  symptoms as one failure, not three: no file in `Downloads/Relay` (never
+  published), no notification (never called), and "Download interrupted"
+  on the Transfer screen (the rejection's message, surfaced verbatim by
+  `TransferProgressDetail`).
+- **Where "Download interrupted" actually comes from.** That exact string
+  does not appear anywhere in this repository's own TypeScript source —
+  confirmed by search. It originates natively, in
+  `node_modules/react-native-blob-util`'s
+  `ReactNativeBlobUtilReq.java`/`done()` (the `FileStorage` response case):
+  `if (!fileResp.isDownloadComplete()) invoke_callback("Download interrupted.", ...)`.
+  `ReactNativeBlobUtilFileResp.isDownloadComplete()`
+  (`Response/ReactNativeBlobUtilFileResp.java`) is:
+  `bytesDownloaded == contentLength() || (contentLength() == -1 && isEndMarkerReceived)`
+  — an exact-equality check between bytes actually written to disk and the
+  response's parsed `Content-Length`.
+- **Ruled out: the backend.** `guess_media_type()`
+  (`backend/app/services/transfer_stream_service.py`) sets a real
+  per-file `Content-Type` (`text/plain` for `.txt`, `application/pdf` for
+  `.pdf`, etc.), but the download route
+  (`backend/app/api/v1/transfers.py`) sets `Content-Length` explicitly to
+  `transfer.file_size` regardless of type. Confirmed in Starlette's
+  `Response.init_headers()` (`starlette/responses.py`) that an
+  explicitly-provided `content-length` header is passed through verbatim
+  for a `StreamingResponse` — nothing server-side manipulates it by
+  content type. No compression middleware is registered. This matches the
+  milestone's own instruction to treat the backend as correct — every
+  avenue traced back to the client.
+- **Ruled out: a code-level type branch.** Read `react-native-blob-util`'s
+  entire `FileStorage` response path (`ReactNativeBlobUtilReq.java`'s
+  `done()`, `ReactNativeBlobUtilFileResp.java`). The byte-copy loop, the
+  completeness check, and the MediaStore write
+  (`ReactNativeBlobUtilMediaCollection.java`) are all agnostic to
+  `Content-Type`/MIME — `isBlobResponse()`'s content-type branching only
+  affects the unrelated in-memory (`KeepInMemory`) response mode, which
+  this download never uses (`config({ path: destPath })` always selects
+  `FileStorage`). `publishDownload()`
+  (`android/src/streaming/blobUtil.ts`) also already hardcodes
+  `mimeType: 'application/octet-stream'` for every download regardless of
+  real type, so MIME type cannot be what differentiates `.txt` from the
+  rest here either.
+- **The actual differentiator: response size, not type.** With every
+  code-level type-based explanation ruled out, and with backend logs
+  confirming a full, correct byte count reaches the OS socket for every
+  file in the report — including the failing ones — the mismatch has to
+  be a false negative in the exact-equality check itself, not a real data
+  loss. `.txt` test files are small enough to be read and sent in a single
+  `STREAM_CHUNK_SIZE_BYTES` chunk; `.pdf`/`.docx`/`.pptx`/`.jpg`/`.png`
+  test files are larger and require several. This exact failure mode —
+  "downloads succeed sometimes, fail with 'Download interrupted' other
+  times, on the same library version, uncorrelated with the server" — is
+  an openly reported, unresolved upstream behavior
+  (react-native-blob-util issue #268), consistent with a real-world,
+  non-loopback connection being more likely to expose it on a longer,
+  multi-chunk transfer than on a single small one. The one backend
+  warning worth naming directly: `Download connection closed early:
+  transfer_id=26 bytes_sent=3145728`. That log line comes from the
+  server's own `except GeneratorExit` — it fires only when the ASGI
+  connection genuinely drops mid-stream, which is a *different* failure
+  than the one described above (where the server always logged a clean
+  `Download completed`). Given the milestone's report frames this as one
+  isolated line among many repeated `.pdf`/`.jpg`/etc. failures — not one
+  per failure — it does not correlate with the reproducible bug and is
+  treated here as a separate, ordinary network hiccup rather than forced
+  into the same explanation.
+
+## Root Cause
+
+`react-native-blob-util`'s native `FileStorage` download path
+(`ReactNativeBlobUtilFileResp.isDownloadComplete()`) can reject with
+"Download interrupted" even after every byte has already been written to
+the staging file on disk — an upstream false negative that this
+investigation found is more exposed on larger, multi-chunk downloads over
+a real device connection than on tiny single-chunk ones. `.txt` test files
+happened to be small enough to avoid tripping it; every other type tested
+was large enough not to. `TransferStreamManager.start()` treated that
+rejection as unconditional proof of failure, so it never proceeded to
+`publishDownload()`/`notifyDownloadComplete()` even when the file was
+already complete and correct at its staging path — turning one upstream
+false negative into three visible failures (no published file, no
+notification, "Download interrupted" on screen).
+
+**Why previous milestones didn't expose this:** `blobUtil.test.ts`
+(Jest) mocks `react-native-blob-util` entirely
+(`android/__mocks__/react-native-blob-util.js`) — every existing test
+drives the mocked task's `__resolve`/`__reject` directly and never
+executes the real native Android `FileStorage` code path this bug lives
+in. No test in this repository could have caught it; it is only
+observable via `isDownloadComplete()`'s real OkHttp/Okio behavior on an
+actual device connection, which is exactly how it was found.
+
+## Solution
+
+`downloadFile()` (`android/src/streaming/blobUtil.ts`) now takes the
+transfer's declared `file_size` and, if the native promise rejects, stats
+the file already written to `destPath` before giving up: if its on-disk
+size already equals the declared size, the download is treated as
+successful (the rejection is swallowed) instead of failing outright. A
+genuine cancellation (`isStreamCancelError`) is explicitly exempted from
+this recovery — it must always propagate, never be masked by a
+coincidentally-complete partial file. A real interruption (the file is
+genuinely short) still rejects exactly as before.
+`TransferStreamManager.start()`'s only change is passing
+`transfer.file_size` through to `downloadFile()`; its own success/failure
+handling, `publishDownload`, and `notifyDownloadComplete` are unchanged.
+
+This is deliberately not a fix to `react-native-blob-util` itself (a
+`node_modules` dependency, out of scope to patch per this milestone's own
+"no unrelated refactoring" instruction) — it makes the app trust the file
+it actually has on disk over a library completion check with a known
+false-negative mode, without weakening the check for a real interruption.
+
+## Verification
+
+- Full Android suite: `npx jest` — 25 suites / 153 tests passing (4 new
+  regression tests added to `blobUtil.test.ts`; `TransferStreamManager.test.ts`
+  updated for `downloadFile`'s new `expectedBytes` parameter). `npx tsc
+  --noEmit` and `npx eslint` (on the changed files) both clean.
+- New regression coverage in `blobUtil.test.ts`: a native "Download
+  interrupted" rejection is swallowed when the on-disk file already
+  matches the declared size; it still rejects when the on-disk file is
+  short (a genuine interruption) or when `stat()` itself fails (the file
+  was never created); a real cancellation still rejects even when the
+  partial file happens to already match the declared size.
+- Backend: full suite still passing (`pytest -q` — 286 passed, 2 skipped),
+  unchanged by this milestone — no backend defect was found, consistent
+  with the milestone's instruction to assume the backend correct absent
+  contrary evidence, which the investigation did not surface.
+
+## Known Limitations
+
+- Not verified live end-to-end — no physical Android device was available
+  in the environment this change was made in, consistent with every prior
+  milestone's own caveat throughout this notebook. This is the one entry
+  in this notebook where that caveat matters most: the defect itself was
+  only reachable on a physical device, and this fix's correctness rests on
+  reasoning about `react-native-blob-util`'s real native behavior plus a
+  from-first-principles JS regression test of the recovery path, not a
+  reproduction of the original bug in this environment. Recommended
+  before closing this out: reinstall on the physical device that
+  originally reproduced this and confirm, for at least `.pdf`, `.jpg`, and
+  one larger file (`.pptx` or `.mp4`, if available) — download completes,
+  the file exists in `Downloads/Relay`, the completion notification
+  appears, "Open" works, and the Transfer screen settles on "Completed"
+  with no "Download interrupted" text.
+- If the on-disk file is short by even one byte (a genuine interruption),
+  the original "Download interrupted" failure is preserved unchanged — by
+  design, this fix only recovers the false-negative case where the file is
+  already exactly the declared size.
+- The upstream `react-native-blob-util` behavior itself is unpatched; a
+  future `react-native-blob-util` upgrade that fixes this false negative
+  natively would make this recovery path a (harmless) no-op rather than
+  something to revert.

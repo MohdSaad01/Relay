@@ -1616,6 +1616,99 @@ which state a message was raised for) that already existed nearby.
 
 ---
 
+## P7 — Android Download Publishing Investigation (Root Cause First)
+
+### Status
+
+**Completed**
+
+### Summary
+
+Root-cause investigation, not a feature milestone: on a physical Android
+device, `.txt` downloads worked end-to-end (file in `Downloads/Relay`,
+notification, "Open" worked) while every other tested type (`.pdf`,
+`.docx`, `.pptx`, `.jpg`, `.png`) failed identically — no published file,
+no notification, and "Download interrupted" on the Transfer detail
+screen — despite backend logs confirming a clean, fully-received download
+for every type. Traced the entire client pipeline (`TransferStreamManager`
+→ `blobUtil.downloadFile`/`publishDownload` →
+`react-native-blob-util`'s native `FileStorage` response handling →
+`MediaCollection.copyToMediaStore` → `notifyDownloadComplete`) plus the
+relevant backend response-header code, before making any change. Full
+investigation notes, evidence, and the ruled-out alternatives are in
+`docs/15_QA_NOTEBOOK.md`'s Milestone P7 entry; this section records the
+verification result.
+
+### Root Cause
+
+`react-native-blob-util`'s native download-completion check
+(`ReactNativeBlobUtilFileResp.isDownloadComplete()`, an exact
+`bytesDownloaded == Content-Length` comparison) rejects with "Download
+interrupted" even when the file has already been fully and correctly
+written to disk — an upstream false negative more exposed on larger,
+multi-chunk downloads over a real device connection than on the tiny
+single-chunk `.txt` test file, which happened to avoid it. Because
+`TransferStreamManager.start()` only ran `publishDownload()` /
+`notifyDownloadComplete()` after that promise resolved, this one upstream
+false negative produced three symptoms at once (no published file, no
+notification, "Download interrupted" on screen) for every type large
+enough to trigger it. No backend defect was found — response headers
+(`Content-Length`, `Content-Type`) were confirmed correct and
+type-independent for every file tested.
+
+### Solution
+
+`blobUtil.downloadFile()` now takes the transfer's declared `file_size`
+and, on a native rejection, stats the file already written to the staging
+path: if it already matches the declared size, the rejection is treated
+as a false negative and swallowed (download proceeds to publish/notify as
+normal); a genuine cancellation is exempted from this recovery and always
+propagates; a real short file still rejects as before.
+`TransferStreamManager.start()` only changes in passing `file_size`
+through. See `docs/15_QA_NOTEBOOK.md`'s Milestone P7 entry for the full
+trace and why every server-side and type-based explanation was ruled out
+first.
+
+### Regression Tests Added
+
+- `blobUtil.test.ts`: a native "Download interrupted" rejection is
+  swallowed when the on-disk file already matches the declared size;
+  still rejects when the file is short (genuine interruption) or when
+  `stat()` fails (file never created); a real cancellation still rejects
+  even when the partial file happens to already match the declared size.
+- `TransferStreamManager.test.ts`: updated for `downloadFile`'s new
+  `expectedBytes` parameter (no behavior change to this file otherwise).
+
+### Verification
+
+- Full Android suite: `npx jest` — 25 suites / 153 tests passing (149 +
+  4 new). `npx tsc --noEmit` and `npx eslint` (on the changed files) both
+  clean.
+- Backend: full suite still passing (`pytest -q` — 286 passed, 2
+  skipped), unchanged by this milestone.
+
+### Known Limitations
+
+- Not verified live end-to-end — no physical Android device was
+  available in the environment this change was made in. This is the one
+  milestone in this document where that caveat is load-bearing rather
+  than routine: the original defect was only reproducible on a physical
+  device, and this fix's correctness rests on tracing
+  `react-native-blob-util`'s real native behavior plus a from-first-
+  principles regression test of the recovery path, not a live
+  reproduction. **Required before closing this milestone out**: reinstall
+  on the device that originally reproduced this and confirm, at minimum,
+  `.pdf` and `.jpg` — download completes, the file exists in
+  `Downloads/Relay`, the notification appears, "Open" works, and the
+  Transfer screen settles on "Completed" with no "Download interrupted"
+  text. `.docx`, `.pptx`, `.png`, and (if available) `.zip`/`.mp4`/`.mp3`
+  should also be spot-checked per the milestone brief.
+- This fix only recovers the specific false-negative case where the
+  on-disk file is already exactly the declared size; a genuinely
+  short/interrupted download still fails exactly as before.
+
+---
+
 # 4. Bug Classification
 
 Critical

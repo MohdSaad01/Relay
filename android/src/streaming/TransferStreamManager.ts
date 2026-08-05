@@ -147,6 +147,7 @@ export const TransferStreamManager = {
           `${baseUrl}/transfers/${transfer.id}/download`,
           headers,
           downloadStagingPath(transfer.file_name),
+          transfer.file_size,
           onProgress,
         );
       } else {

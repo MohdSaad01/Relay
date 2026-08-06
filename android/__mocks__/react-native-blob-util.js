@@ -49,7 +49,7 @@ module.exports = {
   fetch: fetchMock,
   wrap: jest.fn(path => `wrapped:${path}`),
   fs: {
-    dirs: { DocumentDir: '/mock/documents', DownloadDir: '/mock/downloads' },
+    dirs: { DocumentDir: '/mock/documents', DownloadDir: '/mock/downloads', LegacyDownloadDir: '/mock/downloads' },
     unlink: jest.fn(() => Promise.resolve()),
     exists: jest.fn(() => Promise.resolve(false)),
     stat: jest.fn(() => Promise.reject(new Error('ENOENT'))),

@@ -122,7 +122,7 @@ async function isActuallyComplete(err: unknown, destPath: string, expectedBytes:
  * check.
  */
 async function resolveAvailableMediaStoreName(fileName: string): Promise<string> {
-  const dir = `${ReactNativeBlobUtil.fs.dirs.DownloadDir}/${PUBLIC_DOWNLOAD_FOLDER}`;
+  const dir = `${ReactNativeBlobUtil.fs.dirs.LegacyDownloadDir}/${PUBLIC_DOWNLOAD_FOLDER}`;
   const exists = (name: string) => ReactNativeBlobUtil.fs.exists(`${dir}/${name}`).catch(() => false);
 
   if (!(await exists(fileName))) {
@@ -203,8 +203,20 @@ export async function publishDownload(stagingPath: string, fileName: string): Pr
   }
 }
 
+/**
+ * Statted via `LegacyDownloadDir` (`Environment.getExternalStoragePublicDirectory`),
+ * not `DownloadDir` (`Context.getExternalFilesDir`, the app's own private
+ * scoped-storage directory) — despite the name, `LegacyDownloadDir` is the
+ * one that actually resolves to the true public Downloads folder
+ * `copyToMediaStore` publishes into on every API level, `DownloadDir` does
+ * not. Confirmed live on device (RMX3997, API 36, docs/15_QA_NOTEBOOK.md's
+ * Milestone P9.1 entry): using `DownloadDir` here made this check stat a
+ * directory that doesn't even exist, so it failed unconditionally — even for
+ * a `copyToMediaStore` call that had genuinely and correctly published the
+ * file to `LegacyDownloadDir`/Relay.
+ */
 async function isPublishedAt(fileName: string, expectedBytes: number): Promise<boolean> {
-  const dir = `${ReactNativeBlobUtil.fs.dirs.DownloadDir}/${PUBLIC_DOWNLOAD_FOLDER}`;
+  const dir = `${ReactNativeBlobUtil.fs.dirs.LegacyDownloadDir}/${PUBLIC_DOWNLOAD_FOLDER}`;
   const stat = await ReactNativeBlobUtil.fs.stat(`${dir}/${fileName}`).catch(() => null);
   return stat != null && Number(stat.size) === expectedBytes;
 }

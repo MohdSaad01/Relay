@@ -13,13 +13,17 @@ afterEach(() => {
   versionSpy.mockRestore();
 });
 
-test('opens the file at its resolved on-device path with a chooser', async () => {
+test('opens the file at its resolved on-device path with no chooser title', async () => {
   await openDownloadedFile('report.pdf', 'application/pdf');
 
+  // null, not a custom title: a non-null title makes react-native-blob-util
+  // wrap the intent in Intent.createChooser(), which drops the
+  // FLAG_ACTIVITY_NEW_TASK flag required when starting from a non-Activity
+  // context and throws on every call — see downloadActions.ts's docstring.
   expect(ReactNativeBlobUtil.android.actionViewIntent).toHaveBeenCalledWith(
     '/mock/downloads/Relay/report.pdf',
     'application/pdf',
-    'Open with',
+    undefined,
   );
 });
 
@@ -29,7 +33,7 @@ test('falls back to a generic MIME type when the shared file has none', async ()
   expect(ReactNativeBlobUtil.android.actionViewIntent).toHaveBeenCalledWith(
     expect.any(String),
     'application/octet-stream',
-    'Open with',
+    undefined,
   );
 });
 

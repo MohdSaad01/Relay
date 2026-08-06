@@ -33,11 +33,30 @@ import { downloadedFilePath } from './downloadExistence';
 
 const DEFAULT_MIME_TYPE = 'application/octet-stream';
 
-/** Rejects if no installed app can handle the file's MIME type. */
+/**
+ * Rejects if no installed app can handle the file's MIME type.
+ *
+ * `chooserTitle` is deliberately omitted (`undefined`), not a custom title:
+ * passing a non-null title makes react-native-blob-util's native
+ * `actionViewIntent` (`ReactNativeBlobUtilImpl.java`) wrap the
+ * `ACTION_VIEW` intent in `Intent.createChooser(...)` before calling
+ * `startActivity()` from this app's `ReactApplicationContext` (not an
+ * `Activity`). `createChooser` returns a *new* wrapper intent that does
+ * not inherit the `FLAG_ACTIVITY_NEW_TASK` flag set on the original — a
+ * non-Activity context requires that flag on whatever intent is actually
+ * started, so every call with a non-null title throws
+ * `AndroidRuntimeException: Calling startActivity() from outside of an
+ * Activity context requires the FLAG_ACTIVITY_NEW_TASK flag`, confirmed
+ * live on device (docs/15_QA_NOTEBOOK.md's Milestone P9.1 entry). Omitting
+ * it skips the `createChooser` wrapping entirely, so the original intent —
+ * which does carry the flag — reaches `startActivity()` unwrapped; Android
+ * still shows its own disambiguation picker when more than one app
+ * matches, it just won't carry this custom title. This is a third-party bug
+ * (`node_modules/react-native-blob-util`), avoided from this call site
+ * rather than patched in place, matching this codebase's existing
+ * `isActuallyComplete()` precedent (blobUtil.ts) for working around a
+ * library defect without touching `node_modules`.
+ */
 export async function openDownloadedFile(fileName: string, mimeType: string | null): Promise<void> {
-  await ReactNativeBlobUtil.android.actionViewIntent(
-    downloadedFilePath(fileName),
-    mimeType || DEFAULT_MIME_TYPE,
-    'Open with',
-  );
+  await ReactNativeBlobUtil.android.actionViewIntent(downloadedFilePath(fileName), mimeType || DEFAULT_MIME_TYPE, undefined);
 }

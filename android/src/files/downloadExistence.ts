@@ -27,9 +27,9 @@ const PUBLIC_DOWNLOAD_FOLDER = 'Relay';
  * just a yes/no existence check.
  */
 export function downloadedFilePath(fileName: string): string {
-  const { DownloadDir, DocumentDir } = ReactNativeBlobUtil.fs.dirs;
+  const { LegacyDownloadDir, DocumentDir } = ReactNativeBlobUtil.fs.dirs;
   return Number(Platform.Version) >= MEDIASTORE_MIN_SDK
-    ? `${DownloadDir}/${PUBLIC_DOWNLOAD_FOLDER}/${fileName}`
+    ? `${LegacyDownloadDir}/${PUBLIC_DOWNLOAD_FOLDER}/${fileName}`
     : `${DocumentDir}/Downloads/${fileName}`;
 }
 

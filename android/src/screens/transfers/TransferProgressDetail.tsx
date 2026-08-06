@@ -132,7 +132,7 @@ export function TransferProgressDetail({ transferId }: { transferId: number }) {
         <Text style={styles.error}>{transfer.failure_reason}</Text>
       )}
 
-      {stream?.transferId === transferId && stream.status === 'failed' && stream.error && (
+      {merged.status === 'failed' && stream?.transferId === transferId && stream.error && (
         <Text style={styles.error}>{stream.error}</Text>
       )}
 

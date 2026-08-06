@@ -1818,6 +1818,155 @@ real socket-level test harness, judged out of scope for this milestone's
 
 ---
 
+## P9 — Android Download Reliability (Detail Screen "Download Interrupted")
+
+### Status
+
+**Completed** (client fix + full unit-test pass; physical-device
+re-verification still required — see Known Limitations)
+
+### Summary
+
+Physical-device testing after P8/P8.1 reported `.pdf`/`.png`/`.zip`
+downloading successfully while `.txt`/`.docx`/`.pptx`/`.jpg`/`.mp3` showed
+"Completed" on the Overview list but "Download interrupted" on the
+Transfer detail screen, sometimes self-correcting only after another
+transfer started. Traced the complete pipeline (streaming, staging,
+publish, `TransferStreamManager`, `Transfer` state, `TransferProgressDetail`,
+Files screen, MediaStore, notification path) for both a reportedly-working
+and a reportedly-failing type before making any change, per this
+milestone's own instruction. Full investigation notes and evidence are in
+`docs/15_QA_NOTEBOOK.md`'s Milestone P9 entry; this section records the
+verification result.
+
+### Root Cause
+
+No file-type or MIME-type branching exists anywhere in the byte-transfer
+path — confirmed by reading every layer end to end: `blobUtil.ts`,
+`TransferStreamManager.ts`, `transfer_stream_service.py`, `transfers.py`
+(the `Content-Length` header is always the exact declared `file_size`,
+regardless of type), and `react-native-blob-util`'s native Android layer
+(`ReactNativeBlobUtilReq.java`'s `FileStorage` response path,
+`ReactNativeBlobUtilFileResp.isDownloadComplete()`,
+`ReactNativeBlobUtilMediaCollection.java`'s `createNewMediaFile`/
+`writeToMediaFile`, which use a hardcoded `Download` collection and
+hardcoded `application/octet-stream` for every file regardless of its
+real type). This is corroborated by this project's own history: P7's
+matrix ran the opposite pattern — `.txt` succeeded while `.pdf`, `.docx`,
+`.pptx`, and `.jpg` failed — the reverse of what P9 reported. A
+deterministic per-extension rule cannot produce two contradictory rankings
+across milestones; a size/timing-dependent flake can.
+
+The reported symptom pattern (list = Completed, detail = "Download
+interrupted", self-corrects only once another transfer starts) is fully
+and deterministically explained by a real client-side bug, independent of
+what originally triggers a local completion-promise rejection (most
+likely the already-documented P7 false-negative in
+`ReactNativeBlobUtilFileResp.isDownloadComplete()`, which P7 itself noted
+is "more exposed on larger, multi-chunk downloads" — a size property, not
+a type property):
+
+- `TransferStreamManager`'s `state` is a plain module-level singleton,
+  reassigned only from inside its own `start()` method, with no
+  reset/clear path anywhere in the codebase. Once a download's local
+  promise rejects and P7's `isActuallyComplete()` recovery doesn't rescue
+  it (e.g. the on-disk file isn't yet byte-for-byte flushed at the moment
+  of rejection), `state` is stamped `{status:'failed', error:'Download
+  interrupted.'}` for that `transferId` and stays there indefinitely —
+  `start()`'s own guard (`if (state?.transferId === transfer.id) return;`)
+  explicitly refuses to ever touch that transfer's local state again (by
+  design: "V1 has no retry").
+- The backend marks the `Transfer` row `COMPLETED` unconditionally the
+  moment it finishes writing all bytes to the socket
+  (`transfer_stream_service._generate_download`), independent of what the
+  client does with those bytes afterward. The Overview list, which only
+  ever reads server-polled `transfer.status`, correctly and durably shows
+  "Completed" — this was never a false completion.
+- `TransferProgressDetail`'s primary status text also correctly shows
+  "Completed": it goes through `mergeLiveTransferState()`, which already
+  defers to the server outright once `transfer.status` is terminal
+  (Milestone P3's rule).
+- But a second, independent block in the same screen
+  (`TransferProgressDetail.tsx`, the trailing error `<Text>`) read
+  `TransferStreamManager`'s raw `stream.status`/`stream.error` directly,
+  gated only on `stream.status === 'failed'` — bypassing
+  `mergeLiveTransferState()`'s server-wins-once-terminal rule that every
+  other piece of the same screen already correctly follows. This is what
+  rendered "Download interrupted." underneath an otherwise-correct
+  "Completed" status.
+- This stale text can only disappear when `stream?.transferId ===
+  transferId` becomes false — i.e. when a *different* transfer's
+  `TransferStreamManager.start()` call overwrites the singleton — which is
+  exactly and only what "the state sometimes changes after another
+  transfer begins" describes. A poll-based staleness bug would have
+  self-corrected on the next 2-second poll or screen refocus regardless;
+  this one specifically didn't, because nothing else in the codebase ever
+  touches `state`.
+
+### Solution
+
+`android/src/screens/transfers/TransferProgressDetail.tsx`: the trailing
+error block now gates on `merged.status === 'failed'` (the same
+server-aware value that already drives the status text and Cancel button
+on this screen) instead of the raw `stream.status === 'failed'`. Once the
+server transfer reaches a terminal status, `mergeLiveTransferState()`
+already ignores the local stream outright — so once `transfer.status`
+becomes `'completed'`, this block can no longer render a stale local
+error underneath it, for any file type, regardless of why the local
+promise happened to reject. No change to `TransferStreamManager`,
+`mergeLiveTransferState`, the backend, or MediaStore/publish logic — the
+byte-transfer pipeline itself was confirmed clean (see Root Cause).
+
+### Regression Tests Added
+
+- `android/__tests__/transfers/mergeLiveTransferState.test.ts`: new case —
+  server `status: 'completed'` with a local stream still reporting
+  `status: 'failed', error: 'Download interrupted.'` — asserts the merge
+  returns `status: 'completed'` outright, documenting exactly the
+  scenario `TransferProgressDetail`'s fix now relies on.
+- No new component/render test was added for `TransferProgressDetail.tsx`
+  itself: no screen-level render test exists anywhere in this codebase
+  (`@testing-library/react-native` is not an installed dependency), and
+  the same convention every prior Files/Transfers milestone in this
+  document has followed (P5, P6) explicitly deferred introducing one as
+  out of scope for a targeted fix.
+
+### Verification
+
+- Full Android suite: `npx jest` — 25 suites / 157 tests passing (156 + 1
+  new).
+- Backend: untouched by this milestone; not re-run.
+
+### Known Limitations
+
+- **Not verified live on a physical device** — no physical Android device
+  was available in the environment this fix was made in, consistent with
+  every prior milestone's own caveat in this document. **Required before
+  closing this out**: retest `.txt`, `.docx`, `.pptx`, `.jpg`, `.mp3`,
+  `.pdf`, `.png`, `.zip` and confirm every one completes, stays
+  "Completed" on the detail screen with no "Download interrupted" text,
+  and behaves identically regardless of type.
+- The underlying trigger for the local completion promise occasionally
+  rejecting at all (most likely P7's documented native false-negative,
+  which this fix does not touch) is still open — this milestone fixes the
+  UI showing a stale, contradictory error once that trigger fires and the
+  server has already confirmed success, not the trigger itself. If a
+  transfer's local stream never resolves as a false negative — never
+  recovers via `isActuallyComplete()` — but the server nonetheless
+  completes, that transfer's detail screen will now correctly settle on
+  "Completed" with no leftover error text, which was the actual defect
+  reported.
+- The apparent file-type correlation in the original bug report is very
+  likely an artifact of which sample files happened to be used for each
+  extension in that one test pass (larger files are more exposed to the
+  P7 native false-negative, and typical `.jpg`/`.mp3`/`.docx`/`.pptx`
+  files people keep around tend to be larger than a quick test `.pdf`/
+  `.png`/`.zip`) rather than a deterministic rule — P7's own matrix
+  produced the opposite type ranking, which is not possible if the cause
+  were genuinely type-keyed.
+
+---
+
 # 4. Bug Classification
 
 Critical

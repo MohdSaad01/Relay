@@ -61,6 +61,20 @@ test('server already terminal: server wins outright even if a matching stream st
   });
 });
 
+test('server already completed, stream locally failed: server wins outright — this is what TransferProgressDetail relies on to avoid showing a stale "Download interrupted" error underneath a Completed transfer (P9)', () => {
+  const completedTransfer: TransferResponse = { ...baseTransfer, status: 'completed', bytes_transferred: 1000 };
+  const failedStream: StreamState = { ...baseStream, status: 'failed', error: 'Download interrupted.' };
+
+  const result = mergeLiveTransferState(completedTransfer, failedStream);
+
+  expect(result).toEqual({
+    status: 'completed',
+    bytesTransferred: 1000,
+    totalBytes: 1000,
+    showCancel: false,
+  });
+});
+
 test('server in_progress, stream streaming: prefers the live byte count', () => {
   const result = mergeLiveTransferState(baseTransfer, baseStream);
 

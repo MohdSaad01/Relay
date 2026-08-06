@@ -1,0 +1,18 @@
+diff --git a/node_modules/react-native-blob-util/android/src/main/java/com/ReactNativeBlobUtil/Response/ReactNativeBlobUtilFileResp.java b/node_modules/react-native-blob-util/android/src/main/java/com/ReactNativeBlobUtil/Response/ReactNativeBlobUtilFileResp.java
+index ccceaf1..7ad453a 100644
+--- a/node_modules/react-native-blob-util/android/src/main/java/com/ReactNativeBlobUtil/Response/ReactNativeBlobUtilFileResp.java
++++ b/node_modules/react-native-blob-util/android/src/main/java/com/ReactNativeBlobUtil/Response/ReactNativeBlobUtilFileResp.java
+@@ -123,6 +123,13 @@ public class ReactNativeBlobUtilFileResp extends ResponseBody {
+                 bytesDownloaded += read > 0 ? read : 0;
+                 if (read > 0) {
+                     ofStream.write(bytes, 0, (int) read);
++                    // okio.Source.read(Buffer sink, long byteCount) requires the bytes read to
++                    // be appended to `sink` — this call was missing, so Okio's own buffered-
++                    // source layer always saw sink.size == 0 after this returned and concluded
++                    // end-of-stream (Buffer.read() on an empty buffer returns -1) on the very
++                    // first physical socket read, silently truncating every download that didn't
++                    // fit entirely in one read. See docs/15_QA_NOTEBOOK.md Milestone P10.
++                    sink.write(bytes, 0, (int) read);
+                 } else if (contentLength() == -1 && read == -1) {
+                     // End marker has been received for chunked download
+                     isEndMarkerReceived = true;

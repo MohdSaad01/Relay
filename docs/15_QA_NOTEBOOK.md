@@ -2134,6 +2134,101 @@ Three independent defects, none caused by the same code path:
 
 ---
 
+# Milestone P13.1 — Folder UX Polish: Duplicate Folder Names Share One Physical Directory
+
+## Problem
+
+P13.1 removed the folder row's progress counters ("(1)", "(0/1)", "(1/1)"),
+added an "Open" action for a completed folder download (opening
+`Downloads/Relay/<FolderName>` in the device's file manager via a
+`DocumentsContract` directory URI, `content://com.android.
+externalstorage.documents/document/...`), and made a completed folder
+download's notification open that same folder instead of behaving like a
+completed file's notification. The milestone's own instructions required
+verifying multiple folders, nested folders, and **duplicate folder names**
+live on the connected physical device (RMX3997, USB-connected, backend
+reached over the phone's own hotspot) before considering it done.
+
+## Investigation
+
+Two shared folders were deliberately created with the exact same display
+name ("Duplicate") but different source paths on the desktop
+(`...\parentA\Duplicate` and `...\parentB\Duplicate`, one file each,
+`a.txt` and `b.txt`), shared via the live backend
+(`POST /folders`), and both downloaded from the real installed app. Both
+rows correctly reached "Open" with no counters, and each produced its own,
+independent "✓ Duplicate downloaded successfully" notification (confirmed
+via `adb shell cmd notification list` — two distinct notification records,
+not deduplicated or dropped). Tapping either row's "Open" (or either
+notification) opened the file manager at `Download/Relay/Duplicate`.
+
+A raw `adb shell ls /sdcard/Download/Relay/Duplicate/` (`MSYS_NO_PATHCONV=1`
+needed under Git Bash to stop `/sdcard/...` from being mangled into a
+Windows path) showed **both** downloads' files sitting side by side in the
+same physical directory: `a.txt` and `b.txt` together, not two separate
+`Duplicate` / `Duplicate (1)` directories.
+
+## Root Cause
+
+Not a defect introduced by this milestone — a pre-existing P13 folder-
+download property, confirmed to predate P13.1 by reading (not modifying)
+`android/src/streaming/blobUtil.ts`. The backend always builds a folder
+child's `folder_relative_path` as `"<shared_folder.folder_name>/
+<relative_path>"` (`backend/app/services/transfer_service.py`), so the top-
+level directory segment on the Android side is always exactly the shared
+folder's own `folder_name` — this is also what P13.1's new Open action
+correctly targets. `blobUtil.ts`'s `resolveAvailableMediaStoreName()` only
+ever disambiguates a *file's own basename* on conflict (the well-tested
+"name (1).ext" pattern for two files landing at the identical path); it
+never renames the leading folder segment. So two shared folders that
+happen to carry the same `folder_name` — whether from genuinely different
+source directories, as reproduced here, or from re-sharing the same
+directory twice — download into one merged physical directory on Android,
+with only their individual files (not the folders themselves)
+disambiguated if a filename inside happens to collide too.
+
+This is a protocol/streaming-level gap (P13's own folder-conflict handling
+never accounted for the folder name itself), and both this milestone's
+instructions ("Do NOT redesign folder transfers. Do NOT change backend
+streaming.") and Rule 3 ("Never add features outside the current
+milestone") rule out fixing it here. P13.1's own new behavior (Open,
+notifications) is internally consistent with this reality: both rows
+correctly point at, and correctly open, whatever is actually on disk.
+
+## Solution
+
+None applied — documented as a known, pre-existing limitation rather than
+fixed, per this milestone's explicit scope boundaries. Flagging it here
+(rather than silently noting it in the milestone summary alone) so it
+isn't rediscovered from scratch if a future milestone is scoped to address
+folder-level naming conflicts.
+
+## Verification
+
+- Live device (RMX3997), this session: two identically-named shared
+  folders downloaded via the real installed app; confirmed via `adb shell
+  ls` that their contents merge into one on-device directory as described
+  above, and via `adb shell cmd notification list` that each still
+  produces its own correct, independent completion notification despite
+  the merge.
+- All other P13.1 physical-device checks passed on the same device/session
+  — see the milestone's own summary for the full list (single file,
+  downloaded-file Open, downloaded-folder Open, folder notification,
+  file notification, no counters, multiple folders, nested folders).
+
+## Remaining Limitations
+
+- Two shared folders with the same display name merge into one physical
+  Android directory on download, as described above — an accepted,
+  pre-existing P13 limitation, not introduced or fixed by P13.1.
+- The app's own `'[QR-DEBUG] ...'` debug instrumentation in
+  `src/api/client.ts` is still present (previously flagged in Milestone
+  P8.1's Known Limitations) and remained highly verbose in this session's
+  `logcat` output — out of scope here, noted again since it is still
+  unaddressed.
+
+---
+
 # Milestone P11 — Concurrent Download Freeze Investigation (Physical Device)
 
 ## Problem

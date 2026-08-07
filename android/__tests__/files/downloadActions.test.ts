@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
-import { openDownloadedFile } from '../../src/files/downloadActions';
+import { openDownloadedFile, openDownloadedFolder } from '../../src/files/downloadActions';
 
 let versionSpy: jest.SpyInstance;
 
@@ -41,4 +41,30 @@ test('propagates a rejection when no app can handle the file', async () => {
   (ReactNativeBlobUtil.android.actionViewIntent as jest.Mock).mockRejectedValueOnce(new Error('No activity found'));
 
   await expect(openDownloadedFile('report.pdf', 'application/pdf')).rejects.toThrow('No activity found');
+});
+
+// P13.1 (Issue 2)
+describe('openDownloadedFolder', () => {
+  test('opens the folder via a SAF directory document URI with the directory MIME type', async () => {
+    await openDownloadedFolder('University Notes');
+
+    expect(ReactNativeBlobUtil.android.actionViewIntent).toHaveBeenCalledWith(
+      'content://com.android.externalstorage.documents/document/primary%3ADownload%2FRelay%2FUniversity%20Notes',
+      'vnd.android.document/directory',
+      undefined,
+    );
+  });
+
+  test('rejects without touching actionViewIntent below the MediaStore-capable SDK', async () => {
+    versionSpy.mockReturnValue(24);
+
+    await expect(openDownloadedFolder('University Notes')).rejects.toThrow(/Android 10 or later/);
+    expect(ReactNativeBlobUtil.android.actionViewIntent).not.toHaveBeenCalled();
+  });
+
+  test('propagates a rejection when no file manager can handle the folder', async () => {
+    (ReactNativeBlobUtil.android.actionViewIntent as jest.Mock).mockRejectedValueOnce(new Error('No activity found'));
+
+    await expect(openDownloadedFolder('University Notes')).rejects.toThrow('No activity found');
+  });
 });

@@ -10,9 +10,12 @@
 
 import { Linking } from 'react-native';
 import notifee, { AndroidImportance, EventType } from '@notifee/react-native';
+import ReactNativeBlobUtil from 'react-native-blob-util';
 
 const CHANNEL_ID = 'relay-downloads';
 const OPEN_DOWNLOAD_ACTION = 'open-download';
+const OPEN_DOWNLOAD_FOLDER_ACTION = 'open-download-folder';
+const DIRECTORY_MIME_TYPE = 'vnd.android.document/directory';
 
 let channelReady: Promise<void> | null = null;
 
@@ -81,10 +84,47 @@ export async function notifyDownloadComplete(fileName: string, contentUri: strin
   }
 }
 
+/**
+ * Shows "✓ <folderName> downloaded successfully" for a completed *folder*
+ * download (P13.1, Issue 3) — TransferStreamManager calls this instead of
+ * notifyDownloadComplete once every child file of a shared folder has
+ * finished, so a folder download produces exactly one notification rather
+ * than one per child, and tapping it opens the folder itself instead of
+ * whichever child happened to finish last.
+ *
+ * `folderUri` (from files/downloadExistence.ts's downloadedFolderContentUri)
+ * is a SAF directory document URI, not a single file's content URI — tapping
+ * this notification must resolve it through actionViewIntent's *directory*
+ * MIME type (handlePress below), not Linking.openURL's plain ACTION_VIEW
+ * used for a file, which has no equivalent "browse this" behavior for a
+ * folder.
+ */
+export async function notifyFolderDownloadComplete(folderName: string, folderUri: string | null): Promise<void> {
+  try {
+    await ensureChannel();
+    await notifee.displayNotification({
+      title: 'Relay',
+      body: `✓ ${folderName} downloaded successfully`,
+      data: folderUri ? { folderUri } : undefined,
+      android: {
+        channelId: CHANNEL_ID,
+        smallIcon: 'ic_launcher',
+        pressAction: { id: folderUri ? OPEN_DOWNLOAD_FOLDER_ACTION : 'default' },
+      },
+    });
+  } catch (err) {
+    console.warn('Could not show the folder-download-complete notification.', err);
+  }
+}
+
 async function handlePress(detail: { notification?: { data?: Record<string, unknown> } }): Promise<void> {
-  const contentUri = detail.notification?.data?.contentUri;
+  const data = detail.notification?.data;
+  const contentUri = data?.contentUri;
+  const folderUri = data?.folderUri;
   if (typeof contentUri === 'string') {
     await Linking.openURL(contentUri).catch(() => undefined);
+  } else if (typeof folderUri === 'string') {
+    await ReactNativeBlobUtil.android.actionViewIntent(folderUri, DIRECTORY_MIME_TYPE, undefined).catch(() => undefined);
   }
 }
 

@@ -28,10 +28,12 @@
  * this UX-polish milestone's scope (CLAUDE.md Rule 2).
  */
 
+import { Platform } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
-import { downloadedFilePath } from './downloadExistence';
+import { downloadedFilePath, downloadedFolderContentUri, MEDIASTORE_MIN_SDK } from './downloadExistence';
 
 const DEFAULT_MIME_TYPE = 'application/octet-stream';
+const DIRECTORY_MIME_TYPE = 'vnd.android.document/directory';
 
 /**
  * Rejects if no installed app can handle the file's MIME type.
@@ -59,4 +61,35 @@ const DEFAULT_MIME_TYPE = 'application/octet-stream';
  */
 export async function openDownloadedFile(fileName: string, mimeType: string | null): Promise<void> {
   await ReactNativeBlobUtil.android.actionViewIntent(downloadedFilePath(fileName), mimeType || DEFAULT_MIME_TYPE, undefined);
+}
+
+/**
+ * "Open" action for a completed folder download (P13.1, Issue 2) — a
+ * folder's row always shows this once every child file's downloaded, exactly
+ * like FileRow's own canOpen/onOpen (see FilesScreen), rather than a
+ * disabled receipt or a re-download button.
+ *
+ * Deliberately does not reuse openDownloadedFile: that function hands a
+ * *file* path to actionViewIntent, which wraps it through this app's own
+ * FileProvider — the right shape for "give another app these bytes to
+ * read," but not for "browse this folder's contents," which only a real
+ * DocumentsProvider intent (downloadedFolderContentUri) satisfies. Passing
+ * that content:// URI straight through is safe here: actionViewIntent's own
+ * native implementation only wraps a path via FileProvider when it does
+ * *not* already start with "content://" (see
+ * ReactNativeBlobUtilImpl.actionViewIntent), so this URI reaches
+ * startActivity() unmodified, exactly as constructed.
+ *
+ * Only offered on API 29+ (MEDIASTORE_MIN_SDK) — see
+ * downloadedFolderContentUri's own doc comment for why a folder downloaded
+ * on an older device has no public-storage location for a file manager to
+ * browse to in the first place. Rejects on that older-OS case so the caller
+ * (FilesScreen.handleOpenFolder) surfaces the same kind of inline error a
+ * failed file Open already does, rather than silently doing nothing.
+ */
+export async function openDownloadedFolder(folderName: string): Promise<void> {
+  if (Number(Platform.Version) < MEDIASTORE_MIN_SDK) {
+    throw new Error('Opening a downloaded folder needs Android 10 or later.');
+  }
+  await ReactNativeBlobUtil.android.actionViewIntent(downloadedFolderContentUri(folderName), DIRECTORY_MIME_TYPE, undefined);
 }

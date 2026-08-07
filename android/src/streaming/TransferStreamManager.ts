@@ -31,17 +31,20 @@
  * FilesScreen — froze until its detail screen was visited).
  */
 
-import { PermissionsAndroid } from 'react-native';
+import { PermissionsAndroid, Platform } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
 import { getApiConfig } from '../api/config';
-import { cancelTransfer } from '../api/endpoints/transfers';
+import { cancelTransfer, listTransferRequests, listTransfers } from '../api/endpoints/transfers';
+import { getFolderFiles } from '../api/endpoints/folders';
 import { ApiError } from '../api/client';
 import { TransferResponse } from '../api/types';
 import { SessionManager } from '../session/SessionManager';
+import { deriveFolderDownloadStatus } from '../files/folderDownloadStatus';
+import { downloadedFolderContentUri, MEDIASTORE_MIN_SDK } from '../files/downloadExistence';
 import { downloadFile, isStreamCancelError, publishDownload, StreamTask, uploadFile } from './blobUtil';
 import { clearUploadSource, getUploadSource } from './uploadSourceRegistry';
 import { startTransferNotification, stopTransferNotification, updateTransferNotification } from './foregroundService';
-import { notifyDownloadComplete } from './downloadNotification';
+import { notifyDownloadComplete, notifyFolderDownloadComplete } from './downloadNotification';
 import { StreamState } from './types';
 
 type Listener = () => void;
@@ -94,6 +97,58 @@ function downloadRelativePath(transfer: TransferResponse): string {
 
 function downloadStagingPath(relativePath: string): string {
   return `${ReactNativeBlobUtil.fs.dirs.DocumentDir}/Downloads/${relativePath}`;
+}
+
+/**
+ * Fires exactly one "folder downloaded" notification (P13.1, Issue 3) once
+ * every child of `transfer`'s shared folder has completed, instead of the
+ * per-child notifyDownloadComplete a folder download used to produce one of
+ * for every single file it contained. Reuses deriveFolderDownloadStatus
+ * (files/folderDownloadStatus.ts) — the same aggregate-status logic
+ * FilesScreen's folder row already relies on — against freshly-fetched
+ * state rather than anything cached here, since this module has no local
+ * view of the folder's other children.
+ *
+ * Only ever observes "all completed" on the *last* child to finish: every
+ * child's Transfer row already exists as 'in_progress' the moment
+ * FilesScreen.handleFolderDownload proposes it (auto-accepted, per M11), so
+ * an earlier child's completion always still finds at least one sibling not
+ * yet 'completed' here. No separate "already notified this folder" guard is
+ * needed on top of that — the one-active-stream-at-a-time invariant this
+ * module documents above means these checks never run concurrently for two
+ * children of the same folder.
+ *
+ * A failed sibling permanently withholds this notification for the whole
+ * folder (deriveFolderDownloadStatus never reports 'completed' once any
+ * child has 'failed') — deliberate: a partially-failed folder download
+ * should not be announced as a success.
+ */
+async function notifyIfFolderComplete(transfer: TransferResponse): Promise<void> {
+  const folderId = transfer.shared_folder_id;
+  if (folderId == null) {
+    return;
+  }
+  try {
+    const [children, requests, transfers] = await Promise.all([
+      getFolderFiles(folderId),
+      listTransferRequests(),
+      listTransfers(),
+    ]);
+    const status = deriveFolderDownloadStatus(children, requests, transfers);
+    if (status.kind !== 'completed') {
+      return;
+    }
+    // The backend always builds a folder child's folder_relative_path as
+    // "<shared_folder.folder_name>/<relative_path>" (see
+    // backend/app/services/transfer_service.py's _resolve_download_naming),
+    // so its own first path segment already is the folder's display name —
+    // no need for a separate GET /folders round trip just to look it up.
+    const folderName = transfer.folder_relative_path?.split('/')[0] ?? transfer.file_name;
+    const folderUri = Number(Platform.Version) >= MEDIASTORE_MIN_SDK ? downloadedFolderContentUri(folderName) : null;
+    await notifyFolderDownloadComplete(folderName, folderUri);
+  } catch (err) {
+    console.warn('Could not determine whether the folder download finished.', err);
+  }
 }
 
 export const TransferStreamManager = {
@@ -209,7 +264,11 @@ export const TransferStreamManager = {
       await activeTask.promise;
       if (transfer.direction === 'send') {
         const contentUri = await publishDownload(downloadStagingPath(relativePath), relativePath);
-        await notifyDownloadComplete(transfer.file_name, contentUri);
+        if (transfer.shared_folder_id != null) {
+          await notifyIfFolderComplete(transfer);
+        } else {
+          await notifyDownloadComplete(transfer.file_name, contentUri);
+        }
       }
       if (state?.transferId === transfer.id) {
         setState({ ...state, status: 'completed', bytesTransferred: state.totalBytes });

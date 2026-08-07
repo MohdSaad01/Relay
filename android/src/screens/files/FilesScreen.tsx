@@ -15,7 +15,7 @@ import { useFolderFilesMap } from '../../files/useFolderFilesMap';
 import { deriveDownloadStatus, FileDownloadStatus } from '../../files/downloadStatus';
 import { deriveFolderDownloadStatus, FolderDownloadStatus } from '../../files/folderDownloadStatus';
 import { useDownloadExistence } from '../../files/useDownloadExistence';
-import { openDownloadedFile } from '../../files/downloadActions';
+import { openDownloadedFile, openDownloadedFolder } from '../../files/downloadActions';
 import { useTransferRequests } from '../../transfers/useTransferRequests';
 import { useTransfers } from '../../transfers/useTransfers';
 import { getFolderFiles } from '../../api/endpoints/folders';
@@ -87,6 +87,11 @@ export function FilesScreen() {
   const [openErrors, setOpenErrors] = useState<Record<number, string>>({});
   const [requestingFolderIds, setRequestingFolderIds] = useState<Record<number, boolean>>({});
   const [folderRequestErrors, setFolderRequestErrors] = useState<Record<number, string>>({});
+  // Keyed separately from openErrors (files) and folderRequestErrors (the
+  // folder's own download-request failures) — a folder id and a file id are
+  // independent numeric spaces, so sharing either of those dicts could
+  // surface the wrong row's error under a coincidental id collision.
+  const [folderOpenErrors, setFolderOpenErrors] = useState<Record<number, string>>({});
   // useTransferRequests/useTransfers/useSharedFiles/useSharedFolders each
   // already fetch once on mount, and a screen's first focus coincides with
   // that same mount — so the immediate refresh below is only needed from the
@@ -241,6 +246,15 @@ export function FilesScreen() {
         delete next[folder.id];
         return next;
       });
+      // Clear any stale "couldn't open" message from a prior completed
+      // download of this folder, matching handleDownload's own openErrors
+      // reset for a single file — a fresh download attempt makes it
+      // irrelevant.
+      setFolderOpenErrors(prev => {
+        const next = { ...prev };
+        delete next[folder.id];
+        return next;
+      });
       try {
         const children = await getFolderFiles(folder.id);
         if (children.length === 0) {
@@ -276,6 +290,28 @@ export function FilesScreen() {
     },
     [requests, transfers, refreshRequests, refreshTransfers],
   );
+
+  /**
+   * "Open" action for a folder row whose download has completed (P13.1,
+   * Issue 2) — mirrors handleOpen's file counterpart exactly, just against
+   * openDownloadedFolder/folderOpenErrors instead of
+   * openDownloadedFile/openErrors.
+   */
+  const handleOpenFolder = useCallback(async (folder: AvailableFolderResponse) => {
+    setFolderOpenErrors(prev => {
+      const next = { ...prev };
+      delete next[folder.id];
+      return next;
+    });
+    try {
+      await openDownloadedFolder(folder.folder_name);
+    } catch {
+      setFolderOpenErrors(prev => ({
+        ...prev,
+        [folder.id]: 'Could not open this folder. It may have been moved, deleted, or need a different app.',
+      }));
+    }
+  }, []);
 
   if (loading || foldersLoading) {
     return (
@@ -315,8 +351,10 @@ export function FilesScreen() {
               folder={item.data}
               requesting={requestingFolderIds[item.data.id] ?? false}
               requestError={folderRequestErrors[item.data.id]}
+              openError={folderOpenErrors[item.data.id]}
               status={deriveFolderDownloadStatus(folderFilesMap[item.data.id] ?? [], requests, transfers)}
               onDownload={() => handleFolderDownload(item.data)}
+              onOpen={() => handleOpenFolder(item.data)}
             />
           ) : (
             <FileRow
@@ -365,17 +403,21 @@ function downloadButtonLabel(requesting: boolean, status: FileDownloadStatus): s
   }
 }
 
+// P13.1 (Issue 1): deliberately reports no progress counts — a folder's
+// button reads exactly like an ordinary file's ("Download" / "Downloading..."
+// / "Retry"), never "(1)", "(0/1)", or "(1/1)". FolderDownloadStatus still
+// carries completedCount/totalCount (folderDownloadStatus.ts) for internal
+// use — e.g. deciding when a folder is fully 'completed' — just not for
+// display here.
 function folderDownloadButtonLabel(requesting: boolean, status: FolderDownloadStatus): string {
   if (requesting) return 'Downloading...';
   switch (status.kind) {
     case 'in_progress':
-      return `Downloading... (${status.completedCount}/${status.totalCount})`;
+      return 'Downloading...';
     case 'failed':
       return 'Retry';
-    case 'completed':
-      return `Downloaded (${status.totalCount})`;
     default:
-      return status.totalCount > 0 ? `Download (${status.totalCount})` : 'Download';
+      return 'Download';
   }
 }
 
@@ -444,17 +486,29 @@ function FolderRow({
   folder,
   requesting,
   requestError,
+  openError,
   status,
   onDownload,
+  onOpen,
 }: {
   folder: AvailableFolderResponse;
   requesting: boolean;
   requestError?: string;
+  openError?: string;
   status: FolderDownloadStatus;
   onDownload: () => void;
+  onOpen: () => void;
 }) {
   const disabled = requesting || status.kind === 'in_progress';
   const itemLabel = `${folder.file_count} item${folder.file_count === 1 ? '' : 's'}`;
+  // P13.1 (Issue 2): a fully-downloaded folder offers "Open" exactly like a
+  // completed file's canOpen/onOpen (FileRow above) — status.kind only ever
+  // reports 'completed' once every child has (deriveFolderDownloadStatus),
+  // so there is no separate on-device existence check to fold in here the
+  // way FileRow's canOpen does (folderDownloadStatus.ts documents that as an
+  // accepted limitation).
+  const canOpen = status.kind === 'completed';
+  const errorMessage = requestError ?? (canOpen ? openError : undefined);
 
   return (
     <View style={styles.row}>
@@ -465,11 +519,17 @@ function FolderRow({
         <Text style={styles.meta}>
           {itemLabel} · {formatFileSize(folder.total_size)}
         </Text>
-        {requestError && <Text style={styles.rowError}>{requestError}</Text>}
+        {errorMessage && <Text style={styles.rowError}>{errorMessage}</Text>}
       </View>
-      <Pressable style={styles.downloadButton} onPress={onDownload} disabled={disabled}>
-        <Text style={styles.downloadButtonText}>{folderDownloadButtonLabel(requesting, status)}</Text>
-      </Pressable>
+      {canOpen ? (
+        <Pressable style={[styles.downloadButton, styles.downloadButtonDone]} onPress={onOpen}>
+          <Text style={styles.downloadButtonText}>Open</Text>
+        </Pressable>
+      ) : (
+        <Pressable style={styles.downloadButton} onPress={onDownload} disabled={disabled}>
+          <Text style={styles.downloadButtonText}>{folderDownloadButtonLabel(requesting, status)}</Text>
+        </Pressable>
+      )}
     </View>
   );
 }

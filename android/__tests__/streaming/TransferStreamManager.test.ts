@@ -3,17 +3,20 @@ jest.mock('../../src/streaming/foregroundService');
 jest.mock('../../src/streaming/downloadNotification');
 jest.mock('../../src/streaming/uploadSourceRegistry');
 jest.mock('../../src/api/endpoints/transfers');
+jest.mock('../../src/api/endpoints/folders');
 jest.mock('../../src/session/SessionManager');
 
+import { Platform } from 'react-native';
 import { TransferStreamManager } from '../../src/streaming/TransferStreamManager';
 import { downloadFile, isStreamCancelError, publishDownload, uploadFile } from '../../src/streaming/blobUtil';
 import {
   startTransferNotification,
   stopTransferNotification,
 } from '../../src/streaming/foregroundService';
-import { notifyDownloadComplete } from '../../src/streaming/downloadNotification';
+import { notifyDownloadComplete, notifyFolderDownloadComplete } from '../../src/streaming/downloadNotification';
 import { getUploadSource } from '../../src/streaming/uploadSourceRegistry';
-import { cancelTransfer } from '../../src/api/endpoints/transfers';
+import { cancelTransfer, listTransferRequests, listTransfers } from '../../src/api/endpoints/transfers';
+import { getFolderFiles } from '../../src/api/endpoints/folders';
 import { SessionManager } from '../../src/session/SessionManager';
 import { clearApiConfig, setApiConfig } from '../../src/api/config';
 import { ApiError } from '../../src/api/client';
@@ -23,8 +26,12 @@ const mockDownloadFile = downloadFile as jest.Mock;
 const mockUploadFile = uploadFile as jest.Mock;
 const mockPublishDownload = publishDownload as jest.Mock;
 const mockNotifyDownloadComplete = notifyDownloadComplete as jest.Mock;
+const mockNotifyFolderDownloadComplete = notifyFolderDownloadComplete as jest.Mock;
 const mockGetUploadSource = getUploadSource as jest.Mock;
 const mockCancelTransfer = cancelTransfer as jest.Mock;
+const mockListTransferRequests = listTransferRequests as jest.Mock;
+const mockListTransfers = listTransfers as jest.Mock;
+const mockGetFolderFiles = getFolderFiles as jest.Mock;
 const mockIsStreamCancelError = isStreamCancelError as jest.Mock;
 
 const sendTransfer: TransferResponse = {
@@ -76,10 +83,17 @@ beforeEach(() => {
   // PermissionsAndroid warns "works only for Android platform" under Jest's
   // default (iOS-like) test Platform — expected noise, not a real failure.
   jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+  jest.spyOn(Platform, 'Version', 'get').mockReturnValue(29);
   mockIsStreamCancelError.mockImplementation(
     (err: unknown) => err instanceof Error && err.name === 'ReactNativeBlobUtilCanceledFetch',
   );
   mockPublishDownload.mockResolvedValue(null);
+  // Only exercised by a folder-child transfer (shared_folder_id set) — most
+  // tests in this file never touch these, but a default keeps the ones that
+  // do from needing to configure every one individually.
+  mockListTransferRequests.mockResolvedValue([]);
+  mockListTransfers.mockResolvedValue([]);
+  mockGetFolderFiles.mockResolvedValue([]);
   setApiConfig({ baseUrl: 'http://desktop:8000/api/v1', sessionToken: 'tok' });
 });
 
@@ -138,6 +152,61 @@ test('P13: a folder child transfer stages/publishes at its full folder_relative_
   expect(mockPublishDownload).toHaveBeenCalledWith(
     expect.stringContaining('University Notes/Semester 1/DBMS.pdf'),
     'University Notes/Semester 1/DBMS.pdf',
+  );
+});
+
+test('P13.1: a folder child does not fire the per-file notification, completed or not', async () => {
+  mockDownloadFile.mockReturnValue(makeTask(Promise.resolve()));
+  const folderChild: TransferResponse = {
+    ...sendTransfer,
+    id: 901,
+    shared_file_id: 5,
+    shared_folder_id: 77,
+    file_name: 'DBMS.pdf',
+    folder_relative_path: 'University Notes/DBMS.pdf',
+  };
+  // Folder still has an incomplete sibling, so deriveFolderDownloadStatus
+  // won't report 'completed' either — neither notification should fire.
+  mockGetFolderFiles.mockResolvedValue([
+    { id: 5, relative_path: 'DBMS.pdf', file_size: 1000, mime_type: null },
+    { id: 6, relative_path: 'Syllabus.pdf', file_size: 500, mime_type: null },
+  ]);
+  mockListTransfers.mockResolvedValue([{ ...folderChild, status: 'completed' }]);
+
+  await TransferStreamManager.start(folderChild);
+
+  expect(mockNotifyDownloadComplete).not.toHaveBeenCalled();
+  expect(mockNotifyFolderDownloadComplete).not.toHaveBeenCalled();
+});
+
+test('P13.1: the last folder child to complete fires exactly one folder notification', async () => {
+  mockDownloadFile.mockReturnValue(makeTask(Promise.resolve()));
+  const lastChild: TransferResponse = {
+    ...sendTransfer,
+    id: 902,
+    shared_file_id: 6,
+    shared_folder_id: 77,
+    file_name: 'Syllabus.pdf',
+    folder_relative_path: 'University Notes/Syllabus.pdf',
+  };
+  mockGetFolderFiles.mockResolvedValue([
+    { id: 5, relative_path: 'DBMS.pdf', file_size: 1000, mime_type: null },
+    { id: 6, relative_path: 'Syllabus.pdf', file_size: 500, mime_type: null },
+  ]);
+  // Both children now show as completed Transfers -- this one and the
+  // sibling that finished earlier.
+  mockListTransfers.mockResolvedValue([
+    { ...sendTransfer, id: 900, shared_file_id: 5, status: 'completed' },
+    { ...lastChild, status: 'completed' },
+  ]);
+
+  await TransferStreamManager.start(lastChild);
+
+  expect(mockNotifyDownloadComplete).not.toHaveBeenCalled();
+  expect(mockNotifyFolderDownloadComplete).toHaveBeenCalledTimes(1);
+  expect(mockNotifyFolderDownloadComplete).toHaveBeenCalledWith(
+    'University Notes',
+    expect.stringContaining('University%20Notes'),
   );
 });
 

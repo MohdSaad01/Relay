@@ -1,6 +1,11 @@
 import { Linking } from 'react-native';
+import ReactNativeBlobUtil from 'react-native-blob-util';
 import notifee, { EventType } from '@notifee/react-native';
-import { __resetNotificationChannelForTests, notifyDownloadComplete } from '../../src/streaming/downloadNotification';
+import {
+  __resetNotificationChannelForTests,
+  notifyDownloadComplete,
+  notifyFolderDownloadComplete,
+} from '../../src/streaming/downloadNotification';
 
 const mockCreateChannel = notifee.createChannel as jest.Mock;
 const mockDisplayNotification = notifee.displayNotification as jest.Mock;
@@ -129,6 +134,59 @@ test('the background event handler also opens the content URI on press', async (
   });
 
   expect(Linking.openURL).toHaveBeenCalledWith('content://media/downloads/1');
+});
+
+// P13.1 (Issue 3)
+test('notifyFolderDownloadComplete includes the folder URI as data and a press action that opens it', async () => {
+  await notifyFolderDownloadComplete('University Notes', 'content://com.android.externalstorage.documents/document/x');
+
+  expect(mockDisplayNotification).toHaveBeenCalledWith(
+    expect.objectContaining({
+      title: 'Relay',
+      body: '✓ University Notes downloaded successfully',
+      data: { folderUri: 'content://com.android.externalstorage.documents/document/x' },
+      android: expect.objectContaining({
+        pressAction: { id: 'open-download-folder' },
+      }),
+    }),
+  );
+});
+
+test('notifyFolderDownloadComplete falls back to a plain press action when no folder URI is available', async () => {
+  await notifyFolderDownloadComplete('University Notes', null);
+
+  expect(mockDisplayNotification).toHaveBeenCalledWith(
+    expect.objectContaining({
+      data: undefined,
+      android: expect.objectContaining({ pressAction: { id: 'default' } }),
+    }),
+  );
+});
+
+test('pressing a folder notification opens the folder via actionViewIntent with the directory MIME type, not Linking', async () => {
+  foregroundHandler({
+    type: EventType.PRESS,
+    detail: { notification: { data: { folderUri: 'content://com.android.externalstorage.documents/document/x' } } },
+  });
+  await Promise.resolve();
+
+  expect(ReactNativeBlobUtil.android.actionViewIntent).toHaveBeenCalledWith(
+    'content://com.android.externalstorage.documents/document/x',
+    'vnd.android.document/directory',
+    undefined,
+  );
+  expect(Linking.openURL).not.toHaveBeenCalled();
+});
+
+test('a file notification\'s contentUri still wins over Linking and never touches actionViewIntent', async () => {
+  foregroundHandler({
+    type: EventType.PRESS,
+    detail: { notification: { data: { contentUri: 'content://media/downloads/1' } } },
+  });
+  await Promise.resolve();
+
+  expect(Linking.openURL).toHaveBeenCalledWith('content://media/downloads/1');
+  expect(ReactNativeBlobUtil.android.actionViewIntent).not.toHaveBeenCalled();
 });
 
 test('notifyDownloadComplete swallows a displayNotification failure instead of throwing', async () => {

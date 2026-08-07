@@ -7,6 +7,7 @@ from app.models import (  # noqa: F401 (import registers models on Base.metadata
     Device,
     DeviceSession,
     SharedFile,
+    SharedFolder,
     Transfer,
 )
 

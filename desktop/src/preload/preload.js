@@ -10,6 +10,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("relay", {
   selectFiles: () => ipcRenderer.invoke("dialog:selectFiles"),
   selectDirectory: () => ipcRenderer.invoke("dialog:selectDirectory"),
+  selectFolders: () => ipcRenderer.invoke("dialog:selectFolders"),
   showInFolder: (filePath) => ipcRenderer.invoke("shell:showInFolder", filePath),
 
   getVersion: () => ipcRenderer.invoke("app:getVersion"),

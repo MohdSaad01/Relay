@@ -13,6 +13,7 @@ from app.services.exceptions import ConflictError, NotFoundError, ValidationErro
 from app.services.shared_file_service import SharedFileService
 from app.services.transfer_manager import TransferManager, TransferRequestStatus
 from app.services.transfer_service import TransferService
+from app.services.upload_batch_registry import UploadBatchRegistry
 from tests.repositories.conftest import make_device
 
 
@@ -23,7 +24,7 @@ def _make_file(tmp_path: Path, name: str = "report.pdf", content: bytes = b"cont
 
 
 def _service(db_session: Session) -> TransferService:
-    return TransferService(db_session, TransferManager())
+    return TransferService(db_session, TransferManager(), UploadBatchRegistry())
 
 
 def _register_device(db_session: Session, identifier: str = "device-uuid-1") -> Device:
@@ -152,6 +153,137 @@ def test_request_transfer_upload_raises_when_device_removed_meanwhile(db_session
 
     with pytest.raises(NotFoundError):
         service.request_transfer(device, TransferDirection.RECEIVE, None, "photo.jpg", 2048)
+
+
+# --- request_transfer: folder download (P13) ------------------------------------
+
+
+def test_request_transfer_download_of_folder_child_carries_folder_fields(
+    db_session: Session, tmp_path: Path
+) -> None:
+    from app.services.shared_folder_service import SharedFolderService
+
+    device = _register_device(db_session)
+    root = tmp_path / "University Notes"
+    (root / "Semester 1").mkdir(parents=True)
+    (root / "Semester 1" / "DBMS.pdf").write_bytes(b"notes")
+    shared_folder, _ = SharedFolderService(db_session).share_folder(str(root))
+    child = SharedFolderService(db_session).list_folder_files(shared_folder.id)[0]
+    service = _service(db_session)
+
+    request = service.request_transfer(device, TransferDirection.SEND, child.id, None, None)
+    transfer = service.get_transfer_or_raise(request.transfer_id, None)
+
+    assert transfer.shared_folder_id == shared_folder.id
+    assert transfer.folder_relative_path == "University Notes/Semester 1/DBMS.pdf"
+    assert transfer.file_name == "DBMS.pdf"
+
+
+def test_request_transfer_download_of_standalone_file_has_no_folder_fields(
+    db_session: Session, tmp_path: Path
+) -> None:
+    device = _register_device(db_session)
+    shared_file, _ = SharedFileService(db_session).share_file(_make_file(tmp_path))
+    service = _service(db_session)
+
+    request = service.request_transfer(device, TransferDirection.SEND, shared_file.id, None, None)
+    transfer = service.get_transfer_or_raise(request.transfer_id, None)
+
+    assert transfer.shared_folder_id is None
+    assert transfer.folder_relative_path is None
+
+
+# --- request_transfer: folder upload (P13) --------------------------------------
+
+
+def test_request_transfer_folder_upload_resolves_relative_path(db_session: Session) -> None:
+    device = _register_device(db_session)
+    service = _service(db_session)
+
+    request = service.request_transfer(
+        device,
+        TransferDirection.RECEIVE,
+        None,
+        None,
+        100,
+        "Semester 1/DBMS.pdf",
+        "batch-1",
+        "University Notes",
+    )
+    transfer = service.get_transfer_or_raise(request.transfer_id, None)
+
+    assert transfer.folder_relative_path == "University Notes/Semester 1/DBMS.pdf"
+    assert transfer.file_name == "DBMS.pdf"
+    assert transfer.upload_batch_id == "batch-1"
+    assert transfer.shared_folder_id is None
+
+
+def test_request_transfer_folder_upload_reuses_resolved_root_name_across_batch(
+    db_session: Session,
+) -> None:
+    """Every file in the same folder-upload batch must land under the exact
+    same (conflict-resolved) top-level folder name."""
+    device = _register_device(db_session)
+    service = _service(db_session)
+
+    first = service.request_transfer(
+        device, TransferDirection.RECEIVE, None, None, 10, "a.txt", "batch-1", "Photos"
+    )
+    second = service.request_transfer(
+        device, TransferDirection.RECEIVE, None, None, 20, "sub/b.txt", "batch-1", "Photos"
+    )
+
+    first_transfer = service.get_transfer_or_raise(first.transfer_id, None)
+    second_transfer = service.get_transfer_or_raise(second.transfer_id, None)
+    assert first_transfer.folder_relative_path == "Photos/a.txt"
+    assert second_transfer.folder_relative_path == "Photos/sub/b.txt"
+
+
+def test_request_transfer_folder_upload_requires_batch_id_and_folder_name(db_session: Session) -> None:
+    device = _register_device(db_session)
+    service = _service(db_session)
+
+    with pytest.raises(ValidationError):
+        service.request_transfer(
+            device, TransferDirection.RECEIVE, None, None, 10, "a.txt", None, "Photos"
+        )
+    with pytest.raises(ValidationError):
+        service.request_transfer(
+            device, TransferDirection.RECEIVE, None, None, 10, "a.txt", "batch-1", None
+        )
+
+
+@pytest.mark.parametrize(
+    "folder_relative_path",
+    [
+        "../evil.txt",
+        "sub/../../evil.txt",
+        "sub//evil.txt",
+        "/etc/passwd",
+        "C:\\Windows\\evil.txt",
+        "",
+    ],
+)
+def test_request_transfer_folder_upload_rejects_path_like_segment(
+    db_session: Session, folder_relative_path: str
+) -> None:
+    device = _register_device(db_session)
+    service = _service(db_session)
+
+    with pytest.raises(ValidationError):
+        service.request_transfer(
+            device, TransferDirection.RECEIVE, None, None, 10, folder_relative_path, "batch-1", "Photos"
+        )
+
+
+def test_request_transfer_folder_upload_rejects_path_like_folder_name(db_session: Session) -> None:
+    device = _register_device(db_session)
+    service = _service(db_session)
+
+    with pytest.raises(ValidationError):
+        service.request_transfer(
+            device, TransferDirection.RECEIVE, None, None, 10, "a.txt", "batch-1", "../evil"
+        )
 
 
 # --- get_request_or_raise / list_requests ---------------------------------------

@@ -2048,6 +2048,136 @@ screen/UI files were modified, consistent with this milestone's UI freeze.
 
 ---
 
+## P13 — Folder Transfer Support
+
+### Status
+
+**Completed** (feature milestone, not a bugfix pass — see note below;
+fully verified live on physical device, this session)
+
+### Summary
+
+Unlike P1–P11 above, P13 is a new-feature milestone, not a validation
+pass against an existing one: it adds whole-folder sharing, download, and
+upload on top of the existing single-file pipeline. `docs/11_File_Transfer.md`
+§6/§16 and `docs/13_Database_Design.md` §12 previously listed folder
+support as explicitly out of scope for V1; both have been updated
+alongside this milestone (`docs/11_File_Transfer.md` §6/§18,
+`docs/13_Database_Design.md` §6a/§7a/§12) to document the protocol
+actually implemented.
+
+**Design:** a shared/uploaded folder is one parent entity
+(`shared_folders`, mirroring `shared_files`) plus many ordinary child
+`SharedFile`/`Transfer` rows — no new streaming or transfer concept was
+introduced. A folder "transfer" is the client proposing N ordinary
+single-file transfers back to back and relying on the FIFO queue already
+built for concurrent single-file downloads (P11 above) to serialize them.
+This reuses the existing streaming engine, `resolve_available_path`
+conflict naming, and `ActiveStreamRegistry` unchanged.
+
+**Backend:** new `shared_folders` table and `SharedFolderService`
+(share/refresh/unshare, recursive walk via `app/utils/filesystem.
+walk_directory`, skipping symlinks, tolerating per-file stat errors);
+`shared_files`/`transfers` gain nullable `shared_folder_id`/
+`relative_path`/`folder_relative_path`/`upload_batch_id` columns; new
+`/folders` router mirrors `/files`; a new `UploadBatchRegistry`
+(`app/services/upload_batch_registry.py`) resolves one conflict-free root
+folder name per Android folder-upload batch, memoized for the batch's
+lifetime, mirroring `ActiveStreamRegistry`'s singleton pattern.
+
+**Desktop:** new "Add Folder" button/IPC channel; the shared-files table
+merges files and folders into one list (📁 icon, item count); light
+`upload_batch_id` grouping in the Transfers table.
+
+**Android:** shared folders render as one item each (📁, item count,
+aggregate "x/N downloaded" status derived from the existing per-file
+`deriveDownloadStatus`, no duplicate status logic); download proposes
+every not-yet-completed child and hands each to the existing
+`TransferStreamManager` queue; upload adds a new dependency,
+`react-native-saf-x` (justified in the design phase: the existing picker,
+`@react-native-documents/picker`, can only return a SAF tree URI with no
+API to list its contents), plus a new `folderPicker.ts` for
+pick/enumerate/materialize.
+
+### Protocol Changes
+
+- New table `shared_folders`: `id, folder_name, folder_path (unique),
+  total_size, file_count, shared_at`.
+- `shared_files` gains `shared_folder_id` (FK, `ON DELETE CASCADE`) and
+  `relative_path` (POSIX-style, relative to the folder root, excluding the
+  folder's own name) — both `NULL` for a standalone file.
+- `transfers` gains `shared_folder_id` (FK, `ON DELETE SET NULL`),
+  `folder_relative_path` (POSIX-style, **root-inclusive** — e.g.
+  `"University Notes/Semester 1/DBMS.pdf"`), and `upload_batch_id` (opaque
+  client-generated string, no FK — mirrors the existing asymmetry that an
+  Android upload never gets a `shared_files` row either).
+- New endpoints: `POST /folders`, `GET /folders`, `GET /folders/{id}`,
+  `GET /folders/{id}/files`, `POST /folders/{id}/refresh`,
+  `DELETE /folders/{id}` — mirror `/files` exactly, including the
+  dual-audience desktop/Android split on `GET /folders` and
+  `GET /folders/{id}/files`.
+- `POST /transfers/requests` gains three optional fields
+  (`folder_relative_path`, `upload_batch_id`, `upload_folder_name`),
+  meaningful only for a `receive` request that is one file of an Android
+  folder upload — every existing single-file call is unaffected.
+- Wire-format rule: every relative path, either direction, is always
+  forward-slash POSIX-style; each client converts to its own OS separator
+  locally.
+
+### Verification
+
+- `pytest` (backend): 339 passed, 2 skipped — 52 new tests covering
+  `SharedFolderService`, `TransferService`'s folder-upload validation,
+  `UploadBatchRegistry`, the `/folders` API surface, and end-to-end
+  folder download/upload streaming.
+- `npx tsc --noEmit` / `npx jest` (android): clean / 182 passed — 21 new
+  tests covering `folderDownloadStatus`, `useSharedFolders`,
+  `folderPicker`, and the blob/existence/stream-manager relative-path
+  extensions.
+- `ruff check` / `eslint`: clean.
+- **Live, on the connected physical device (RMX3997), this session — see
+  `docs/15_QA_NOTEBOOK.md`'s Milestone P13 entry for the full investigation
+  and the three defects it found and fixed (a backend `Content-Disposition`
+  crash on non-Latin-1 filenames, and two `react-native-saf-x`/
+  `react-native-blob-util` incompatibilities in the folder-upload path):**
+  - Full protocol proven end-to-end over HTTP first (real nested folders —
+    unicode name, hidden file, zero-byte file, empty subfolder — shared,
+    paired, listed, downloaded, and a separate real folder uploaded — with
+    duplicate-folder-name conflict resolution and a 250-file batch)
+    against the real running backend, then reproduced through the actual
+    installed app's UI on the real device: a real 7-file nested folder
+    downloaded correctly (hierarchy, unicode name, hidden file, zero-byte
+    file all confirmed byte-for-byte via `adb shell find`, landing under
+    the public `Download/Relay/` tree via MediaStore's nested
+    `RELATIVE_PATH` — the single highest-risk item flagged during design),
+    a real empty folder correctly staged privately only, and a real
+    4-file nested folder picked and uploaded from the device, landing
+    correctly on the desktop.
+
+### Known Limitations
+
+- Folder upload's SAF picker requires a persisted URI grant (worked
+  around a live device-specific `react-native-saf-x` defect — see QA
+  notebook) that is never explicitly released, and each picked file is
+  copied to local cache before upload (works around a live
+  `react-native-blob-util` incompatibility) rather than true zero-copy
+  streaming — both accepted V1 trade-offs, detailed in the QA notebook
+  entry.
+- Retrying an interrupted **folder download** skips already-completed
+  children (reuses the existing per-file `deriveDownloadStatus`); retrying
+  an interrupted **folder upload** has no equivalent skip-check and may
+  create `(1)`-suffixed duplicates of files that already landed — matches
+  V1's existing no-resume limitation, not built out further.
+- An empty shared folder is recreated in Android's private staging
+  directory only; MediaStore has no way to represent an empty public
+  directory (a platform limitation, not a Relay defect).
+- A plain single-file download/upload and "Open" were not independently
+  re-driven through the live UI in this session beyond what happened
+  organically (pairing, discovery, and the Transfers list all exercised
+  unmodified code paths) — recommended as a final quick manual spot-check.
+
+---
+
 # 4. Bug Classification
 
 Critical

@@ -82,8 +82,18 @@ function setState(next: StreamState): void {
 // browses to. It's just where bytes land while the stream is in flight;
 // start() moves the finished file into public storage via publishDownload
 // once the download completes. See blobUtil.ts's publishDownload for why.
-function downloadStagingPath(fileName: string): string {
-  return `${ReactNativeBlobUtil.fs.dirs.DocumentDir}/Downloads/${fileName}`;
+//
+// downloadRelativePath (P13) is transfer.folder_relative_path when set (a
+// folder child, e.g. "University Notes/Semester 1/DBMS.pdf") or otherwise
+// just transfer.file_name (the pre-P13, single-file shape) — either way,
+// react-native-blob-util's `.config({ path })` is expected to create any
+// missing intermediate directories itself when writing the response.
+function downloadRelativePath(transfer: TransferResponse): string {
+  return transfer.folder_relative_path ?? transfer.file_name;
+}
+
+function downloadStagingPath(relativePath: string): string {
+  return `${ReactNativeBlobUtil.fs.dirs.DocumentDir}/Downloads/${relativePath}`;
 }
 
 export const TransferStreamManager = {
@@ -170,12 +180,14 @@ export const TransferStreamManager = {
 
     const headers = { Authorization: `Bearer ${sessionToken}` };
 
+    const relativePath = downloadRelativePath(transfer);
+
     try {
       if (transfer.direction === 'send') {
         activeTask = downloadFile(
           `${baseUrl}/transfers/${transfer.id}/download`,
           headers,
-          downloadStagingPath(transfer.file_name),
+          downloadStagingPath(relativePath),
           transfer.file_size,
           onProgress,
         );
@@ -196,7 +208,7 @@ export const TransferStreamManager = {
 
       await activeTask.promise;
       if (transfer.direction === 'send') {
-        const contentUri = await publishDownload(downloadStagingPath(transfer.file_name), transfer.file_name);
+        const contentUri = await publishDownload(downloadStagingPath(relativePath), relativePath);
         await notifyDownloadComplete(transfer.file_name, contentUri);
       }
       if (state?.transferId === transfer.id) {

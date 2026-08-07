@@ -19,6 +19,7 @@ from app.services.shared_file_service import SharedFileService
 from app.services.transfer_manager import TransferManager
 from app.services.transfer_service import TransferService
 from app.services.transfer_stream_service import TransferStreamService
+from app.services.upload_batch_registry import UploadBatchRegistry
 from tests.repositories.conftest import make_device
 
 
@@ -40,7 +41,7 @@ def _accept_download(db_session: Session, device: Device, file_path: str) -> Tra
     """Named `_accept_download` for parity with `_accept_upload` below, even
     though a download is now auto-accepted by request_transfer itself."""
     shared_file, _ = SharedFileService(db_session).share_file(file_path)
-    transfer_service = TransferService(db_session, TransferManager())
+    transfer_service = TransferService(db_session, TransferManager(), UploadBatchRegistry())
     request = transfer_service.request_transfer(device, TransferDirection.SEND, shared_file.id, None, None)
     return transfer_service.get_transfer_or_raise(request.transfer_id, None)
 
@@ -50,7 +51,7 @@ def _accept_upload(
 ) -> Transfer:
     """Named `_accept_upload` for parity with `_accept_download` above, even
     though an upload is now auto-accepted by request_transfer itself."""
-    transfer_service = TransferService(db_session, TransferManager())
+    transfer_service = TransferService(db_session, TransferManager(), UploadBatchRegistry())
     request = transfer_service.request_transfer(
         device, TransferDirection.RECEIVE, None, file_name, file_size
     )
@@ -238,6 +239,32 @@ def test_receive_upload_renames_on_conflict_and_updates_file_name(
     assert updated.file_name == "photo (1).jpg"
     assert (tmp_path / "photo (1).jpg").read_bytes() == b"file-content"
     assert (tmp_path / "photo.jpg").read_bytes() == b"existing file"  # untouched
+
+
+def test_receive_upload_folder_child_writes_to_nested_path(db_session: Session, tmp_path: Path) -> None:
+    """P13: a folder-upload child's folder_relative_path drives nested
+    directory creation, not the flat download_directory root."""
+    device = _register_device(db_session)
+    _set_download_directory(db_session, tmp_path)
+    transfer_service = TransferService(db_session, TransferManager(), UploadBatchRegistry())
+    request = transfer_service.request_transfer(
+        device,
+        TransferDirection.RECEIVE,
+        None,
+        None,
+        len(b"notes-content"),
+        "Semester 1/DBMS.pdf",
+        "batch-1",
+        "University Notes",
+    )
+    transfer = transfer_service.get_transfer_or_raise(request.transfer_id, None)
+    service = _stream_service(db_session)
+
+    updated = _run_upload(service, transfer, [b"notes-content"])
+
+    assert updated.status is TransferStatus.COMPLETED
+    saved = tmp_path / "University Notes" / "Semester 1" / "DBMS.pdf"
+    assert saved.read_bytes() == b"notes-content"
 
 
 def test_receive_upload_too_many_bytes_marks_failed_and_discards_temp_file(

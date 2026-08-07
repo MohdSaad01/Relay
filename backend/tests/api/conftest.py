@@ -8,12 +8,17 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.api.dependencies import get_active_stream_registry, get_transfer_manager
+from app.api.dependencies import (
+    get_active_stream_registry,
+    get_transfer_manager,
+    get_upload_batch_registry,
+)
 from app.database.base import Base
 from app.database.session import get_db
 from app.main import app
 from app.services.active_stream_registry import ActiveStreamRegistry
 from app.services.transfer_manager import TransferManager
+from app.services.upload_batch_registry import UploadBatchRegistry
 from tests.repositories.conftest import db_session, make_device  # noqa: F401
 
 
@@ -62,6 +67,11 @@ def _build_test_client(client_address: tuple[str, int]) -> Generator[TestClient,
     # from a previous test.
     test_active_stream_registry = ActiveStreamRegistry()
     app.dependency_overrides[get_active_stream_registry] = lambda: test_active_stream_registry
+    # Same reasoning again: UploadBatchRegistry (P13) is a process-wide
+    # singleton in production, so a fresh instance per test client keeps a
+    # resolved folder-upload name from one test leaking into another.
+    test_upload_batch_registry = UploadBatchRegistry()
+    app.dependency_overrides[get_upload_batch_registry] = lambda: test_upload_batch_registry
     test_client = TestClient(app, client=client_address)
     test_client.session_factory = test_session_local  # type: ignore[attr-defined]
 

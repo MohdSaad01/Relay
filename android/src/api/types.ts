@@ -66,6 +66,29 @@ export interface AvailableFileResponse {
   shared_at: string;
 }
 
+// --- Shared folders (app/schemas/shared_folder.py, P13) ---------------------
+
+/** Sanitized view of a shared folder returned to a paired Android device (no folder_path). */
+export interface AvailableFolderResponse {
+  id: number;
+  folder_name: string;
+  total_size: number;
+  file_count: number;
+  shared_at: string;
+}
+
+/**
+ * One child file of a shared folder (GET /folders/{id}/files), sanitized for
+ * Android (no file_path). relative_path is POSIX-style (forward-slash),
+ * relative to the folder root — NOT including the folder's own name.
+ */
+export interface AvailableFolderFileResponse {
+  id: number;
+  relative_path: string;
+  file_size: number;
+  mime_type: string | null;
+}
+
 // --- Transfers (app/schemas/transfer.py, app/models/enums.py) --------------
 
 /** Direction is framed from the desktop's perspective: SEND = Android downloads, RECEIVE = Android uploads. */
@@ -81,12 +104,19 @@ export type TransferStatus = 'in_progress' | 'completed' | 'failed' | 'cancelled
  * Payload for POST /transfers/requests.
  * `shared_file_id` is required for direction "send"; `file_name`/`file_size`
  * are required for direction "receive" — enforced server-side, not here.
+ *
+ * folder_relative_path/upload_batch_id/upload_folder_name (P13) are only
+ * ever set together, for one file of an Android folder upload — left unset
+ * for an ordinary flat single-file upload or a "send" request.
  */
 export interface TransferRequestCreate {
   direction: TransferDirection;
   shared_file_id?: number | null;
   file_name?: string | null;
   file_size?: number | null;
+  folder_relative_path?: string | null;
+  upload_batch_id?: string | null;
+  upload_folder_name?: string | null;
 }
 
 /** A pending or already-decided transfer request, before any Transfer row exists. */
@@ -102,6 +132,8 @@ export interface TransferRequestResponse {
   created_at: string;
   expires_at: string;
   transfer_id: number | null;
+  folder_relative_path?: string | null;
+  upload_batch_id?: string | null;
 }
 
 /** A persisted Transfer row. */
@@ -118,4 +150,8 @@ export interface TransferResponse {
   failure_reason: string | null;
   started_at: string;
   completed_at: string | null;
+  /** P13: set only when this transfer belongs to a folder download/upload — see TransferRequestCreate. */
+  shared_folder_id?: number | null;
+  folder_relative_path?: string | null;
+  upload_batch_id?: string | null;
 }

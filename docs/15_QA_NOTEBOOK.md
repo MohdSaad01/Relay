@@ -1942,6 +1942,198 @@ Three separate, independently verified defects:
 
 ---
 
+# Milestone P13 — Folder Transfer Support: Three Live-Verified Defects Found and Fixed
+
+## Problem
+
+P13 added whole-folder sharing/download/upload on top of the existing
+single-file pipeline (see `docs/14_Testing_Plan.md`'s P13 entry for the
+full feature description and protocol design). The milestone's own
+instructions required every part of it verified live on the connected
+physical device (RMX3997, USB-connected, backend reached over the phone's
+own hotspot) before being considered done, not just covered by the
+(all-green) `pytest`/`jest` suites. That live pass surfaced three real
+defects the automated suites — which never happen to exercise a non-ASCII
+filename, an Android 16/ColorOS device, or an actual `react-native-saf-x`
+tree-child URI — had no way to catch.
+
+## Investigation
+
+Backend (`uvicorn app.main:app --host 0.0.0.0 --port 8000`), the Electron
+desktop app (auto-detecting the already-running backend in dev mode), and
+Metro were started locally; `adb reverse tcp:8081 tcp:8081` tunneled Metro
+to the USB-connected RMX3997. The full protocol (share, pair, list, propose,
+download, upload) was first exercised directly over HTTP — from the PC
+against its own loopback for desktop-perspective calls, and against its own
+LAN-facing hotspot IP (`10.169.164.233`) for Android-perspective calls,
+since `get_requesting_device`'s loopback trust check treats *any* loopback
+caller as the desktop regardless of bearer token, a real gotcha hit while
+building the verification script itself. Real nested folders (unicode
+names, hidden files, zero-byte files, empty subfolders) were shared from
+real temp directories; a real device was paired through the actual
+`/pairing/*` handshake. Once the backend side was fully proven, the actual
+installed app was driven via `adb shell input tap` against
+`adb exec-out screencap` screenshots, and a PowerShell `System.Drawing`
+screen capture drove the Electron desktop window the same way.
+
+- **Defect 1 — unicode filenames crashed every download, not just folder
+  children.** The first folder-download pass included a file named
+  `日本語ファイル.txt` (an explicit P13 edge case). Its `GET
+  /transfers/{id}/download` call returned nothing; `backend/logs`
+  (`uvicorn` stdout) showed `UnicodeEncodeError: 'latin-1' codec can't
+  encode characters in position 22-28` inside Starlette's
+  `Response.init_headers`, raised while constructing
+  `_WriteTimeoutStreamingResponse` — before a single byte was ever sent.
+  Traced to `app/api/v1/transfers.py`'s `download_transfer`, which built
+  `Content-Disposition: attachment; filename="<raw name>"` with the file's
+  real name interpolated verbatim; HTTP header values are Latin-1 only.
+  This line predates P13 (Milestone 12) — any *standalone* shared file with
+  a non-Latin-1 name would have hit the exact same crash; P13 is what
+  finally exercised it, since none of the existing standalone-file tests or
+  manual passes had ever used a non-ASCII file name.
+- **Defect 2 — `react-native-saf-x`'s `listFiles()` rejected its own
+  `openDocumentTree()` root URI.** Tapping "Upload a Folder", picking a
+  real folder, and granting the system permission dialog reliably produced
+  "Could not open the folder picker." on this device. Temporary
+  `console.error` instrumentation in `TransferListScreen.handleUploadFolder`
+  (added, used, then removed) captured the real rejection via `adb logcat`:
+  `Error: Unsupported Uri content://com.android.externalstorage.documents/
+  tree/primary%3ADownload%2FTripPhotos`, thrown from
+  `EfficientDocumentHelper.getDocumentUri` inside the `react-native-saf-x`
+  native module (`node_modules/react-native-saf-x/android/.../
+  EfficientDocumentHelper.java:107`). Reading that method's branching logic
+  did not conclusively explain why the tree-root URI it had just returned
+  itself was rejected — it plausibly depends on how ColorOS resolves
+  `DocumentsContract.isTreeUri`/persisted-permission lookups differently
+  from stock Android, which cannot be confirmed without native-side
+  debugging. Empirically: calling `openDocumentTree(true)` (persisting the
+  grant) instead of `openDocumentTree(false)` made the exact same
+  `listFiles()` call succeed immediately, reproduced twice.
+- **Defect 3 — `react-native-blob-util`'s `wrap()` silently read zero bytes
+  from a `react-native-saf-x` URI.** With Defect 2 fixed, folder
+  enumeration worked and all 4 proposed uploads reached the backend, but
+  every one failed with the backend's own `"Upload ended before the
+  declared file size was reached."` (`0 B / <size> B` on every row) — no
+  client-side error at all, meaning the HTTP request body was simply
+  empty. This is the exact risk flagged in the P13 design doc before
+  implementation: `uploadFile()`'s `ReactNativeBlobUtil.wrap(fileUri)` had
+  only ever been proven against `@react-native-documents/picker`'s
+  single-file `content://` URIs, not `react-native-saf-x`'s tree-child
+  ones — the two libraries construct/hold their SAF URIs differently, and
+  RNBU's native reader does not handle the second shape.
+
+## Root Cause
+
+Three independent defects, none caused by the same code path:
+
+1. **`Content-Disposition` header built from a raw, unescaped filename**
+   (`app/api/v1/transfers.py`) — a pre-existing Milestone 12 defect,
+   latent until a non-Latin-1 filename was actually exercised. Affects
+   both standalone files and folder children identically. **Fixed.**
+2. **`react-native-saf-x`'s temporary (non-persisted) grant not resolving
+   correctly for its own `listFiles()` on this device/Android
+   version/OEM skin.** Root cause is inside third-party native code and
+   not further diagnosable from JS/React Native alone. **Worked around**
+   (persisting the grant, which is not otherwise a feature this app needs
+   — see Remaining Limitations).
+3. **`react-native-blob-util`'s `wrap()` cannot stream bytes from a
+   `react-native-saf-x`-issued URI.** Also third-party, also not
+   diagnosable further from JS alone. **Worked around** (materializing to
+   a local cache file via `react-native-saf-x`'s own `copyFile` before
+   handing the path to `wrap()`).
+
+## Solution
+
+- `backend/app/api/v1/transfers.py`: new `_content_disposition(file_name)`
+  helper builds an RFC 6266-compliant header — a Latin-1-safe ASCII
+  fallback in the legacy `filename` parameter, plus the real UTF-8 name
+  percent-encoded in `filename*=UTF-8''...` for any client that reads it.
+  `download_transfer` calls this instead of interpolating the raw name.
+  Neither value is actually load-bearing for this app's own correctness —
+  the Android client names its saved file from the transfer's own JSON
+  metadata, not this header — but it must not crash regardless, and a
+  standards-compliant value is the right default.
+- `android/src/streaming/folderPicker.ts`: `pickAndEnumerateFolder()` calls
+  `openDocumentTree(true)` instead of `openDocumentTree(false)`.
+- `android/src/streaming/folderPicker.ts`: new
+  `materializeToLocalCache(sourceUri, fileName)` copies a SAF-picked file
+  to `${CacheDir}/relay-upload-<timestamp>-<name>` via `react-native-saf-x`'s
+  own `copyFile` (a native SAF-to-plain-file copy, not a JS-bridged
+  base64 round-trip) and returns the resulting plain path.
+  `TransferListScreen.handleUploadFolder` calls it for each picked file
+  before `registerUploadSource`, so `uploadFile()`/`wrap()` always receives
+  the same URI shape it already works with.
+
+## Verification
+
+- `pytest` (backend): 339 passed, including a new regression test
+  (`test_download_transfer_with_unicode_file_name_streams_successfully`).
+- `npx tsc --noEmit` / `npx jest` (android): clean / 182 passed, including
+  new regression tests for `openDocumentTree(true)` and
+  `materializeToLocalCache`.
+- Live device (RMX3997), this session, not deferred:
+  - Shared a real nested "University Notes" folder (7 files: 2 levels
+    deep, one unicode name, one hidden dotfile, one zero-byte file) plus a
+    real empty folder, from the actual Electron desktop app's already-
+    running backend.
+  - Downloaded "University Notes" from the real installed app by tapping
+    its Download button: all 7 files streamed and completed, row label
+    correctly read "Downloaded (7)". `adb shell find` confirmed the exact
+    hierarchy landed under the public `Download/Relay/University Notes/`
+    via MediaStore's nested `RELATIVE_PATH`, including the unicode name
+    and the zero-byte file, byte-for-byte correct — the single highest
+    risk item flagged in the P13 design doc, confirmed working end to end
+    on real hardware.
+  - Downloaded the empty folder: confirmed created at the private staging
+    path (`run-as com.relay.mobile find files/Downloads`), per the
+    documented platform limitation that MediaStore cannot represent an
+    empty directory.
+  - Picked and uploaded a real nested folder ("TripPhotos": 4 files, 2
+    levels deep) from the real installed app via "Upload a Folder": all 4
+    completed after the Defect 2/3 fixes (all four failed identically
+    before them, confirming both defects were genuinely reproduced and
+    genuinely fixed, not coincidental). `find`/`cat` on the desktop side
+    confirmed the exact hierarchy and byte-for-byte content.
+  - A second folder upload using the same requested folder name
+    (`Vacation Photos`, proposed directly via the verified backend
+    protocol) landed at `Vacation Photos (1)/`, confirming
+    `UploadBatchRegistry`'s conflict resolution live.
+  - 250-file folder upload (proposed and streamed via the verified
+    protocol) completed in ~10.5s (~42ms/file), all 250 landing correctly.
+
+## Remaining Limitations
+
+- **Defect 2's true root cause (why the unpersisted grant fails
+  `listFiles()` on this device) was not found**, only worked around.
+  Persisting the grant is not otherwise needed by this app (V1 has no
+  resume support, so there is nothing to resume into) and is never
+  explicitly released, so one persisted grant accumulates per folder a
+  user picks — an accepted trade-off (Android's per-app persisted-grant
+  cap is in the hundreds).
+- **Defect 3's workaround (materialize-to-cache) is not a true stream** —
+  the whole file is copied to local storage before upload starts, and the
+  cache copy is never explicitly deleted afterward (same tolerance for
+  unswept temp files the backend's own upload path already documents).
+  For very large files this trades memory/IO efficiency for correctness;
+  acceptable for V1, worth revisiting if folder uploads of large media
+  files become a real workflow.
+- Regression checks for existing single-file download/upload, "Open", and
+  concurrent-download queueing were **not independently re-driven through
+  the live UI** in this session beyond what naturally happened along the
+  way (pairing, discovery, and the Transfers list all exercised
+  pre-existing, unmodified code paths throughout, and the full pre-existing
+  automated suites stayed green) — a quick manual spot-check of a plain
+  single-file download/upload and "Open" is recommended before considering
+  P13 fully closed out.
+- The device accumulated test artifacts from this session: a pushed
+  `/storage/emulated/0/Download/TripPhotos/` folder, and several
+  `Live Verify *`-named paired-device rows (created via direct pairing API
+  calls to drive backend verification without a QR scan) that were removed
+  via `DELETE /api/v1/devices/{id}` — the real device's own pairing (used
+  for the on-device UI testing above) was left intact.
+
+---
+
 # Milestone P11 — Concurrent Download Freeze Investigation (Physical Device)
 
 ## Problem

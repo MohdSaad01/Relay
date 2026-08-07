@@ -111,6 +111,23 @@ def test_download_transfer_streams_file_bytes(
     assert data["bytes_transferred"] == 12
 
 
+def test_download_transfer_with_unicode_file_name_streams_successfully(
+    client: TestClient, desktop_client: TestClient, tmp_path: Path
+) -> None:
+    """Regression test: a non-Latin-1 file name previously crashed header
+    encoding entirely (UnicodeEncodeError building Content-Disposition)
+    before any response was sent -- found live during P13 verification."""
+    shared_file = _share_file(desktop_client, _make_file(tmp_path, name="日本語.txt", content=b"content"))
+    _pair_device_with_token(client)
+    transfer = _accept_download(client, shared_file["id"], "valid-token")
+
+    response = client.get(f"/api/v1/transfers/{transfer['id']}/download", headers=_auth_headers())
+
+    assert response.status_code == 200
+    assert response.content == b"content"
+    assert "filename*=UTF-8''%E6%97%A5%E6%9C%AC%E8%AA%9E.txt" in response.headers["content-disposition"]
+
+
 def test_download_transfer_without_token_is_rejected(
     client: TestClient, desktop_client: TestClient, tmp_path: Path
 ) -> None:
@@ -268,3 +285,84 @@ def test_upload_transfer_wrong_direction_returns_409(
     )
 
     assert response.status_code == 409
+
+
+# --- Folder download/upload, end to end (P13) -------------------------------------
+
+
+def test_download_folder_child_streams_bytes_and_carries_folder_fields(
+    client: TestClient, desktop_client: TestClient, tmp_path: Path
+) -> None:
+    root = tmp_path / "University Notes"
+    (root / "Semester 1").mkdir(parents=True)
+    (root / "Semester 1" / "DBMS.pdf").write_bytes(b"dbms-notes")
+    shared_folder = desktop_client.post(
+        "/api/v1/folders", json={"folder_path": str(root)}
+    ).json()["data"]
+    child = desktop_client.get(f"/api/v1/folders/{shared_folder['id']}/files").json()["data"][0]
+    _pair_device_with_token(client)
+
+    proposed = client.post(
+        "/api/v1/transfers/requests",
+        json={"direction": "send", "shared_file_id": child["id"]},
+        headers=_auth_headers(),
+    ).json()["data"]
+    transfer_id = proposed["transfer_id"]
+
+    response = client.get(f"/api/v1/transfers/{transfer_id}/download", headers=_auth_headers())
+
+    assert response.status_code == 200
+    assert response.content == b"dbms-notes"
+
+    transfer = desktop_client.get(f"/api/v1/transfers/{transfer_id}").json()["data"]
+    assert transfer["shared_folder_id"] == shared_folder["id"]
+    assert transfer["folder_relative_path"] == "University Notes/Semester 1/DBMS.pdf"
+
+
+def test_upload_folder_children_recreate_hierarchy_on_disk(
+    client: TestClient, desktop_client: TestClient, tmp_path: Path
+) -> None:
+    """Android picks a local folder and uploads it: two files proposed under
+    the same upload_batch_id/upload_folder_name must land in the same
+    recreated directory tree on the desktop."""
+    _set_download_directory(desktop_client, tmp_path)
+    _pair_device_with_token(client)
+
+    first = client.post(
+        "/api/v1/transfers/requests",
+        json={
+            "direction": "receive",
+            "file_name": "DBMS.pdf",
+            "file_size": len(b"dbms-notes"),
+            "folder_relative_path": "Semester 1/DBMS.pdf",
+            "upload_batch_id": "batch-1",
+            "upload_folder_name": "University Notes",
+        },
+        headers=_auth_headers(),
+    ).json()["data"]
+    second = client.post(
+        "/api/v1/transfers/requests",
+        json={
+            "direction": "receive",
+            "file_name": "Trees.pdf",
+            "file_size": len(b"trees"),
+            "folder_relative_path": "Semester 2/DSA/Trees.pdf",
+            "upload_batch_id": "batch-1",
+            "upload_folder_name": "University Notes",
+        },
+        headers=_auth_headers(),
+    ).json()["data"]
+
+    client.post(
+        f"/api/v1/transfers/{first['transfer_id']}/upload",
+        content=b"dbms-notes",
+        headers=_auth_headers(),
+    )
+    client.post(
+        f"/api/v1/transfers/{second['transfer_id']}/upload",
+        content=b"trees",
+        headers=_auth_headers(),
+    )
+
+    assert (tmp_path / "University Notes" / "Semester 1" / "DBMS.pdf").read_bytes() == b"dbms-notes"
+    assert (tmp_path / "University Notes" / "Semester 2" / "DSA" / "Trees.pdf").read_bytes() == b"trees"

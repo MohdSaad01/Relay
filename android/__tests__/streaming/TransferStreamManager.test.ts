@@ -117,6 +117,30 @@ test('start() on a send transfer publishes the finished download to public stora
   expect(mockPublishDownload).toHaveBeenCalledWith(expect.stringContaining('report.pdf'), 'report.pdf');
 });
 
+test('P13: a folder child transfer stages/publishes at its full folder_relative_path, not just file_name', async () => {
+  mockDownloadFile.mockReturnValue(makeTask(Promise.resolve()));
+  const folderChild: TransferResponse = {
+    ...sendTransfer,
+    id: 900,
+    file_name: 'DBMS.pdf',
+    folder_relative_path: 'University Notes/Semester 1/DBMS.pdf',
+  };
+
+  await TransferStreamManager.start(folderChild);
+
+  expect(mockDownloadFile).toHaveBeenCalledWith(
+    expect.any(String),
+    expect.any(Object),
+    expect.stringContaining('University Notes/Semester 1/DBMS.pdf'),
+    1000,
+    expect.any(Function),
+  );
+  expect(mockPublishDownload).toHaveBeenCalledWith(
+    expect.stringContaining('University Notes/Semester 1/DBMS.pdf'),
+    'University Notes/Semester 1/DBMS.pdf',
+  );
+});
+
 test('start() on a send transfer shows a download-complete notification with the published content URI', async () => {
   mockDownloadFile.mockReturnValue(makeTask(Promise.resolve()));
   mockPublishDownload.mockResolvedValue('content://media/downloads/1');

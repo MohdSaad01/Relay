@@ -35,6 +35,22 @@ export function isStreamCancelError(err: unknown): boolean {
   return err instanceof Error && err.name === CANCEL_ERROR_NAME;
 }
 
+/**
+ * P13, empty-folder edge case: a shared folder with zero files has nothing
+ * to stream, so nothing would otherwise ever run for it on Android — no
+ * download call, no publishDownload. MediaStore fundamentally has no way to
+ * represent an empty directory (it only ever tracks files via their
+ * RELATIVE_PATH column), so there is no public-storage equivalent of this;
+ * this creates the folder in the app's own private staging area only
+ * (DocumentDir/Downloads/<folderName>), as a visible, best-effort
+ * acknowledgement that the folder was "downloaded" even though it holds
+ * nothing. Never throws — this is a courtesy action, not a correctness one.
+ */
+export async function ensureEmptyFolderStaged(folderName: string): Promise<void> {
+  const path = `${ReactNativeBlobUtil.fs.dirs.DocumentDir}/Downloads/${folderName}`;
+  await ReactNativeBlobUtil.fs.mkdir(path).catch(() => undefined);
+}
+
 /** Status codes are documented in backend/README.md's "Transfer API" streaming table. */
 function describeStreamError(status: number): string {
   switch (status) {
@@ -106,34 +122,43 @@ async function isActuallyComplete(err: unknown, destPath: string, expectedBytes:
 }
 
 /**
- * Finds a display name under Downloads/Relay that isn't already taken,
- * resolving a conflict (if any) with the same "name (1).ext", "name (2).ext"
- * pattern the backend already uses for uploads
- * (`backend/app/utils/filesystem.resolve_available_path`). Downloads have no
- * equivalent on the Android side: `copyToMediaStore` is asked to insert
- * `fileName` verbatim every time, and the same file name is a genuinely
- * reachable case (re-downloading the same shared file, or two different
- * shared files that happen to share a basename) — see docs/15_QA_NOTEBOOK.md's
- * Milestone P3 entry.
+ * Finds a display name under Downloads/Relay (or, for a folder download —
+ * P13 — Downloads/Relay/<folder path>) that isn't already taken, resolving a
+ * conflict (if any) with the same "name (1).ext", "name (2).ext" pattern the
+ * backend already uses for uploads (`backend/app/utils/filesystem.
+ * resolve_available_path`). Downloads have no equivalent on the Android
+ * side: `copyToMediaStore` is asked to insert `fileName` verbatim every
+ * time, and the same file name is a genuinely reachable case
+ * (re-downloading the same shared file, or two different shared files that
+ * happen to share a basename) — see docs/15_QA_NOTEBOOK.md's Milestone P3
+ * entry.
+ *
+ * `relativePath` is the full path under Relay/ (e.g. "University
+ * Notes/Semester 1/DBMS.pdf" for a folder child, or just "photo.jpg" for a
+ * standalone file) — only its own basename is ever renamed; the directory
+ * portion is preserved as-is.
  *
  * Checked via a raw filesystem read under the public Downloads directory,
  * the same technique (and same unverified-on-a-physical-device caveat)
  * `files/downloadExistence.ts` already relies on for its own existence
  * check.
  */
-async function resolveAvailableMediaStoreName(fileName: string): Promise<string> {
+async function resolveAvailableMediaStoreName(relativePath: string): Promise<string> {
   const dir = `${ReactNativeBlobUtil.fs.dirs.LegacyDownloadDir}/${PUBLIC_DOWNLOAD_FOLDER}`;
-  const exists = (name: string) => ReactNativeBlobUtil.fs.exists(`${dir}/${name}`).catch(() => false);
+  const exists = (path: string) => ReactNativeBlobUtil.fs.exists(`${dir}/${path}`).catch(() => false);
 
-  if (!(await exists(fileName))) {
-    return fileName;
+  if (!(await exists(relativePath))) {
+    return relativePath;
   }
 
+  const lastSlash = relativePath.lastIndexOf('/');
+  const dirPrefix = lastSlash >= 0 ? relativePath.slice(0, lastSlash + 1) : '';
+  const fileName = lastSlash >= 0 ? relativePath.slice(lastSlash + 1) : relativePath;
   const dotIndex = fileName.lastIndexOf('.');
   const base = dotIndex > 0 ? fileName.slice(0, dotIndex) : fileName;
   const ext = dotIndex > 0 ? fileName.slice(dotIndex) : '';
   for (let counter = 1; ; counter++) {
-    const candidate = `${base} (${counter})${ext}`;
+    const candidate = `${dirPrefix}${base} (${counter})${ext}`;
     if (!(await exists(candidate))) {
       return candidate;
     }
@@ -146,6 +171,16 @@ async function resolveAvailableMediaStoreName(fileName: string): Promise<string>
  * or media/file search) into the public Downloads/Relay folder via
  * MediaStore, then removes the staging copy. Requires no storage permission
  * — MediaStore.Downloads is writable by any app on API 29+ without one.
+ *
+ * `relativePath` (P13) is the full path under Relay/ — e.g. "University
+ * Notes/Semester 1/DBMS.pdf" for a folder child, or just "photo.jpg" for a
+ * standalone file (the pre-P13 shape). Only the trailing segment is ever
+ * renamed on conflict; MediaStore's RELATIVE_PATH column natively supports
+ * nested subdirectories under Downloads/ on API 29+, so `parentFolder` here
+ * carries the full directory portion, not just the fixed "Relay" constant —
+ * **unverified on a physical device until Physical Verification**; if
+ * MediaStore rejects a nested parentFolder in practice, the fallback is
+ * flattening into `Relay/<folder> - <file>` naming instead.
  *
  * Best-effort and never throws: the transfer has already fully received its
  * bytes by the time this runs (it's only ever called after a download's
@@ -177,19 +212,23 @@ async function resolveAvailableMediaStoreName(fileName: string): Promise<string>
  * `files/downloadExistence.ts` already use) and comparing its size against
  * the staged file's — only a byte-for-byte match counts as success.
  */
-export async function publishDownload(stagingPath: string, fileName: string): Promise<string | null> {
+export async function publishDownload(stagingPath: string, relativePath: string): Promise<string | null> {
   if (Number(Platform.Version) < MEDIASTORE_MIN_SDK) {
     return null;
   }
   try {
     const stagedSize = Number((await ReactNativeBlobUtil.fs.stat(stagingPath)).size);
-    const targetName = await resolveAvailableMediaStoreName(fileName);
+    const targetRelativePath = await resolveAvailableMediaStoreName(relativePath);
+    const lastSlash = targetRelativePath.lastIndexOf('/');
+    const targetName = lastSlash >= 0 ? targetRelativePath.slice(lastSlash + 1) : targetRelativePath;
+    const targetSubdir = lastSlash >= 0 ? targetRelativePath.slice(0, lastSlash) : '';
+    const parentFolder = targetSubdir ? `${PUBLIC_DOWNLOAD_FOLDER}/${targetSubdir}` : PUBLIC_DOWNLOAD_FOLDER;
     const contentUri = await ReactNativeBlobUtil.MediaCollection.copyToMediaStore(
-      { name: targetName, parentFolder: PUBLIC_DOWNLOAD_FOLDER, mimeType: 'application/octet-stream' },
+      { name: targetName, parentFolder, mimeType: 'application/octet-stream' },
       'Download',
       stagingPath,
     );
-    if (!(await isPublishedAt(targetName, stagedSize))) {
+    if (!(await isPublishedAt(targetRelativePath, stagedSize))) {
       console.warn(
         'copyToMediaStore reported success but the file is missing or incomplete at its public destination; leaving it in private storage.',
       );
@@ -215,9 +254,9 @@ export async function publishDownload(stagingPath: string, fileName: string): Pr
  * a `copyToMediaStore` call that had genuinely and correctly published the
  * file to `LegacyDownloadDir`/Relay.
  */
-async function isPublishedAt(fileName: string, expectedBytes: number): Promise<boolean> {
+async function isPublishedAt(relativePath: string, expectedBytes: number): Promise<boolean> {
   const dir = `${ReactNativeBlobUtil.fs.dirs.LegacyDownloadDir}/${PUBLIC_DOWNLOAD_FOLDER}`;
-  const stat = await ReactNativeBlobUtil.fs.stat(`${dir}/${fileName}`).catch(() => null);
+  const stat = await ReactNativeBlobUtil.fs.stat(`${dir}/${relativePath}`).catch(() => null);
   return stat != null && Number(stat.size) === expectedBytes;
 }
 

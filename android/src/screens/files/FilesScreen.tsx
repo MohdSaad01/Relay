@@ -10,16 +10,21 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSharedFiles } from '../../files/useSharedFiles';
+import { useSharedFolders } from '../../files/useSharedFolders';
+import { useFolderFilesMap } from '../../files/useFolderFilesMap';
 import { deriveDownloadStatus, FileDownloadStatus } from '../../files/downloadStatus';
+import { deriveFolderDownloadStatus, FolderDownloadStatus } from '../../files/folderDownloadStatus';
 import { useDownloadExistence } from '../../files/useDownloadExistence';
 import { openDownloadedFile } from '../../files/downloadActions';
 import { useTransferRequests } from '../../transfers/useTransferRequests';
 import { useTransfers } from '../../transfers/useTransfers';
+import { getFolderFiles } from '../../api/endpoints/folders';
 import { getTransfer, proposeTransfer } from '../../api/endpoints/transfers';
 import { ApiError } from '../../api/client';
-import { AvailableFileResponse } from '../../api/types';
+import { AvailableFileResponse, AvailableFolderResponse } from '../../api/types';
 import { formatFileSize } from '../../utils/formatFileSize';
 import { TransferStreamManager } from '../../streaming/TransferStreamManager';
+import { ensureEmptyFolderStaged } from '../../streaming/blobUtil';
 
 const POLL_INTERVAL_MS = 2000;
 // Deliberately longer than the transfer-progress poll above: the shared-file
@@ -31,6 +36,10 @@ const POLL_INTERVAL_MS = 2000;
 // Milestone P2 entry for the alternatives considered (a push channel would be
 // the "correct" fix but is out of scope for a UX-polish milestone).
 const FILES_POLL_INTERVAL_MS = 5000;
+
+type SharedItem =
+  | { kind: 'file'; data: AvailableFileResponse }
+  | { kind: 'folder'; data: AvailableFolderResponse };
 
 /**
  * Browses the desktop's shared file list and lets the user *initiate* a
@@ -51,21 +60,39 @@ const FILES_POLL_INTERVAL_MS = 5000;
  * function's own fileExists handling), the row's primary action is always
  * the live "Open" button, matching how modern cloud-storage apps treat a
  * downloaded file as still the thing you tap, not a disabled receipt.
+ *
+ * P13: shared folders render alongside shared files as one merged,
+ * newest-first list — a folder is always exactly one row here regardless of
+ * how many files it contains. Downloading a folder proposes every one of its
+ * child files (each an ordinary SharedFile under the hood) and hands each to
+ * the same TransferStreamManager queue that already serializes concurrent
+ * single-file downloads — see handleFolderDownload below.
  */
 export function FilesScreen() {
   const { files, loading, refreshing, error, refresh, refreshSilently } = useSharedFiles();
+  const {
+    folders,
+    loading: foldersLoading,
+    refreshing: foldersRefreshing,
+    error: foldersError,
+    refresh: refreshFolders,
+    refreshSilently: refreshFoldersSilently,
+  } = useSharedFolders();
+  const folderFilesMap = useFolderFilesMap(folders);
   const { requests, refresh: refreshRequests } = useTransferRequests();
   const { transfers, refresh: refreshTransfers } = useTransfers();
   const { existence, verify } = useDownloadExistence();
   const [requestingIds, setRequestingIds] = useState<Record<number, boolean>>({});
   const [requestErrors, setRequestErrors] = useState<Record<number, string>>({});
   const [openErrors, setOpenErrors] = useState<Record<number, string>>({});
-  // useTransferRequests/useTransfers/useSharedFiles each already fetch once
-  // on mount, and a screen's first focus coincides with that same mount —
-  // so the immediate refresh below is only needed from the *second* focus
-  // onward (e.g. returning to this screen after backgrounding the app).
-  // Without this guard, every mount fired one redundant extra request per
-  // list right alongside the hook's own initial fetch.
+  const [requestingFolderIds, setRequestingFolderIds] = useState<Record<number, boolean>>({});
+  const [folderRequestErrors, setFolderRequestErrors] = useState<Record<number, string>>({});
+  // useTransferRequests/useTransfers/useSharedFiles/useSharedFolders each
+  // already fetch once on mount, and a screen's first focus coincides with
+  // that same mount — so the immediate refresh below is only needed from the
+  // *second* focus onward (e.g. returning to this screen after backgrounding
+  // the app). Without this guard, every mount fired one redundant extra
+  // request per list right alongside the hook's own initial fetch.
   const isFirstTransfersFocus = useRef(true);
   const isFirstFilesFocus = useRef(true);
 
@@ -96,15 +123,22 @@ export function FilesScreen() {
         isFirstFilesFocus.current = false;
       } else {
         refreshSilently();
+        refreshFoldersSilently();
       }
-      const timer = setInterval(refreshSilently, FILES_POLL_INTERVAL_MS);
+      const timer = setInterval(() => {
+        refreshSilently();
+        refreshFoldersSilently();
+      }, FILES_POLL_INTERVAL_MS);
       return () => clearInterval(timer);
-    }, [refreshSilently]),
+    }, [refreshSilently, refreshFoldersSilently]),
   );
 
   // Re-verifies on-device existence for every file the polled data currently
   // reports as a completed download — covers both a stale 'completed' from
   // before this screen mounted and a file deleted while it stayed open.
+  // Folder children are not covered (see folderDownloadStatus.ts's own
+  // documented limitation) — useDownloadExistence is keyed by a flat
+  // file_name and does not extend to a nested relative_path.
   useEffect(() => {
     files.forEach(file => {
       if (deriveDownloadStatus(file.id, requests, transfers).kind === 'completed') {
@@ -187,7 +221,63 @@ export function FilesScreen() {
     [verify],
   );
 
-  if (loading) {
+  /**
+   * Enumerates a shared folder's children (GET /folders/{id}/files, always
+   * fetched fresh here — not read from folderFilesMap — so a retry after an
+   * interrupted transfer sees the folder's current contents) and proposes a
+   * download for every one not already 'completed' (reusing
+   * deriveDownloadStatus per child), so retrying a partially-downloaded
+   * folder only fetches what's still missing instead of re-downloading
+   * everything and creating "(1)"-suffixed duplicates of files that already
+   * landed. Each accepted transfer is hand to TransferStreamManager exactly
+   * like a single-file download — its existing FIFO queue is what actually
+   * serializes N files behind one active stream.
+   */
+  const handleFolderDownload = useCallback(
+    async (folder: AvailableFolderResponse) => {
+      setRequestingFolderIds(prev => ({ ...prev, [folder.id]: true }));
+      setFolderRequestErrors(prev => {
+        const next = { ...prev };
+        delete next[folder.id];
+        return next;
+      });
+      try {
+        const children = await getFolderFiles(folder.id);
+        if (children.length === 0) {
+          // Empty folder: nothing to stream, so nothing would otherwise ever
+          // run for it — see ensureEmptyFolderStaged's own doc comment for
+          // why this only ever lands in private staging, never MediaStore.
+          await ensureEmptyFolderStaged(folder.folder_name);
+          return;
+        }
+        const pending = children.filter(
+          child => deriveDownloadStatus(child.id, requests, transfers).kind !== 'completed',
+        );
+        for (const child of pending) {
+          const request = await proposeTransfer({ direction: 'send', shared_file_id: child.id });
+          if (request.status === 'accepted' && request.transfer_id != null) {
+            const transfer = await getTransfer(request.transfer_id);
+            TransferStreamManager.start(transfer);
+          }
+        }
+        await Promise.all([refreshRequests(), refreshTransfers()]);
+      } catch (err) {
+        setFolderRequestErrors(prev => ({
+          ...prev,
+          [folder.id]: err instanceof ApiError ? err.message : 'Could not request this download.',
+        }));
+      } finally {
+        setRequestingFolderIds(prev => {
+          const next = { ...prev };
+          delete next[folder.id];
+          return next;
+        });
+      }
+    },
+    [requests, transfers, refreshRequests, refreshTransfers],
+  );
+
+  if (loading || foldersLoading) {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" />
@@ -195,34 +285,57 @@ export function FilesScreen() {
     );
   }
 
+  const items: SharedItem[] = [
+    ...files.map(file => ({ kind: 'file' as const, data: file })),
+    ...folders.map(folder => ({ kind: 'folder' as const, data: folder })),
+  ].sort((a, b) => new Date(b.data.shared_at).getTime() - new Date(a.data.shared_at).getTime());
+
   return (
     <View style={styles.container}>
-      {error && (
+      {(error || foldersError) && (
         <View style={styles.errorBanner}>
-          <Text style={styles.errorText}>{error}</Text>
+          <Text style={styles.errorText}>{error || foldersError}</Text>
         </View>
       )}
       <FlatList
-        data={files}
-        keyExtractor={item => String(item.id)}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
-        renderItem={({ item }) => (
-          <FileRow
-            file={item}
-            requesting={requestingIds[item.id] ?? false}
-            requestError={requestErrors[item.id]}
-            openError={openErrors[item.id]}
-            status={deriveDownloadStatus(item.id, requests, transfers, existence[item.file_name])}
-            onDownload={() => handleDownload(item)}
-            onOpen={() => handleOpen(item)}
+        data={items}
+        keyExtractor={item => (item.kind === 'file' ? `file-${item.data.id}` : `folder-${item.data.id}`)}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing || foldersRefreshing}
+            onRefresh={() => {
+              refresh();
+              refreshFolders();
+            }}
           />
-        )}
+        }
+        renderItem={({ item }) =>
+          item.kind === 'folder' ? (
+            <FolderRow
+              folder={item.data}
+              requesting={requestingFolderIds[item.data.id] ?? false}
+              requestError={folderRequestErrors[item.data.id]}
+              status={deriveFolderDownloadStatus(folderFilesMap[item.data.id] ?? [], requests, transfers)}
+              onDownload={() => handleFolderDownload(item.data)}
+            />
+          ) : (
+            <FileRow
+              file={item.data}
+              requesting={requestingIds[item.data.id] ?? false}
+              requestError={requestErrors[item.data.id]}
+              openError={openErrors[item.data.id]}
+              status={deriveDownloadStatus(item.data.id, requests, transfers, existence[item.data.file_name])}
+              onDownload={() => handleDownload(item.data)}
+              onOpen={() => handleOpen(item.data)}
+            />
+          )
+        }
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
             <Text style={styles.empty}>No files are currently shared.</Text>
           </View>
         }
-        contentContainerStyle={files.length === 0 ? styles.emptyList : undefined}
+        contentContainerStyle={items.length === 0 ? styles.emptyList : undefined}
       />
     </View>
   );
@@ -249,6 +362,20 @@ function downloadButtonLabel(requesting: boolean, status: FileDownloadStatus): s
       return 'Retry';
     default:
       return 'Download';
+  }
+}
+
+function folderDownloadButtonLabel(requesting: boolean, status: FolderDownloadStatus): string {
+  if (requesting) return 'Downloading...';
+  switch (status.kind) {
+    case 'in_progress':
+      return `Downloading... (${status.completedCount}/${status.totalCount})`;
+    case 'failed':
+      return 'Retry';
+    case 'completed':
+      return `Downloaded (${status.totalCount})`;
+    default:
+      return status.totalCount > 0 ? `Download (${status.totalCount})` : 'Download';
   }
 }
 
@@ -309,6 +436,40 @@ function FileRow({
           <Text style={styles.downloadButtonText}>{downloadButtonLabel(requesting, status)}</Text>
         </Pressable>
       )}
+    </View>
+  );
+}
+
+function FolderRow({
+  folder,
+  requesting,
+  requestError,
+  status,
+  onDownload,
+}: {
+  folder: AvailableFolderResponse;
+  requesting: boolean;
+  requestError?: string;
+  status: FolderDownloadStatus;
+  onDownload: () => void;
+}) {
+  const disabled = requesting || status.kind === 'in_progress';
+  const itemLabel = `${folder.file_count} item${folder.file_count === 1 ? '' : 's'}`;
+
+  return (
+    <View style={styles.row}>
+      <View style={styles.rowInfo}>
+        <Text style={styles.name} numberOfLines={1}>
+          {'\u{1F4C1}'} {folder.folder_name}
+        </Text>
+        <Text style={styles.meta}>
+          {itemLabel} · {formatFileSize(folder.total_size)}
+        </Text>
+        {requestError && <Text style={styles.rowError}>{requestError}</Text>}
+      </View>
+      <Pressable style={styles.downloadButton} onPress={onDownload} disabled={disabled}>
+        <Text style={styles.downloadButtonText}>{folderDownloadButtonLabel(requesting, status)}</Text>
+      </Pressable>
     </View>
   );
 }

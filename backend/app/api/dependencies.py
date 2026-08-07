@@ -23,10 +23,15 @@ from app.services.pairing_manager import PairingManager
 from app.services.pairing_manager import get_pairing_manager as _get_pairing_manager
 from app.services.pairing_service import PairingService
 from app.services.shared_file_service import SharedFileService
+from app.services.shared_folder_service import SharedFolderService
 from app.services.transfer_manager import TransferManager
 from app.services.transfer_manager import get_transfer_manager as _get_transfer_manager
 from app.services.transfer_service import TransferService
 from app.services.transfer_stream_service import TransferStreamService
+from app.services.upload_batch_registry import UploadBatchRegistry
+from app.services.upload_batch_registry import (
+    get_upload_batch_registry as _get_upload_batch_registry,
+)
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -69,17 +74,29 @@ def get_shared_file_service(db: Annotated[Session, Depends(get_db)]) -> SharedFi
     return SharedFileService(db)
 
 
+def get_shared_folder_service(db: Annotated[Session, Depends(get_db)]) -> SharedFolderService:
+    """Provide a SharedFolderService bound to a request-scoped database session."""
+    return SharedFolderService(db)
+
+
 def get_transfer_manager() -> TransferManager:
     """Provide the process-wide TransferManager singleton (app/services/transfer_manager.py)."""
     return _get_transfer_manager()
 
 
+def get_upload_batch_registry() -> UploadBatchRegistry:
+    """Provide the process-wide UploadBatchRegistry singleton (app/services/upload_batch_registry.py)."""
+    return _get_upload_batch_registry()
+
+
 def get_transfer_service(
     db: Annotated[Session, Depends(get_db)],
     transfer_manager: Annotated[TransferManager, Depends(get_transfer_manager)],
+    upload_batch_registry: Annotated[UploadBatchRegistry, Depends(get_upload_batch_registry)],
 ) -> TransferService:
-    """Provide a TransferService bound to a request-scoped database session and the shared TransferManager."""
-    return TransferService(db, transfer_manager)
+    """Provide a TransferService bound to a request-scoped database session, the
+    shared TransferManager, and the shared UploadBatchRegistry."""
+    return TransferService(db, transfer_manager, upload_batch_registry)
 
 
 def get_active_stream_registry() -> ActiveStreamRegistry:
@@ -144,6 +161,7 @@ DeviceServiceDep = Annotated[DeviceService, Depends(get_device_service)]
 PairingServiceDep = Annotated[PairingService, Depends(get_pairing_service)]
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 SharedFileServiceDep = Annotated[SharedFileService, Depends(get_shared_file_service)]
+SharedFolderServiceDep = Annotated[SharedFolderService, Depends(get_shared_folder_service)]
 TransferServiceDep = Annotated[TransferService, Depends(get_transfer_service)]
 TransferStreamServiceDep = Annotated[TransferStreamService, Depends(get_transfer_stream_service)]
 DiscoveryServiceDep = Annotated[DiscoveryService, Depends(get_discovery_service)]

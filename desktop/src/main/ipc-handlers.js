@@ -29,6 +29,20 @@ function registerIpcHandlers({ backendManager, getMainWindow, quitApp }) {
     return result.canceled ? null : result.filePaths[0];
   });
 
+  // P13: sharing a whole folder (as opposed to dialog:selectDirectory above,
+  // which picks the single destination folder for downloads). Distinct
+  // channel rather than reusing selectDirectory since this one supports
+  // picking multiple folders at once, matching selectFiles's own
+  // multiSelections behavior for individual files.
+  ipcMain.handle("dialog:selectFolders", async () => {
+    const window = getMainWindow();
+    const result = await dialog.showOpenDialog(window, {
+      title: "Select folders to share",
+      properties: ["openDirectory", "multiSelections"],
+    });
+    return result.canceled ? [] : result.filePaths;
+  });
+
   ipcMain.handle("shell:showInFolder", (_event, filePath) => {
     shell.showItemInFolder(filePath);
   });

@@ -23,6 +23,8 @@ response by the centralized handlers in app/api/exception_handlers.py
 (Milestone 6).
 """
 
+from urllib.parse import quote
+
 import anyio
 from fastapi import APIRouter, Request, status
 from fastapi.responses import StreamingResponse
@@ -47,6 +49,30 @@ from app.services.exceptions import ConflictError
 from app.services.transfer_stream_service import TransferStreamService
 
 router = APIRouter()
+
+
+def _content_disposition(file_name: str) -> str:
+    """Build a Content-Disposition header value safe for any file name,
+    including non-Latin-1 characters (P13's "unicode filenames" edge case).
+
+    HTTP header values are Latin-1 only — a raw unicode name previously
+    crashed header encoding entirely with UnicodeEncodeError before any
+    response was ever sent (found live during P13 verification: a shared
+    file with a Japanese name made every download of it fail, whether
+    standalone or a folder child, since both paths flow through this same
+    route). RFC 6266's `filename*=UTF-8''<percent-encoded>` form carries the
+    real name for any client that understands it (react-native-blob-util,
+    browsers); the legacy `filename` parameter carries an ASCII-safe
+    fallback for anything that only reads that older parameter. Neither
+    value is actually load-bearing for this app's own correctness — the
+    Android client names its saved file from the transfer's own JSON
+    metadata (file_name/folder_relative_path), not from this header — but a
+    standards-compliant header is the right default regardless, and it must
+    not crash.
+    """
+    ascii_fallback = file_name.encode("ascii", errors="replace").decode("ascii").replace('"', "'")
+    encoded = quote(file_name, safe="")
+    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
 
 
 class _WriteTimeoutStreamingResponse(StreamingResponse):
@@ -103,7 +129,14 @@ def request_transfer(
     auto-accepted in this same call — the response already carries
     status=accepted and a transfer_id."""
     request = service.request_transfer(
-        device, body.direction, body.shared_file_id, body.file_name, body.file_size
+        device,
+        body.direction,
+        body.shared_file_id,
+        body.file_name,
+        body.file_size,
+        body.folder_relative_path,
+        body.upload_batch_id,
+        body.upload_folder_name,
     )
     response = TransferRequestResponse.model_validate(request)
     return success(response.model_dump(mode="json"), message="Transfer requested.")
@@ -176,10 +209,9 @@ def download_transfer(
         raise ConflictError(f"Transfer {transfer_id} is not in progress.")
 
     file_path = stream_service.resolve_download_source(transfer)
-    quoted_file_name = transfer.file_name.replace('"', "'")
     headers = {
         "Content-Length": str(transfer.file_size),
-        "Content-Disposition": f'attachment; filename="{quoted_file_name}"',
+        "Content-Disposition": _content_disposition(transfer.file_name),
     }
     return _WriteTimeoutStreamingResponse(
         stream_service.stream_download(transfer, file_path),

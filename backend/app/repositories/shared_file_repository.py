@@ -25,9 +25,16 @@ class SharedFileRepository(BaseRepository[SharedFile]):
         return self.db.execute(statement).scalar_one_or_none()
 
     def list_all(self, *, limit: int = 100, offset: int = 0) -> list[SharedFile]:
-        """List shared files, most recently shared first."""
+        """List top-level standalone shared files, most recently shared first.
+
+        Excludes a shared folder's child rows (shared_folder_id IS NOT NULL,
+        P13) — those only ever surface via GET /folders/{id}/files, never in
+        this flat list, per 11_File_Transfer.md's "must not display every
+        contained file individually."
+        """
         statement = (
             select(SharedFile)
+            .where(SharedFile.shared_folder_id.is_(None))
             .order_by(SharedFile.shared_at.desc())
             .limit(limit)
             .offset(offset)

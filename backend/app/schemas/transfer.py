@@ -21,12 +21,20 @@ class TransferRequestCreate(BaseModel):
     Validates structure and type only. The direction-dependent field rules
     (shared_file_id required for `send`, file_name/file_size required for
     `receive`) are enforced by TransferService, not duplicated here.
+
+    folder_relative_path/upload_batch_id/upload_folder_name (P13) are only
+    ever meaningful for `receive`, when this call is one file of an Android
+    folder upload — all three left unset for an ordinary flat single-file
+    upload or a `send` request.
     """
 
     direction: TransferDirection
     shared_file_id: int | None = None
     file_name: str | None = None
     file_size: int | None = None
+    folder_relative_path: str | None = None
+    upload_batch_id: str | None = None
+    upload_folder_name: str | None = None
 
 
 class TransferRequestResponse(BaseModel):
@@ -47,6 +55,8 @@ class TransferRequestResponse(BaseModel):
     created_at: datetime
     expires_at: datetime
     transfer_id: int | None
+    folder_relative_path: str | None = None
+    upload_batch_id: str | None = None
 
 
 class TransferResponse(BaseModel):
@@ -66,3 +76,6 @@ class TransferResponse(BaseModel):
     failure_reason: str | None
     started_at: datetime
     completed_at: datetime | None
+    shared_folder_id: int | None = None
+    folder_relative_path: str | None = None
+    upload_batch_id: str | None = None

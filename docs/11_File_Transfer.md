@@ -66,10 +66,22 @@ Users should be able to:
 
 * Select one file.
 * Select multiple files.
-* Remove files from the shared list.
-* Refresh the shared list.
+* Select a whole folder.
+* Remove files (or folders) from the shared list.
+* Refresh the shared list (or a shared folder's contents).
 
-Folder sharing is outside the scope of Version 1.
+**Folder sharing (Milestone P13):** a shared folder appears as a single
+item in the shared list, never as its individual contained files. Its
+contents (directory hierarchy, filenames, relative paths) are captured by
+walking the folder once at share time, the same point-in-time-snapshot
+philosophy `13_Database_Design.md` §6 already applies to a single shared
+file's size — not a live view. Downloading a shared folder recreates its
+exact directory hierarchy, filenames, and extensions on the receiving
+device; absolute filesystem paths are never preserved or transmitted.
+This is folder *sharing/transfer*, not folder *synchronization* — see §3:
+Relay does not watch a shared folder for changes or push updates
+automatically. Refreshing a shared folder re-walks it, matching the
+existing single-file refresh behavior.
 
 ---
 
@@ -187,9 +199,14 @@ Logs should never contain file contents.
 
 # 16. Future Enhancements
 
-Future versions may support:
+Folder transfers are implemented as of Milestone P13 (§6) — see
+`docs/14_Testing_Plan.md`'s P13 entry and `docs/15_QA_NOTEBOOK.md`'s P13
+entry for the protocol and its live verification. Retrying an interrupted
+folder *upload* does not yet skip already-completed files (a folder
+*download* does); see that Known Limitations section.
 
-* Folder transfers
+Future versions may still support:
+
 * Resume interrupted transfers
 * Parallel transfers
 * Compression
@@ -197,7 +214,7 @@ Future versions may support:
 * Bandwidth limiting
 * Integrity verification (checksums)
 
-These features are outside the scope of Version 1.
+These features remain outside the scope of Version 1.
 
 ---
 

@@ -1,3 +1,5 @@
+import { generateUuidV4 } from '../utils/uuid';
+
 /**
  * Generates a fresh device_identifier for a pairing attempt.
  *
@@ -19,13 +21,5 @@
  * that extra coupling.
  */
 export function generateDeviceIdentifier(): string {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, char => {
-    // Bitwise ops are the standard, intentional way to write this
-    // well-known UUID v4 template — not a typo'd logical operator.
-    /* eslint-disable no-bitwise */
-    const random = (Math.random() * 16) | 0;
-    const value = char === 'x' ? random : (random & 0x3) | 0x8;
-    /* eslint-enable no-bitwise */
-    return value.toString(16);
-  });
+  return generateUuidV4();
 }

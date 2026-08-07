@@ -1,6 +1,12 @@
 import { Platform } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
-import { downloadFile, isStreamCancelError, publishDownload, uploadFile } from '../../src/streaming/blobUtil';
+import {
+  downloadFile,
+  ensureEmptyFolderStaged,
+  isStreamCancelError,
+  publishDownload,
+  uploadFile,
+} from '../../src/streaming/blobUtil';
 
 function lastTask(): any {
   const fetchMock = ReactNativeBlobUtil.fetch as jest.Mock;
@@ -285,5 +291,60 @@ describe('publishDownload', () => {
       'Download',
       '/mock/documents/Downloads/report.pdf',
     );
+  });
+
+  // P13: a folder child's relativePath carries its nested directory
+  // portion, which must flow into MediaStore's parentFolder (not just the
+  // fixed "Relay" constant) so the recreated hierarchy actually lands under
+  // the right subdirectory.
+  describe('P13 folder downloads', () => {
+    test('splits a nested relativePath into name + parentFolder', async () => {
+      const contentUri = await publishDownload(
+        '/mock/documents/Downloads/Semester 1/DBMS.pdf',
+        'University Notes/Semester 1/DBMS.pdf',
+      );
+
+      expect(ReactNativeBlobUtil.MediaCollection.copyToMediaStore).toHaveBeenCalledWith(
+        { name: 'DBMS.pdf', parentFolder: 'Relay/University Notes/Semester 1', mimeType: 'application/octet-stream' },
+        'Download',
+        '/mock/documents/Downloads/Semester 1/DBMS.pdf',
+      );
+      expect(contentUri).toBe('content://media/downloads/1');
+    });
+
+    test('resolves a conflict only on the trailing file name, preserving the folder path', async () => {
+      (ReactNativeBlobUtil.fs.exists as jest.Mock).mockImplementation((path: string) =>
+        Promise.resolve(path === '/mock/downloads/Relay/University Notes/Semester 1/DBMS.pdf'),
+      );
+
+      await publishDownload(
+        '/mock/documents/Downloads/Semester 1/DBMS.pdf',
+        'University Notes/Semester 1/DBMS.pdf',
+      );
+
+      expect(ReactNativeBlobUtil.MediaCollection.copyToMediaStore).toHaveBeenCalledWith(
+        {
+          name: 'DBMS (1).pdf',
+          parentFolder: 'Relay/University Notes/Semester 1',
+          mimeType: 'application/octet-stream',
+        },
+        'Download',
+        '/mock/documents/Downloads/Semester 1/DBMS.pdf',
+      );
+    });
+  });
+});
+
+describe('ensureEmptyFolderStaged', () => {
+  test('creates the folder under the private staging directory', async () => {
+    await ensureEmptyFolderStaged('Empty Folder');
+
+    expect(ReactNativeBlobUtil.fs.mkdir).toHaveBeenCalledWith('/mock/documents/Downloads/Empty Folder');
+  });
+
+  test('never throws when mkdir fails', async () => {
+    (ReactNativeBlobUtil.fs.mkdir as jest.Mock).mockRejectedValueOnce(new Error('EEXIST'));
+
+    await expect(ensureEmptyFolderStaged('Empty Folder')).resolves.toBeUndefined();
   });
 });

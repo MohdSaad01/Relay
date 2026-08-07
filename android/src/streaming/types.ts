@@ -18,4 +18,6 @@ export interface PickedUploadFile {
   uri: string;
   name: string;
   size: number;
+  /** P13: set only for one file of a folder upload — unused by an ordinary single-file upload. */
+  relativePath?: string;
 }

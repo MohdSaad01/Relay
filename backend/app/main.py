@@ -17,6 +17,7 @@ from app.services.discovery_service import get_discovery_service
 from app.services.transfer_manager import get_transfer_manager
 from app.services.transfer_service import TransferService
 from app.services.transfer_stream_service import TransferStreamService
+from app.services.upload_batch_registry import get_upload_batch_registry
 
 settings = get_settings()
 configure_logging(settings)
@@ -33,7 +34,9 @@ def _reconcile_after_unclean_shutdown() -> None:
     """
     db = SessionLocal()
     try:
-        TransferService(db, get_transfer_manager()).reconcile_interrupted_transfers()
+        TransferService(
+            db, get_transfer_manager(), get_upload_batch_registry()
+        ).reconcile_interrupted_transfers()
         TransferStreamService(db, get_active_stream_registry()).cleanup_orphaned_upload_temp_files()
     finally:
         db.close()

@@ -114,8 +114,41 @@ rejection, metadata stat, and (added in M12) conflict-free-path resolution
 re-sharing an already-shared path refreshes the existing row instead of
 creating a duplicate (`share_file` returns `(shared_file, was_created)`).
 
-Symlinks and directories are rejected outright — Version 1 only shares
-individual regular files (`docs/11_File_Transfer.md` §6).
+Symlinks are rejected outright, and a directory is rejected by this
+service specifically — `/files` shares individual regular files only; a
+whole folder is shared via the separate `/folders` resource below
+(`docs/11_File_Transfer.md` §6, Milestone P13).
+
+## Shared Folder Infrastructure (Milestone P13)
+
+`SharedFolderService` (`app/services/shared_folder_service.py`) is
+`SharedFileService`'s counterpart for a *whole folder* shared as one item
+(`docs/13_Database_Design.md` §6a, `docs/11_File_Transfer.md` §6):
+share/list/refresh/unshare, plus `list_folder_files` for a folder's child
+manifest. Structurally identical to `SharedFileService` — validate
+(absolute, exists, not a symlink, is a directory), upsert-by-path on
+re-share — with one genuinely new piece of logic: `refresh_folder` re-walks
+the folder and *reconciles* its child `SharedFile` rows (update matched,
+insert new, delete vanished), since a folder's contents can change shape
+between shares, unlike a single file's refresh, which only ever re-stats
+one path.
+
+The walk itself is `app/utils/filesystem.walk_directory` — a pure,
+recursive generator (`os.walk(followlinks=False)`, matching the existing
+single-file symlink rejection) that computes each file's POSIX-style
+`relative_path` and lets a per-file stat failure be handled by the caller
+via an `on_stat_error` callback (mirroring `os.walk`'s own `onerror`
+parameter) rather than deciding itself whether to abort the whole share —
+`SharedFolderService` supplies a callback that logs and skips, so one
+unreadable file never fails an entire folder share.
+
+A folder's children are ordinary `SharedFile` rows
+(`shared_folder_id`/`relative_path` set) — no new streaming or transfer
+concept exists for them. They are excluded from `GET /files`'s flat list
+(`SharedFileRepository.list_all` filters `shared_folder_id IS NULL`) and
+only ever surface via `GET /folders/{id}/files`, which is what a client
+uses to enumerate what to individually propose when the user taps Download
+on a folder.
 
 ## Transfer Infrastructure
 
@@ -158,6 +191,22 @@ moment the `Transfer` row is created, not just from the proposal payload,
 per `docs/10_Security.md` §9 — if that re-validation fails (e.g. a `send`
 names a shared file that was removed in the meantime), the call raises
 `NotFoundError` and nothing is persisted.
+
+**Folder transfers (Milestone P13) reuse this exact lifecycle unchanged —
+there is no separate "propose a folder" call.** A folder download is the
+client enumerating `GET /folders/{id}/files` and calling
+`request_transfer` once per child, same as today; `_create_transfer`
+additionally derives `shared_folder_id`/`folder_relative_path` fresh from
+the shared file's own folder membership when present. A folder upload adds
+three new, all-optional `request_transfer` parameters
+(`folder_relative_path`, `upload_batch_id`, `upload_folder_name`),
+validated by a new `_validate_folder_upload_payload` (reusing the existing
+per-segment traversal-safety check, `_validate_plain_name_segment`, that
+already guards a flat upload's `file_name`) and resolved via
+`UploadBatchRegistry` (`app/services/upload_batch_registry.py`, a
+lock-guarded singleton in the same shape as `ActiveStreamRegistry`) so
+every file in one Android folder-upload batch lands under the same
+conflict-resolved root folder name.
 
 M11 does not stream bytes — the only DB-level status transition it performs
 on an accepted transfer is `in_progress -> cancelled`. Byte movement, and
@@ -443,6 +492,28 @@ rather than duplicating the row). Every route other than `GET /files` is
 desktop-only and unauthenticated, matching the `/devices`/`/settings`
 precedent — Android cannot select files or mutate the shared list.
 
+## Folders API (Milestone P13)
+
+`app/api/v1/folders.py` exposes `SharedFolderService`
+(`docs/13_Database_Design.md` §6a) over HTTP — mirrors the Shared Files API
+above exactly, with one additional dual-audience route for a folder's
+child manifest.
+
+| Endpoint | Status codes | Caller |
+|---|---|---|
+| `POST /folders` | 200/201, 400 | Desktop |
+| `GET /folders` | 200, 401 | Dual-audience (desktop: full view; Android: sanitized view) |
+| `GET /folders/{id}` | 200, 404 | Desktop |
+| `GET /folders/{id}/files` | 200, 401, 404 | Dual-audience |
+| `POST /folders/{id}/refresh` | 200, 400, 404 | Desktop |
+| `DELETE /folders/{id}` | 204, 404 | Desktop |
+
+`GET /folders/{id}/files` is what a paired Android device calls to
+enumerate a folder's children before proposing individual downloads for
+each (`POST /transfers/requests`, unchanged) — a folder is never streamed
+as a single unit. Same sanitization split as `GET /files`: the desktop
+gets `file_path` on each child, Android does not.
+
 ## Transfer API
 
 `app/api/v1/transfers.py` exposes `TransferService` (M11) and
@@ -460,6 +531,13 @@ precedent — Android cannot select files or mutate the shared list.
 already carries `status=accepted` and a `transfer_id` — for both directions,
 so there is no accept/reject/withdraw endpoint: nothing is ever left for a
 second call to decide on.
+
+**Folder uploads (Milestone P13)** use this exact same endpoint with three
+additional optional fields (`folder_relative_path`, `upload_batch_id`,
+`upload_folder_name`) — see [Transfer Infrastructure](#transfer-infrastructure)
+above. A `send`/download proposal is completely unaffected by P13; its
+`folder_relative_path`/`shared_folder_id` (if any) are derived server-side
+from the shared file's own folder membership, never supplied by the caller.
 
 **Transfers** (persisted):
 
@@ -527,6 +605,7 @@ backend/
 │   │   ├── device.py              # Device
 │   │   ├── device_session.py      # DeviceSession (table: sessions)
 │   │   ├── shared_file.py         # SharedFile
+│   │   ├── shared_folder.py       # SharedFolder (Milestone P13)
 │   │   ├── transfer.py            # Transfer
 │   │   └── app_settings.py        # AppSettings
 │   ├── repositories/
@@ -534,6 +613,7 @@ backend/
 │   │   ├── device_repository.py
 │   │   ├── device_session_repository.py
 │   │   ├── shared_file_repository.py
+│   │   ├── shared_folder_repository.py  # (Milestone P13)
 │   │   ├── transfer_repository.py
 │   │   └── app_settings_repository.py
 │   ├── services/
@@ -544,7 +624,9 @@ backend/
 │   │   ├── pairing_service.py         # Pairing handshake workflow; exposed via app/api/v1/pairing.py
 │   │   ├── auth_service.py            # Validates a DeviceSession bearer token
 │   │   ├── shared_file_service.py     # Share/list/refresh/unshare the desktop's shared file list
+│   │   ├── shared_folder_service.py   # Share/list/refresh/unshare a whole folder (Milestone P13)
 │   │   ├── transfer_manager.py        # In-memory, lock-guarded pending-transfer-request store (singleton)
+│   │   ├── upload_batch_registry.py   # In-memory, lock-guarded folder-upload root-name resolver (singleton, Milestone P13)
 │   │   ├── transfer_service.py        # Transfer lifecycle: propose (auto-accepted)/cancel; exposed via app/api/v1/transfers.py
 │   │   ├── transfer_stream_service.py # Streams bytes for an already-accepted transfer (Milestone 12)
 │   │   ├── active_stream_registry.py  # In-memory guard: one active byte stream per transfer_id (singleton)
@@ -557,6 +639,8 @@ backend/
 │   │   │                         # PairingPendingRequestResponse, PairingApproveRequest,
 │   │   │                         # PairingRejectRequest, PairingResultResponse
 │   │   ├── shared_file.py       # SharedFileResponse, AvailableFileResponse, ShareFileRequest
+│   │   ├── shared_folder.py     # SharedFolderResponse, AvailableFolderResponse, ShareFolderRequest,
+│   │   │                         # SharedFolderFileResponse, AvailableFolderFileResponse (Milestone P13)
 │   │   ├── transfer.py          # TransferRequestCreate, TransferRequestResponse, TransferResponse
 │   │   └── discovery.py         # DiscoveryAnnouncePayload (UDP), DiscoveryStatusResponse
 │   ├── api/
@@ -572,12 +656,15 @@ backend/
 │   │       │                      # POST /pairing/request, POST /pairing/approve,
 │   │       │                      # POST /pairing/reject, GET /pairing/result/{token}
 │   │       ├── shared_files.py   # POST/GET /files, GET/POST(refresh)/DELETE /files/{id}
+│   │       ├── folders.py        # POST/GET /folders, GET /folders/{id}/files,
+│   │       │                      # GET/POST(refresh)/DELETE /folders/{id} (Milestone P13)
 │   │       ├── transfers.py      # /transfers/requests..., /transfers..., /transfers/{id}/download|upload
 │   │       └── discovery.py      # GET /discovery/status
 │   └── utils/
 │       ├── time.py              # utc_now() helper shared by models
 │       ├── network.py           # get_local_ip_address(), get_broadcast_address() — desktop_ip for pairing QR + discovery broadcasts
-│       └── filesystem.py        # Pure filesystem helpers: path validation, metadata stat, conflict-free renaming
+│       └── filesystem.py        # Pure filesystem helpers: path validation, metadata stat, conflict-free
+│                                 # renaming, recursive folder walk (walk_directory, Milestone P13)
 └── tests/
     ├── api/                     # Route-level tests via FastAPI TestClient (in-memory SQLite)
     ├── services/                # Service-layer unit tests

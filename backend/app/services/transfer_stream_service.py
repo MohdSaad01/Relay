@@ -260,7 +260,7 @@ class TransferStreamService:
             if bytes_received != transfer.file_size:
                 raise ValidationError("Upload ended before the declared file size was reached.")
 
-            final_path = resolve_available_path(download_directory, transfer.file_name)
+            final_path = self._resolve_upload_final_path(download_directory, transfer)
             os.replace(temp_path, final_path)
             saved_name = os.path.basename(final_path)
             temp_path = None
@@ -295,6 +295,25 @@ class TransferStreamService:
         finally:
             self._discard_temp_file(temp_path)
             self.active_stream_registry.release(transfer_id)
+
+    def _resolve_upload_final_path(self, download_directory: str, transfer: Transfer) -> str:
+        """Resolve the final on-disk write target for a completed upload.
+
+        Ordinary flat upload (folder_relative_path is None): unchanged,
+        directly under download_directory. A folder-upload child (P13):
+        folder_relative_path is root-inclusive POSIX (e.g.
+        "Photos/2024/IMG_1.jpg") — every segment but the last becomes a
+        subdirectory under download_directory, created here since nothing
+        upstream has made it yet, and only the file's own final directory
+        (not the flat download_directory root) is checked for a name
+        conflict.
+        """
+        if transfer.folder_relative_path is None:
+            return resolve_available_path(download_directory, transfer.file_name)
+        segments = transfer.folder_relative_path.split("/")
+        final_dir = os.path.join(download_directory, *segments[:-1])
+        os.makedirs(final_dir, exist_ok=True)
+        return resolve_available_path(final_dir, segments[-1])
 
     def cleanup_orphaned_upload_temp_files(self) -> int:
         """Remove any leftover upload temp file from an unclean shutdown.

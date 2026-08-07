@@ -12,6 +12,8 @@ import { getTransfer, proposeTransfer } from '../../api/endpoints/transfers';
 import { ApiError } from '../../api/client';
 import { registerUploadSource } from '../../streaming/uploadSourceRegistry';
 import { TransferStreamManager } from '../../streaming/TransferStreamManager';
+import { materializeToLocalCache, pickAndEnumerateFolder } from '../../streaming/folderPicker';
+import { generateUuidV4 } from '../../utils/uuid';
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -39,6 +41,8 @@ export function TransferListScreen() {
   } = useTransfers();
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadingFolder, setUploadingFolder] = useState(false);
+  const [folderUploadError, setFolderUploadError] = useState<string | null>(null);
   // useTransfers() already fetches once on mount, and this screen's first
   // focus coincides with that same mount, so the immediate refresh below is
   // only needed from the second focus onward — otherwise every mount fired
@@ -110,13 +114,80 @@ export function TransferListScreen() {
     }
   }, [refreshTransfers]);
 
-  const error = transfersError ?? uploadError;
+  /**
+   * P13: picks a local folder (SAF directory tree, see folderPicker.ts),
+   * then proposes one upload per enumerated file, all sharing a single
+   * client-generated upload_batch_id/upload_folder_name so the backend
+   * (TransferService._validate_folder_upload_payload / UploadBatchRegistry)
+   * recreates the exact same hierarchy under one conflict-resolved folder
+   * name on the desktop. Each accepted transfer is registered and handed to
+   * TransferStreamManager exactly like a single-file upload — its existing
+   * queue is what actually serializes N files behind one active stream.
+   */
+  const handleUploadFolder = useCallback(async () => {
+    setFolderUploadError(null);
+    let picked;
+    try {
+      picked = await pickAndEnumerateFolder();
+    } catch {
+      setFolderUploadError('Could not open the folder picker.');
+      return;
+    }
+    if (!picked) {
+      return; // user cancelled
+    }
+    if (picked.files.length === 0) {
+      setFolderUploadError('That folder is empty — nothing to upload.');
+      return;
+    }
+
+    setUploadingFolder(true);
+    const batchId = generateUuidV4();
+    try {
+      for (const file of picked.files) {
+        const request = await proposeTransfer({
+          direction: 'receive',
+          file_size: file.size,
+          folder_relative_path: file.relativePath,
+          upload_batch_id: batchId,
+          upload_folder_name: picked.folderName,
+        });
+        if (request.status === 'accepted' && request.transfer_id != null) {
+          const baseName = file.relativePath.split('/').pop() ?? file.relativePath;
+          // Materialize to a local cache path first — react-native-blob-util's
+          // wrap() cannot read bytes directly from a react-native-saf-x
+          // tree-child URI (see materializeToLocalCache's own doc comment).
+          const localPath = await materializeToLocalCache(file.uri, baseName);
+          registerUploadSource(request.transfer_id, {
+            uri: localPath,
+            name: baseName,
+            size: file.size,
+            relativePath: file.relativePath,
+          });
+          const transfer = await getTransfer(request.transfer_id);
+          TransferStreamManager.start(transfer);
+        }
+      }
+      await refreshTransfers();
+    } catch (err) {
+      setFolderUploadError(err instanceof ApiError ? err.message : 'Could not propose this folder upload.');
+    } finally {
+      setUploadingFolder(false);
+    }
+  }, [refreshTransfers]);
+
+  const error = transfersError ?? uploadError ?? folderUploadError;
 
   return (
     <View style={styles.container}>
-      <Pressable style={styles.uploadButton} onPress={handleUpload} disabled={uploading}>
-        <Text style={styles.uploadButtonText}>{uploading ? 'Requesting...' : 'Upload a File'}</Text>
-      </Pressable>
+      <View style={styles.uploadRow}>
+        <Pressable style={styles.uploadButton} onPress={handleUpload} disabled={uploading}>
+          <Text style={styles.uploadButtonText}>{uploading ? 'Requesting...' : 'Upload a File'}</Text>
+        </Pressable>
+        <Pressable style={styles.uploadButton} onPress={handleUploadFolder} disabled={uploadingFolder}>
+          <Text style={styles.uploadButtonText}>{uploadingFolder ? 'Uploading...' : 'Upload a Folder'}</Text>
+        </Pressable>
+      </View>
 
       {error && (
         <View style={styles.errorBanner}>
@@ -176,8 +247,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  uploadRow: {
+    flexDirection: 'row',
+    marginHorizontal: 16,
+    marginTop: 16,
+    gap: 8,
+  },
   uploadButton: {
-    margin: 16,
+    flex: 1,
     paddingVertical: 14,
     borderRadius: 8,
     backgroundColor: '#2563eb',

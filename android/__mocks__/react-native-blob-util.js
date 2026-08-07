@@ -49,10 +49,16 @@ module.exports = {
   fetch: fetchMock,
   wrap: jest.fn(path => `wrapped:${path}`),
   fs: {
-    dirs: { DocumentDir: '/mock/documents', DownloadDir: '/mock/downloads', LegacyDownloadDir: '/mock/downloads' },
+    dirs: {
+      DocumentDir: '/mock/documents',
+      DownloadDir: '/mock/downloads',
+      LegacyDownloadDir: '/mock/downloads',
+      CacheDir: '/mock/cache',
+    },
     unlink: jest.fn(() => Promise.resolve()),
     exists: jest.fn(() => Promise.resolve(false)),
     stat: jest.fn(() => Promise.reject(new Error('ENOENT'))),
+    mkdir: jest.fn(() => Promise.resolve()),
   },
   MediaCollection: {
     copyToMediaStore: jest.fn(() => Promise.resolve('content://media/downloads/1')),

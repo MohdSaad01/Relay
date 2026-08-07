@@ -41,3 +41,13 @@ test('treats a failed check as "not there" rather than throwing', async () => {
 
   await expect(downloadedFileExists('report.pdf')).resolves.toBe(false);
 });
+
+test('P13: checks a folder child by its full nested relative path', async () => {
+  (ReactNativeBlobUtil.fs.exists as jest.Mock).mockResolvedValueOnce(true);
+
+  await expect(downloadedFileExists('University Notes/Semester 1/DBMS.pdf')).resolves.toBe(true);
+
+  expect(ReactNativeBlobUtil.fs.exists).toHaveBeenCalledWith(
+    '/mock/downloads/Relay/University Notes/Semester 1/DBMS.pdf',
+  );
+});

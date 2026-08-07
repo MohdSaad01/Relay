@@ -27,6 +27,26 @@ class Transfer(Base):
     shared_file_id: Mapped[int | None] = mapped_column(
         ForeignKey("shared_files.id", ondelete="SET NULL"), nullable=True
     )
+    # P13: set only for a SEND transfer whose source file belongs to a shared
+    # folder. SET NULL (not CASCADE) like shared_file_id above — transfer
+    # history survives the folder share being removed.
+    shared_folder_id: Mapped[int | None] = mapped_column(
+        ForeignKey("shared_folders.id", ondelete="SET NULL"), nullable=True
+    )
+    # P13: POSIX-style (forward-slash) path, always including the top-level
+    # folder name as its first segment (e.g. "University Notes/Semester
+    # 1/DBMS.pdf"), set for any transfer — either direction — that is part
+    # of a folder operation. NULL for an ordinary single-file transfer. This
+    # is what TransferStreamService._finalize and each client's download-
+    # staging path key off to recreate the folder's hierarchy on disk.
+    folder_relative_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    # P13: opaque, client-generated correlation tag set only on a RECEIVE
+    # transfer that is one file of an Android folder upload, so the desktop
+    # UI can group the resulting Transfer rows into one aggregate display.
+    # No FK — nothing server-side is durably keyed by this value (mirrors the
+    # existing asymmetry in 13_Database_Design.md §6: an Android upload never
+    # gets a shared_files row either).
+    upload_batch_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     direction: Mapped[TransferDirection] = mapped_column(
         as_db_enum(TransferDirection), nullable=False
     )

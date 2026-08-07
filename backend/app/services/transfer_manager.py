@@ -55,6 +55,12 @@ class PendingTransferRequest:
     created_at: datetime
     expires_at: datetime
     transfer_id: int | None = None
+    # P13: set only for a RECEIVE request that is one file of an Android
+    # folder upload. folder_relative_path is already fully resolved
+    # (root-inclusive, via UploadBatchRegistry) by the time this dataclass
+    # is constructed — see TransferService.request_transfer.
+    folder_relative_path: str | None = None
+    upload_batch_id: str | None = None
 
 
 def generate_request_id() -> str:

@@ -23,6 +23,7 @@
     "react-native-camera-kit": "^18.0.0",
     "react-native-gesture-handler": "^3.1.0",
     "react-native-keychain": "^10.0.0",
+    "react-native-saf-x": "^2.2.3",
     "react-native-safe-area-context": "^5.5.2",
     "react-native-screens": "^4.26.2",
     "react-native-udp": "^4.1.7"

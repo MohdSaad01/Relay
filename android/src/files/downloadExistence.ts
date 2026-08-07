@@ -25,18 +25,24 @@ const PUBLIC_DOWNLOAD_FOLDER = 'Relay';
  * Exported for downloadActions.ts's "Open" action, which needs the actual
  * on-device path to hand to react-native-blob-util's actionViewIntent, not
  * just a yes/no existence check.
+ *
+ * `relativePath` (P13) is the same shape streaming/blobUtil.ts's
+ * publishDownload/TransferStreamManager's downloadStagingPath use — the
+ * full path under Relay/ for a folder child (e.g. "University
+ * Notes/Semester 1/DBMS.pdf"), or just a bare file name for a standalone
+ * file (the pre-P13 shape, unchanged).
  */
-export function downloadedFilePath(fileName: string): string {
+export function downloadedFilePath(relativePath: string): string {
   const { LegacyDownloadDir, DocumentDir } = ReactNativeBlobUtil.fs.dirs;
   return Number(Platform.Version) >= MEDIASTORE_MIN_SDK
-    ? `${LegacyDownloadDir}/${PUBLIC_DOWNLOAD_FOLDER}/${fileName}`
-    : `${DocumentDir}/Downloads/${fileName}`;
+    ? `${LegacyDownloadDir}/${PUBLIC_DOWNLOAD_FOLDER}/${relativePath}`
+    : `${DocumentDir}/Downloads/${relativePath}`;
 }
 
 /** Best-effort: any failure to check (e.g. an unreadable path) is treated as "not there". */
-export async function downloadedFileExists(fileName: string): Promise<boolean> {
+export async function downloadedFileExists(relativePath: string): Promise<boolean> {
   try {
-    return await ReactNativeBlobUtil.fs.exists(downloadedFilePath(fileName));
+    return await ReactNativeBlobUtil.fs.exists(downloadedFilePath(relativePath));
   } catch {
     return false;
   }

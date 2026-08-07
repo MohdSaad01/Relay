@@ -30,7 +30,8 @@ The schema favors a small number of explicit, well-understood tables over generi
 |---|---|
 | `devices` | Identity and pairing record for a trusted Android device |
 | `sessions` | Short-lived auth tokens issued to a paired device |
-| `shared_files` | Metadata for files the desktop user has explicitly shared |
+| `shared_files` | Metadata for files the desktop user has explicitly shared (including a shared folder's individual child files — P13) |
+| `shared_folders` | Metadata for a whole folder the desktop user has explicitly shared, as one item (P13) |
 | `transfers` | One row per file transfer (in-progress or historical) |
 | `app_settings` | Single-row table of user-editable runtime preferences |
 
@@ -102,19 +103,49 @@ Pairing tokens are **not** a table. See §9.
 | `file_size` | Integer (bytes) | No | size at share time | Yes |
 | `mime_type` | String | Yes | NULL | Yes |
 | `shared_at` | DateTime | No | now | Yes |
+| `shared_folder_id` | Integer (FK → `shared_folders.id`, `ON DELETE CASCADE`) | Yes | NULL | Yes |
+| `relative_path` | String | Yes | NULL | Yes |
 
 **Constraints:** `UNIQUE(file_path)` — sharing the same path again updates/no-ops rather than creating a duplicate row, matching the "refresh the shared list" behavior in `11_File_Transfer.md` §6.
 
-**Indexes:** unique index on `file_path`; optional index on `shared_at` for default list ordering.
+**Indexes:** unique index on `file_path`; optional index on `shared_at` for default list ordering; index on `shared_folder_id`.
 
-**Relationships:** one-to-many → `transfers`, `ON DELETE SET NULL`.
+**Relationships:** one-to-many → `transfers`, `ON DELETE SET NULL`. Many-to-one → `shared_folders` (optional; see below).
 
 **Reasoning:**
 - `file_size` is captured at share time so the UI never has to recompute it from disk. It is a point-in-time snapshot, not a live value — if the underlying file changes size, the entry is refreshed by the existing "refresh shared list" flow, not by re-reading the file on every request.
 - `mime_type` is nullable and captured at share time to simplify future UI rendering (icons, platform-specific handling) without requiring the client to infer it. It is optional because a type cannot always be determined from a file's extension or contents.
 - No `checksum` field. Integrity verification is an explicit future enhancement (`11_File_Transfer.md` §16); adding the column now would carry no weight until a milestone actually uses it.
+- **`shared_folder_id`/`relative_path` (added Milestone P13, folder sharing — §6a below) are set together, only for a row discovered while walking a shared folder.** `ON DELETE CASCADE` (not `SET NULL`, unlike every other FK on this table): a folder's child row has no meaning once its parent folder share is removed, unlike transfer history, which is deliberately preserved after a share is removed. `relative_path` is POSIX-style (forward-slash), relative to the folder root, and does not include the folder's own name. A folder's child rows are excluded from `GET /files`'s flat list (filtered at the repository layer) — they only ever surface via `GET /folders/{id}/files`.
 
 This table only represents files shared **from the desktop**. Android-initiated uploads do not get a `shared_files` row — the phone has no persistent backend of its own, so file selection for an upload is transient UI state, not a durable share. An upload produces only a `transfers` row with `shared_file_id = NULL`.
+
+---
+
+# 6a. Table: `shared_folders` (added Milestone P13)
+
+**Purpose:** Metadata for a folder the desktop user has added to the shared list — mirrors `shared_files` in shape and philosophy. A shared folder is always exactly one item to a paired device (`11_File_Transfer.md` §6); its contents live as ordinary `shared_files` rows (§6 above), never duplicated into this table.
+
+| Field | Type | Nullable | Default | Immutable |
+|---|---|---|---|---|
+| `id` | Integer (PK) | No | autoincrement | Yes |
+| `folder_name` | String | No | folder's own name at share time | Yes |
+| `folder_path` | String | No | — | Yes |
+| `total_size` | Integer (bytes) | No | sum of child file sizes at share time | No (updated on refresh) |
+| `file_count` | Integer | No | count of child files at share time | No (updated on refresh) |
+| `shared_at` | DateTime | No | now | Yes |
+
+**Constraints:** `UNIQUE(folder_path)` — same upsert-on-re-share semantics as `shared_files.file_path`.
+
+**Indexes:** unique index on `folder_path`; index on `shared_at`.
+
+**Relationships:** one-to-many → `shared_files` (child rows, §6), `ON DELETE CASCADE`. One-to-many → `transfers`, `ON DELETE SET NULL`.
+
+**Reasoning:**
+- `total_size`/`file_count` are point-in-time snapshots, exactly like `shared_files.file_size` — recomputed by walking the folder on share and on refresh, never live-computed per request.
+- Sharing/refreshing a folder walks it once (`app/services/shared_folder_service.py`), reconciling child `shared_files` rows: existing ones updated, new ones inserted, vanished ones deleted. This is the one piece of logic genuinely new to this milestone — a single file's refresh only ever re-stats one path; a folder's refresh must diff a set.
+- Symlinks encountered while walking are skipped (files) or never descended into (directories) — the same reasoning as `shared_files`' existing symlink rejection: prevents walk loops and escaping the shared root.
+- No `checksum`/sync-tracking fields, for the same reason `shared_files` has none — see `11_File_Transfer.md` §16's integrity-verification note. This is folder *sharing*, not folder *synchronization*: there is no watcher, no incremental diffing beyond an explicit refresh.
 
 ---
 
@@ -136,18 +167,22 @@ This table only represents files shared **from the desktop**. Android-initiated 
 | `failure_reason` | String | Yes | NULL | No (set once, on failure) |
 | `started_at` | DateTime | No | now | Yes |
 | `completed_at` | DateTime | Yes | NULL | No |
+| `shared_folder_id` | Integer (FK → `shared_folders.id`, `ON DELETE SET NULL`) | Yes | NULL | Yes |
+| `folder_relative_path` | String | Yes | NULL | Yes |
+| `upload_batch_id` | String | Yes | NULL | Yes |
 
 **Constraints:** none beyond primary/foreign keys.
 
-**Indexes:** `status` (active-transfers queries), `started_at` (history sort — the most common query), `device_id`.
+**Indexes:** `status` (active-transfers queries), `started_at` (history sort — the most common query), `device_id`; index on `upload_batch_id`.
 
 **Reasoning:**
 - `file_name`, `file_size`, and `device_name` are deliberately denormalized snapshots, copied in at transfer start rather than joined live from `shared_files` / `devices`. This is what makes the nullable, `SET NULL` foreign keys safe: if a shared file is later removed or a device is later deleted, transfer history still reads correctly instead of showing orphaned or blank rows. This is the standard pattern for audit/history tables.
 - `direction` is framed from the desktop's perspective (`send` / `receive`) rather than `upload` / `download`, which is ambiguous depending on which device the term is spoken from.
 - `completed_at` is a dedicated nullable timestamp, set once the transfer leaves `in_progress` (success, failure, or cancellation). It is intentionally separate from any generic "last updated" timestamp so that "when did this transfer finish" is always an explicit, unambiguous field rather than inferred from a mutation-tracking column.
 - `failure_reason` (renamed from an earlier `error_message` working name) better reflects its purpose: it explains *why* a transfer did not complete, not a generic error log line.
-- **`batch_id` has been removed for Version 1.** Sequential, one-file-at-a-time transfer processing (`11_File_Transfer.md` §10) does not require correlating multiple rows into a batch. If grouped/batch transfer semantics are introduced in a future version, a proper batch entity (e.g. a `transfer_batches` table with its own lifecycle) should be introduced at that time rather than reviving a loose correlation column.
+- **`batch_id` has been removed for Version 1.** Sequential, one-file-at-a-time transfer processing (`11_File_Transfer.md` §10) does not require correlating multiple rows into a batch. If grouped/batch transfer semantics are introduced in a future version, a proper batch entity (e.g. a `transfer_batches` table with its own lifecycle) should be introduced at that time rather than reviving a loose correlation column. **Revisited, narrowly, in Milestone P13:** `upload_batch_id` below is *not* that batch entity — it is a plain opaque string with no FK and no server-side entity behind it, added only so the desktop UI can group the N `Transfer` rows produced by one Android folder upload. This decision still stands for `send`/download-side batching, which continues to use the stronger, referential `shared_folder_id` below instead.
 - **`file_name` is updated post-creation in exactly one case, decided during the Streaming Engine milestone (implementation, not this document, at the time this schema was designed).** An upload (`direction = receive`) whose declared name collides with an existing file on disk is saved under an automatically renamed path (`name (1).ext`, `name (2).ext`, ...). Once the rename is known — at successful completion, not at transfer creation — `file_name` is overwritten with the actual saved name, so `GET /transfers/{id}` always reflects what is really on disk instead of a name that was never used. This is a narrow, deliberate exception to the immutability above, not a general license to mutate this column: it only ever happens once, only for a completed `receive` transfer, and only when a rename actually occurred. No schema change was involved — it is a plain update to an existing column, performed by `TransferStreamService._finalize` (`backend/app/services/transfer_stream_service.py`).
+- **`shared_folder_id`/`folder_relative_path`/`upload_batch_id` (added Milestone P13, folder transfer) are all nullable and unused by every single-file transfer.** `shared_folder_id` is set only for a `send` transfer whose source file belongs to a shared folder — `SET NULL`, not `CASCADE`, so transfer history survives the folder share being removed, matching `shared_file_id`'s own pattern. `folder_relative_path` is set for a folder transfer in either direction, and — unlike `shared_files.relative_path` — always includes the top-level folder name as its first segment (e.g. `"University Notes/Semester 1/DBMS.pdf"`); this is what both the backend's upload-finalize path and each client's download-staging path key off to recreate the folder's hierarchy on disk. `upload_batch_id` is set only for a `receive` transfer that is one file of an Android folder upload.
 
 ---
 
@@ -187,6 +222,8 @@ This will be implemented as an in-memory structure (e.g. a dictionary keyed by t
 
 **Addendum, decided during the Transfers milestone (implementation, after this document was finalized):** the same reasoning was extended to *pending transfer requests*. A proposed transfer (Android asking to download or upload a file) that the desktop user has not yet accepted or rejected is held only in memory (`TransferManager`, keyed by an opaque request id, the same lock-guarded singleton pattern as the pairing manager above) — never written to the `transfers` table. This is why the `transfers.status` enum in §7 has no `pending` or `rejected` value: only an *accepted* request ever becomes a row. A request that is still pending, or was rejected, when the backend restarts is simply gone, matching a pairing attempt under the same circumstances.
 
+**Addendum, decided during Milestone P13 (folder transfer, implementation, after this document was finalized):** the same in-memory-singleton pattern was extended a third time, for a narrower purpose. `UploadBatchRegistry` (`app/services/upload_batch_registry.py`) holds the conflict-resolved top-level folder name for each in-progress Android folder upload — resolved once, the first time any child of that `upload_batch_id` is accepted, and reused for every subsequent child. It is not durable state to persist (an Android folder upload never gets a `shared_folders`/`shared_files` row either — see §6/§6a's existing single-file asymmetry), and, unlike `PairingManager`/`TransferManager`, it has no expiry sweep: a process-lifetime-bounded amount of unswept state was judged an acceptable trade-off rather than new cleanup wiring this codebase does not otherwise have (`PairingManager`/`TransferManager`'s own `cleanup_expired()` methods exist but are not actually wired to a scheduler either).
+
 ---
 
 # 10. Relationship Summary
@@ -195,16 +232,18 @@ This will be implemented as an in-memory structure (e.g. a dictionary keyed by t
 devices (1) ──< sessions (many)              ON DELETE CASCADE
 devices (1) ──< transfers (many)             ON DELETE SET NULL, name snapshotted
 shared_files (1) ──< transfers (many)        ON DELETE SET NULL, name/size snapshotted
+shared_folders (1) ──< shared_files (many)   ON DELETE CASCADE (P13)
+shared_folders (1) ──< transfers (many)      ON DELETE SET NULL (P13)
 app_settings                                  standalone singleton
 ```
 
-No table is deleted as a matter of routine operation except `devices` (explicit user action) and `sessions` (expiry cleanup). `shared_files` rows are removed when the user un-shares a file. `transfers` rows are never deleted by normal operation — they are the history.
+No table is deleted as a matter of routine operation except `devices` (explicit user action) and `sessions` (expiry cleanup). `shared_files` rows are removed when the user un-shares a file (or, for a folder's child rows, cascade-deleted when the parent folder share is removed — P13). `transfers` rows are never deleted by normal operation — they are the history.
 
 ---
 
 # 11. Version 1 Tables
 
-Required: `devices`, `sessions`, `shared_files`, `transfers`, `app_settings`.
+Required: `devices`, `sessions`, `shared_files`, `shared_folders` (P13), `transfers`, `app_settings`.
 
 ---
 
@@ -213,12 +252,12 @@ Required: `devices`, `sessions`, `shared_files`, `transfers`, `app_settings`.
 | Table / field | Why postponed |
 |---|---|
 | `pairing_tokens` | Kept in memory only — see §9 |
-| `transfer_batches` | `transfers` processes sequentially in V1; a real batch entity can be introduced later if needed |
+| `transfer_batches` | `transfers` processes sequentially in V1; a real batch entity can be introduced later if needed. `transfers.upload_batch_id` (P13) is a narrower, opaque correlation tag, not this table — see §7's own note |
 | `checksum` on `shared_files` / `transfers` | Integrity verification is a documented future enhancement |
 | `devices.status` (soft delete) | Hard delete approved for V1; may be reconsidered later |
 | Audit/security log table | Security events belong in the existing file-based logger (`LOG_DIR`), not the database |
 | `users` / accounts | Explicitly out of scope (Charter §5) |
-| Folder-sync tables | Explicitly out of scope (Charter §5, `11_File_Transfer.md` §3) |
+| Folder-*sync* tables (watching a shared folder for changes, incremental diffing) | Still explicitly out of scope (Charter §5, `11_File_Transfer.md` §3) — distinct from folder *sharing/transfer*, implemented as of Milestone P13 (§6a) |
 
 ---
 
@@ -234,11 +273,11 @@ These are implementation-level details that follow from this design and must be 
 
 # 14. Why This Design Fits Version 1
 
-The schema maps directly onto the Charter's stated V1 scope — pairing, device management, a shared list, transfers, basic history, preferences — with nothing speculative added. Five tables, no generic or key-value patterns, no unused enum values.
+The schema maps directly onto the Charter's stated V1 scope — pairing, device management, a shared list, transfers, basic history, preferences — with nothing speculative added. Six tables (`shared_folders` added Milestone P13), no generic or key-value patterns, no unused enum values.
 
 **Future expansion:**
 - All tables use plain integer primary keys and standard foreign key relationships, so a future PostgreSQL migration (`08_Architecture_Decisions.md` ADR-005, `03_Tech_Stack.md` §19) is a data-copy exercise, not a redesign.
 - `platform` on `devices` is already a string/enum rather than an implicit "always Android," so future iOS/macOS/Linux clients add new values, not new columns.
-- `shared_files` and `transfers` are already decoupled via nullable foreign keys, so adding folder sync or checksum verification later is additive.
+- `shared_files` and `transfers` were already decoupled via nullable foreign keys before Milestone P13, which is exactly what let folder sharing/transfer be added as new nullable columns and one new table rather than a redesign — confirming the prediction this section originally made. Checksum verification remains a similarly additive future step.
 
 **Main trade-off:** favoring denormalized snapshot columns (`transfers.file_name`, `transfers.file_size`, `transfers.device_name`) over strict normalization. For a history/audit table this is the correct and standard pattern — it trades a small amount of duplicated data for history that remains readable after the things it references are deleted, which this domain explicitly requires.

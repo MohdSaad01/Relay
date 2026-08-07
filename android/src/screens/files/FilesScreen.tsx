@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -14,10 +14,10 @@ import { useSharedFiles } from '../../files/useSharedFiles';
 import { useSharedFolders } from '../../files/useSharedFolders';
 import { useFolderFilesMap } from '../../files/useFolderFilesMap';
 import { useFolderReconciliation } from '../../files/useFolderReconciliation';
-import { deriveDownloadStatus, FileDownloadStatus } from '../../files/downloadStatus';
+import { deriveDownloadStatus, FileDownloadStatus, latestSendTransferId } from '../../files/downloadStatus';
 import { deriveFolderDownloadStatus, FolderDownloadStatus, isFolderChildReconciled } from '../../files/folderDownloadStatus';
 import { useDownloadExistence } from '../../files/useDownloadExistence';
-import { downloadedFilePath } from '../../files/downloadExistence';
+import { downloadedFileExists, downloadedFilePath } from '../../files/downloadExistence';
 import { markFolderReconciled, resolveLocalFolderRoot } from '../../files/folderIdentity';
 import { openDownloadedFile, openDownloadedFolder } from '../../files/downloadActions';
 import { useTransferRequests } from '../../transfers/useTransferRequests';
@@ -83,10 +83,15 @@ export function FilesScreen() {
     refreshSilently: refreshFoldersSilently,
   } = useSharedFolders();
   const folderFilesMap = useFolderFilesMap(folders);
-  const { reconciledByFolderId, refresh: refreshReconciliation } = useFolderReconciliation(folders);
+  const { reconciledByFolderId, localRootByFolderId, refresh: refreshReconciliation } = useFolderReconciliation(folders);
   const { requests, refresh: refreshRequests } = useTransferRequests();
   const { transfers, refresh: refreshTransfers } = useTransfers();
   const { existence, verify } = useDownloadExistence();
+  // Separate existence cache from `existence` above (files) — both are keyed
+  // by a bare on-device name, and a file and a folder root could otherwise
+  // coincidentally share one (e.g. a file "test" and a folder whose resolved
+  // localRoot is also "test"), corrupting each other's cached result.
+  const { existence: folderExistence, verify: verifyFolderExists } = useDownloadExistence();
   const [requestingIds, setRequestingIds] = useState<Record<number, boolean>>({});
   const [requestErrors, setRequestErrors] = useState<Record<number, string>>({});
   const [openErrors, setOpenErrors] = useState<Record<number, string>>({});
@@ -146,9 +151,10 @@ export function FilesScreen() {
   // Re-verifies on-device existence for every file the polled data currently
   // reports as a completed download — covers both a stale 'completed' from
   // before this screen mounted and a file deleted while it stayed open.
-  // Folder children are not covered (see folderDownloadStatus.ts's own
-  // documented limitation) — useDownloadExistence is keyed by a flat
-  // file_name and does not extend to a nested relative_path.
+  // Folder children are not individually covered here — useDownloadExistence
+  // is keyed by a flat file_name and does not extend to a nested
+  // relative_path — but the folder as a whole is, via a live check of its
+  // root directory in the next effect below (P13.3, Problem 1).
   useEffect(() => {
     files.forEach(file => {
       if (deriveDownloadStatus(file.id, requests, transfers).kind === 'completed') {
@@ -156,6 +162,63 @@ export function FilesScreen() {
       }
     });
   }, [files, requests, transfers, verify]);
+
+  // P13.3 (Problem 1): the folder-level equivalent of the file check above —
+  // closes the gap folderDownloadStatus.ts used to document as an accepted
+  // V1 limitation. Re-verifies on-device existence of a folder's resolved
+  // root directory (folderIdentity.ts's localRoot) for every folder the
+  // polled data currently reports as fully downloaded, so a folder deleted
+  // outside the app (or since a prior check) is caught the same way a
+  // deleted single file already is. Only runs once localRootByFolderId has
+  // resolved this folder's root at least once (a folder never downloaded on
+  // this install has no root to check yet, and can't be 'completed' anyway).
+  useEffect(() => {
+    folders.forEach(folder => {
+      const children = folderFilesMap[folder.id] ?? [];
+      const status = deriveFolderDownloadStatus(children, requests, transfers, reconciledByFolderId[folder.id]);
+      const localRoot = localRootByFolderId[folder.id];
+      if (status.kind === 'completed' && localRoot) {
+        verifyFolderExists(localRoot);
+      }
+    });
+  }, [folders, folderFilesMap, requests, transfers, reconciledByFolderId, localRootByFolderId, verifyFolderExists]);
+
+  // P13.3 (Problem 3): TransferStreamManager writes a folder's reconciliation
+  // record (folderIdentity.ts's markFolderReconciled) synchronously before it
+  // transitions that stream's own state to 'completed' (see
+  // notifyIfFolderComplete's call order in TransferStreamManager.start) — but
+  // it has no reference to this screen's state and so never told
+  // refreshReconciliation to re-read it. Without this, the fast 2000ms
+  // requests/transfers poll could observe "every child completed" well
+  // before the slower 5000ms folder poll happened to re-read the registry,
+  // producing a visible Download -> Downloading -> Download -> Open flicker
+  // (deriveFolderDownloadStatus falling through to 'idle' in between).
+  // Subscribing here re-reads the registry the instant it's actually ready,
+  // closing that window instead of just waiting it out.
+  //
+  // Also drives the Queued/Downloading distinction below (P13.3 queue
+  // investigation): `streamKey` only changes on a genuine transferId/status
+  // transition (stream start, completion, failure, cancellation), not on
+  // every in-flight progress tick, so this doesn't force a re-render for
+  // every byte-count update — just the moments TransferStreamManager.isActive
+  // could actually give a different answer.
+  const streamKeyRef = useRef<string | null>(null);
+  const [, forceStreamRerender] = useReducer((n: number) => n + 1, 0);
+  useEffect(
+    () =>
+      TransferStreamManager.subscribe(() => {
+        const streamState = TransferStreamManager.getState();
+        const key = streamState ? `${streamState.transferId}:${streamState.status}` : null;
+        if (key !== streamKeyRef.current) {
+          streamKeyRef.current = key;
+          forceStreamRerender();
+        }
+        if (streamState?.status === 'completed') {
+          refreshReconciliation();
+        }
+      }),
+    [refreshReconciliation],
+  );
 
   const handleDownload = useCallback(
     async (file: AvailableFileResponse) => {
@@ -302,13 +365,27 @@ export function FilesScreen() {
           return;
         }
         const reconciledChildren = reconciledByFolderId[folder.id];
+        // P13.3 (Problem 1): a per-child reconciliation match (below) only
+        // means "this child's backend metadata hasn't changed since we last
+        // confirmed it" — it says nothing about whether the bytes are still
+        // actually on disk right now. Without this check, re-tapping
+        // Download on a folder whose root directory was deleted outside the
+        // app (see the live existence check above that got this row back to
+        // "Download" in the first place) would find every child still
+        // "reconciled" and skip all of them, silently doing nothing: the
+        // button would keep offering "Download" forever without ever
+        // actually re-fetching anything. Checking the root once, up front,
+        // and treating every child as needing a fresh fetch when it's
+        // missing (bypassing the normal per-child skip) mirrors how a
+        // never-before-seen folder already has nothing to skip.
+        const folderRootMissing = !(await downloadedFileExists(localRoot));
         const pending: AvailableFolderFileResponse[] = [];
         for (const child of children) {
           const status = deriveDownloadStatus(child.id, requests, transfers);
           if (status.kind === 'pending' || status.kind === 'in_progress') {
             continue;
           }
-          if (status.kind === 'completed') {
+          if (status.kind === 'completed' && !folderRootMissing) {
             if (isFolderChildReconciled(child, reconciledChildren)) {
               continue;
             }
@@ -368,12 +445,23 @@ export function FilesScreen() {
       const localRoot = await resolveLocalFolderRoot(folder.id, folder.folder_name);
       await openDownloadedFolder(localRoot);
     } catch {
+      // Open is offered optimistically (see canOpen below), so a failure
+      // here can mean either "no app handles directories" or "the folder
+      // was deleted in the brief window before the last existence check" —
+      // mirrors handleOpen's own re-verify for a single file (P13.3,
+      // Problem 1). Re-verifying lets the row recover to a re-downloadable
+      // 'idle' state instead of staying stuck offering an "Open" that will
+      // keep failing.
+      const localRoot = await resolveLocalFolderRoot(folder.id, folder.folder_name).catch(() => null);
+      if (localRoot) {
+        verifyFolderExists(localRoot);
+      }
       setFolderOpenErrors(prev => ({
         ...prev,
         [folder.id]: 'Could not open this folder. It may have been moved, deleted, or need a different app.',
       }));
     }
-  }, []);
+  }, [verifyFolderExists]);
 
   if (loading || foldersLoading) {
     return (
@@ -419,7 +507,12 @@ export function FilesScreen() {
                 requests,
                 transfers,
                 reconciledByFolderId[item.data.id],
+                localRootByFolderId[item.data.id] ? folderExistence[localRootByFolderId[item.data.id]] : undefined,
               )}
+              active={(folderFilesMap[item.data.id] ?? []).some(child => {
+                const transferId = latestSendTransferId(child.id, transfers);
+                return transferId != null && TransferStreamManager.isActive(transferId);
+              })}
               onDownload={() => handleFolderDownload(item.data)}
               onOpen={() => handleOpenFolder(item.data)}
             />
@@ -430,6 +523,10 @@ export function FilesScreen() {
               requestError={requestErrors[item.data.id]}
               openError={openErrors[item.data.id]}
               status={deriveDownloadStatus(item.data.id, requests, transfers, existence[item.data.file_name])}
+              active={(() => {
+                const transferId = latestSendTransferId(item.data.id, transfers);
+                return transferId != null && TransferStreamManager.isActive(transferId);
+              })()}
               onDownload={() => handleDownload(item.data)}
               onOpen={() => handleOpen(item.data)}
             />
@@ -456,13 +553,23 @@ export function FilesScreen() {
 // which added a meaningless extra step; showing the real label immediately
 // lets the user transition straight into it once the polled data confirms
 // the same thing.
-function downloadButtonLabel(requesting: boolean, status: FileDownloadStatus): string {
+// `active` (P13.3, queue investigation) distinguishes "this row's bytes are
+// actually moving right now" (TransferStreamManager.isActive) from "the
+// backend already considers this an in-progress transfer" (status.kind ===
+// 'in_progress', true from the moment it's proposed — see
+// TransferService._create_transfer). Before this, a transfer waiting behind
+// another one in TransferStreamManager's FIFO queue (Milestone P11) showed
+// "Downloading..." from the moment it was proposed, indistinguishable from
+// the one whose bytes were actually streaming — misleading, and the queue
+// investigation's own physical verification (a 51 MB file immediately
+// followed by a 6 B tap) is exactly the scenario that surfaces it.
+function downloadButtonLabel(requesting: boolean, status: FileDownloadStatus, active: boolean): string {
   if (requesting) return 'Downloading...';
   switch (status.kind) {
     case 'pending':
       return 'Requested';
     case 'in_progress':
-      return 'Downloading...';
+      return active ? 'Downloading...' : 'Queued';
     case 'failed':
       return 'Retry';
     default:
@@ -476,11 +583,14 @@ function downloadButtonLabel(requesting: boolean, status: FileDownloadStatus): s
 // carries completedCount/totalCount (folderDownloadStatus.ts) for internal
 // use — e.g. deciding when a folder is fully 'completed' — just not for
 // display here.
-function folderDownloadButtonLabel(requesting: boolean, status: FolderDownloadStatus): string {
+// See downloadButtonLabel's own doc comment for what `active` distinguishes.
+// A folder's `active` is true when any of its currently-fetched children is
+// the one TransferStreamManager is actually streaming right now.
+function folderDownloadButtonLabel(requesting: boolean, status: FolderDownloadStatus, active: boolean): string {
   if (requesting) return 'Downloading...';
   switch (status.kind) {
     case 'in_progress':
-      return 'Downloading...';
+      return active ? 'Downloading...' : 'Queued';
     case 'failed':
       return 'Retry';
     default:
@@ -494,6 +604,7 @@ function FileRow({
   requestError,
   openError,
   status,
+  active,
   onDownload,
   onOpen,
 }: {
@@ -502,6 +613,7 @@ function FileRow({
   requestError?: string;
   openError?: string;
   status: FileDownloadStatus;
+  active: boolean;
   onDownload: () => void;
   onOpen: () => void;
 }) {
@@ -542,7 +654,7 @@ function FileRow({
         </Pressable>
       ) : (
         <Pressable style={styles.downloadButton} onPress={onDownload} disabled={disabled}>
-          <Text style={styles.downloadButtonText}>{downloadButtonLabel(requesting, status)}</Text>
+          <Text style={styles.downloadButtonText}>{downloadButtonLabel(requesting, status, active)}</Text>
         </Pressable>
       )}
     </View>
@@ -555,6 +667,7 @@ function FolderRow({
   requestError,
   openError,
   status,
+  active,
   onDownload,
   onOpen,
 }: {
@@ -563,6 +676,7 @@ function FolderRow({
   requestError?: string;
   openError?: string;
   status: FolderDownloadStatus;
+  active: boolean;
   onDownload: () => void;
   onOpen: () => void;
 }) {
@@ -570,10 +684,12 @@ function FolderRow({
   const itemLabel = `${folder.file_count} item${folder.file_count === 1 ? '' : 's'}`;
   // P13.1 (Issue 2): a fully-downloaded folder offers "Open" exactly like a
   // completed file's canOpen/onOpen (FileRow above) — status.kind only ever
-  // reports 'completed' once every child has (deriveFolderDownloadStatus),
-  // so there is no separate on-device existence check to fold in here the
-  // way FileRow's canOpen does (folderDownloadStatus.ts documents that as an
-  // accepted limitation).
+  // reports 'completed' once every child has (deriveFolderDownloadStatus).
+  // P13.3: that now includes the folder's own on-device existence check
+  // (deriveFolderDownloadStatus's folderExists parameter, fed by the
+  // folder-existence effect above), so this is no longer a weaker guarantee
+  // than FileRow's canOpen — a deleted folder's status.kind downgrades to
+  // 'idle' the same way a deleted file's does.
   const canOpen = status.kind === 'completed';
   const errorMessage = requestError ?? (canOpen ? openError : undefined);
 
@@ -594,7 +710,7 @@ function FolderRow({
         </Pressable>
       ) : (
         <Pressable style={styles.downloadButton} onPress={onDownload} disabled={disabled}>
-          <Text style={styles.downloadButtonText}>{folderDownloadButtonLabel(requesting, status)}</Text>
+          <Text style={styles.downloadButtonText}>{folderDownloadButtonLabel(requesting, status, active)}</Text>
         </Pressable>
       )}
     </View>

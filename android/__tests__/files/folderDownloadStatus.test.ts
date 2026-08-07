@@ -180,6 +180,41 @@ describe('staleness (P13.2, Issue 2)', () => {
   });
 });
 
+// P13.3, Problem 1: deriveFolderDownloadStatus's 'completed' verdict must
+// also respect a live on-device existence check of the folder's root
+// directory, mirroring deriveDownloadStatus's own fileExists handling — a
+// folder deleted outside the app must not keep reporting 'completed'
+// (offering "Open") forever.
+describe('folderExists gating (P13.3, Problem 1)', () => {
+  test('completed when every child matches and folderExists is unset (not checked yet)', () => {
+    const children = [child(1, { relative_path: 'a.txt', file_size: 100 })];
+    const transfers = [transfer({ shared_file_id: 1, status: 'completed' })];
+    const reconciled = { 'a.txt': 100 };
+
+    const status = deriveFolderDownloadStatus(children, noRequests, transfers, reconciled, undefined);
+    expect(status.kind).toBe('completed');
+  });
+
+  test('completed when folderExists is explicitly true', () => {
+    const children = [child(1, { relative_path: 'a.txt', file_size: 100 })];
+    const transfers = [transfer({ shared_file_id: 1, status: 'completed' })];
+    const reconciled = { 'a.txt': 100 };
+
+    const status = deriveFolderDownloadStatus(children, noRequests, transfers, reconciled, true);
+    expect(status.kind).toBe('completed');
+  });
+
+  test('idle when every child matches but folderExists is explicitly false (folder deleted on-device)', () => {
+    const children = [child(1, { relative_path: 'a.txt', file_size: 100 })];
+    const transfers = [transfer({ shared_file_id: 1, status: 'completed' })];
+    const reconciled = { 'a.txt': 100 };
+
+    const status = deriveFolderDownloadStatus(children, noRequests, transfers, reconciled, false);
+    expect(status.kind).toBe('idle');
+    expect(status.completedCount).toBe(1);
+  });
+});
+
 describe('isFolderChildReconciled (P13.2, Issue 2)', () => {
   test('true when the child matches the reconciliation record', () => {
     const c = child(1, { relative_path: 'a.txt', file_size: 100 });

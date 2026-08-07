@@ -34,6 +34,23 @@ export type FileDownloadStatus =
  * the status to 'idle' so the file can be downloaded again. See
  * useDownloadExistence.ts for how a screen supplies this.
  */
+/**
+ * The most recent SEND transfer for a given shared_file_id, or undefined if
+ * none exists yet — the same lookup deriveDownloadStatus below does
+ * internally, exported (P13.3) so a caller that needs the actual transfer_id
+ * itself (not just its derived status) doesn't have to duplicate this
+ * filter/sort. TransferStreamManager.isActive(transferId) takes a
+ * *transfer* id, which is a completely different id space from the
+ * shared_file_id every call site here otherwise deals in — conflating the
+ * two (passing a shared_file_id straight to isActive) silently always
+ * returns false, since the two id sequences essentially never collide.
+ */
+export function latestSendTransferId(fileId: number, transfers: TransferResponse[]): number | undefined {
+  return transfers
+    .filter(t => t.shared_file_id === fileId && t.direction === 'send')
+    .sort((a, b) => b.id - a.id)[0]?.id;
+}
+
 export function deriveDownloadStatus(
   fileId: number,
   requests: TransferRequestResponse[],

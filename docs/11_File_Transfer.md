@@ -83,6 +83,21 @@ Relay does not watch a shared folder for changes or push updates
 automatically. Refreshing a shared folder re-walks it, matching the
 existing single-file refresh behavior.
 
+**Download-side folder state (Milestone P13.3) is client-authoritative, not
+server-derived.** The backend's `Transfer` history is immutable and
+point-in-time — it can say a transfer once completed, never whether the
+result is still present or still current. Whether a downloaded folder's row
+offers "Download" or "Open" is decided entirely on the Android device, from
+three device-local facts the backend has no view into: a live filesystem
+existence check of the folder's resolved on-device directory, a
+client-owned reconciliation record of the folder's contents as of the last
+confirmed download (`android/src/files/folderIdentity.ts`), and which
+on-device directory name a given shared folder actually resolved to (needed
+because two shared folders may carry the same display name — see the same
+module for the disambiguation algorithm). See `docs/15_QA_NOTEBOOK.md`'s
+P13.3 entry for the full audit of this state machine and the races it
+closed.
+
 ---
 
 # 7. Transfer Process

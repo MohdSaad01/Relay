@@ -1,4 +1,4 @@
-import { deriveDownloadStatus } from '../../src/files/downloadStatus';
+import { deriveDownloadStatus, latestSendTransferId } from '../../src/files/downloadStatus';
 import { TransferRequestResponse, TransferResponse } from '../../src/api/types';
 
 function request(overrides: Partial<TransferRequestResponse> = {}): TransferRequestResponse {
@@ -104,5 +104,35 @@ test('completed downgrades to idle when fileExists is explicitly false — the d
 test('fileExists is irrelevant to non-completed statuses', () => {
   expect(deriveDownloadStatus(5, [], [transfer({ status: 'in_progress' })], false)).toEqual({
     kind: 'in_progress',
+  });
+});
+
+// P13.3 (queue investigation): latestSendTransferId returns a *transfer* id,
+// a completely different id space from the shared_file_id every caller here
+// otherwise deals in. Regression coverage for a real bug caught during
+// physical-device verification: FilesScreen originally passed a
+// shared_file_id straight to TransferStreamManager.isActive (which compares
+// against a transfer id), so the "is this row's download actually streaming
+// right now" check silently always returned false.
+describe('latestSendTransferId', () => {
+  test('undefined when no transfer references the file', () => {
+    expect(latestSendTransferId(5, [])).toBeUndefined();
+  });
+
+  test('returns the matching send transfer\'s own id, not the shared_file_id', () => {
+    expect(latestSendTransferId(5, [transfer({ id: 999, shared_file_id: 5 })])).toBe(999);
+  });
+
+  test('ignores a receive-direction transfer for the same shared_file_id', () => {
+    expect(latestSendTransferId(5, [transfer({ id: 999, shared_file_id: 5, direction: 'receive' })])).toBeUndefined();
+  });
+
+  test('picks the most recent (highest id) send transfer when several exist for the same file', () => {
+    const transfers = [
+      transfer({ id: 10, shared_file_id: 5, status: 'failed' }),
+      transfer({ id: 30, shared_file_id: 5, status: 'in_progress' }),
+      transfer({ id: 20, shared_file_id: 5, status: 'cancelled' }),
+    ];
+    expect(latestSendTransferId(5, transfers)).toBe(30);
   });
 });

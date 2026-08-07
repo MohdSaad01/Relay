@@ -22,6 +22,13 @@ import { deriveDownloadStatus } from './downloadStatus';
  * since drifted from what was last confirmed on disk (folderIdentity.ts's
  * reconciledChildren record) reports 'idle' instead, matching how a deleted
  * single file already downgrades back to 'idle' (useDownloadExistence).
+ *
+ * P13.3: the on-device gap called out above is now closed — see the
+ * `folderExists` parameter below, FilesScreen's own live re-verification of
+ * a folder's root directory (via useDownloadExistence, reused for folder
+ * roots, keyed by folderIdentity.ts's resolved localRoot), and
+ * downloadActions.ts's openDownloadedFolder. A deleted folder therefore now
+ * downgrades back to 'idle' exactly like a deleted single file.
  */
 export interface FolderDownloadStatus {
   kind: 'idle' | 'in_progress' | 'completed' | 'failed';
@@ -92,11 +99,24 @@ export function areAllFolderChildrenDownloaded(
   );
 }
 
+/**
+ * `folderExists` (P13.3) mirrors deriveDownloadStatus's own `fileExists`
+ * parameter exactly: optional and three-valued on purpose.  `undefined`
+ * means "not checked yet" and is treated the same as `true` (optimistic —
+ * don't flash "Download" while FilesScreen's on-device check is still in
+ * flight), while an explicit `false` downgrades an otherwise-'completed'
+ * folder back to 'idle' so it can be downloaded again. See
+ * FilesScreen.tsx's folder-existence effect for how this gets populated —
+ * a live re-check of the folder's resolved root directory
+ * (folderIdentity.ts's localRoot) against the actual filesystem, the same
+ * way useDownloadExistence already does for a single file.
+ */
 export function deriveFolderDownloadStatus(
   children: AvailableFolderFileResponse[],
   requests: TransferRequestResponse[],
   transfers: TransferResponse[],
   reconciledChildren: Record<string, number> | undefined,
+  folderExists?: boolean,
 ): FolderDownloadStatus {
   if (children.length === 0) {
     return { kind: 'idle', completedCount: 0, totalCount: 0 };
@@ -109,7 +129,11 @@ export function deriveFolderDownloadStatus(
     kind = 'failed';
   } else if (statuses.some(status => status.kind === 'in_progress' || status.kind === 'pending')) {
     kind = 'in_progress';
-  } else if (completedCount === children.length && isFolderContentReconciled(children, reconciledChildren)) {
+  } else if (
+    completedCount === children.length &&
+    isFolderContentReconciled(children, reconciledChildren) &&
+    folderExists !== false
+  ) {
     kind = 'completed';
   } else {
     kind = 'idle';

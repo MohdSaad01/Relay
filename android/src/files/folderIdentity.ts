@@ -126,19 +126,41 @@ async function writeRegistry(registry: Registry): Promise<void> {
  * equivalent below MEDIASTORE_MIN_SDK — see downloadedFilePath) that isn't
  * already occupied, resolving a conflict with the same "name (1)", "name
  * (2)", ... pattern blobUtil.ts's resolveAvailableMediaStoreName already
- * uses for an individual file. Checked the same way that function and
- * downloadExistence.ts's own existence check are: a raw on-device stat,
- * which reports true for a directory just as it does for a file.
+ * uses for an individual file.
+ *
+ * P13.3: a name is "taken" if EITHER an on-device stat finds it OR some
+ * other registry entry has already claimed it as its `localRoot`. The
+ * on-device check alone is not enough: `resolveLocalFolderRoot` reserves a
+ * name here, synchronously, well before any bytes actually land on disk —
+ * the physical directory isn't created until TransferStreamManager streams
+ * its first child (or, for an empty folder, ensureEmptyFolderStaged runs),
+ * which can be arbitrarily later (queued behind another transfer, a large
+ * first file, etc.). Two different shared folders that happen to share a
+ * display name and are both downloaded in quick succession could therefore
+ * both resolve to the same on-device-still-nonexistent name and collide the
+ * moment they actually materialize — exactly the "test / test(1) / test"
+ * inconsistency this was meant to fix in the first place. Consulting the
+ * registry (already fully serialized by withRegistryLock below, so it
+ * reflects every reservation made so far, materialized or not) closes that
+ * window; the on-device stat remains as a second check for a name occupied
+ * by something this registry doesn't know about (a manual copy, a folder
+ * from before this registry existed, etc).
  */
-async function findAvailableRootName(rawFolderName: string): Promise<string> {
-  const exists = (name: string) => ReactNativeBlobUtil.fs.exists(downloadedFilePath(name)).catch(() => false);
+async function findAvailableRootName(registry: Registry, rawFolderName: string): Promise<string> {
+  const reservedNames = new Set(Object.values(registry).map(entry => entry.localRoot).filter(Boolean));
+  const isTaken = async (name: string): Promise<boolean> => {
+    if (reservedNames.has(name)) {
+      return true;
+    }
+    return ReactNativeBlobUtil.fs.exists(downloadedFilePath(name)).catch(() => false);
+  };
 
-  if (!(await exists(rawFolderName))) {
+  if (!(await isTaken(rawFolderName))) {
     return rawFolderName;
   }
   for (let counter = 1; ; counter++) {
     const candidate = `${rawFolderName} (${counter})`;
-    if (!(await exists(candidate))) {
+    if (!(await isTaken(candidate))) {
       return candidate;
     }
   }
@@ -179,7 +201,7 @@ export function resolveLocalFolderRoot(sharedFolderId: number, rawFolderName: st
     if (existing) {
       return existing.localRoot;
     }
-    const localRoot = await findAvailableRootName(rawFolderName);
+    const localRoot = await findAvailableRootName(registry, rawFolderName);
     registry[key] = { ...registry[key], localRoot };
     await writeRegistry(registry);
     return localRoot;
@@ -239,6 +261,28 @@ export function readAllReconciledChildren(): Promise<Record<number, Record<strin
     for (const [key, entry] of Object.entries(registry)) {
       if (entry.reconciledChildren) {
         result[Number(key)] = entry.reconciledChildren;
+      }
+    }
+    return result;
+  });
+}
+
+/**
+ * Every shared folder's resolved on-device root directory name in one read,
+ * keyed by shared_folder_id (P13.3) — lets FilesScreen re-verify a
+ * "completed" folder still actually exists on disk (see useDownloadExistence
+ * for the file-level equivalent this mirrors), without each row resolving
+ * its own root name individually. A folder that's never been downloaded, or
+ * whose root has been resolved but not yet reconciled, is still included as
+ * long as `localRoot` is set — that's exactly the identifier needed to check
+ * existence, independent of reconciliation state.
+ */
+export function readAllLocalRoots(): Promise<Record<number, string>> {
+  return withRegistryLock(async registry => {
+    const result: Record<number, string> = {};
+    for (const [key, entry] of Object.entries(registry)) {
+      if (entry.localRoot) {
+        result[Number(key)] = entry.localRoot;
       }
     }
     return result;

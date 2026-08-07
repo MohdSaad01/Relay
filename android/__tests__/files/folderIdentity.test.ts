@@ -3,6 +3,7 @@ import ReactNativeBlobUtil from 'react-native-blob-util';
 import {
   getReconciledChildren,
   markFolderReconciled,
+  readAllLocalRoots,
   readAllReconciledChildren,
   resolveLocalFolderRoot,
 } from '../../src/files/folderIdentity';
@@ -149,6 +150,57 @@ describe('resolveLocalFolderRoot (P13.2, Issue 1)', () => {
     expect(new Set([first, second]).size).toBe(2);
     expect([first, second].sort()).toEqual(['test', 'test (1)']);
   });
+
+  // P13.3 (Problem 2): the real bug the test above didn't actually catch.
+  // Its mockWriteFile implementation optimistically added every registry
+  // entry to `disk` the moment the registry was *written*, which is not how
+  // the app behaves in production: writeRegistry only persists the JSON
+  // mapping file, the physical directory isn't created until
+  // TransferStreamManager actually streams a first child into it (or, for
+  // an empty folder, ensureEmptyFolderStaged runs) — which can happen much
+  // later (queued behind another transfer, a large first file, etc). This
+  // test keeps `disk` genuinely empty throughout (mirroring "neither
+  // folder's bytes have started moving yet") to prove the fix (checking
+  // already-*reserved* registry names, not just what's materialized on
+  // disk) is what actually prevents the collision — confirmed live on
+  // device as the root cause of the "test / test(1) / test" naming
+  // inconsistency reported in the P13.3 audit.
+  test('two never-before-seen same-named folders never collide even before either exists on disk', async () => {
+    let registry: Record<string, { localRoot: string }> = {};
+    mockExists.mockResolvedValue(false); // neither folder's bytes have landed yet
+    mockReadFile.mockImplementation(() =>
+      Object.keys(registry).length > 0
+        ? Promise.resolve(JSON.stringify(registry))
+        : Promise.reject(new Error('ENOENT')),
+    );
+    mockWriteFile.mockImplementation((_path: string, data: string) => {
+      registry = JSON.parse(data);
+      return Promise.resolve();
+    });
+
+    const [first, second] = await Promise.all([
+      resolveLocalFolderRoot(10, 'test'),
+      resolveLocalFolderRoot(20, 'test'),
+    ]);
+
+    expect(new Set([first, second]).size).toBe(2);
+    expect([first, second].sort()).toEqual(['test', 'test (1)']);
+    expect(mockExists).toHaveBeenCalled(); // still consults the filesystem as a second check
+  });
+
+  // A name already claimed by another folder's registry entry is treated as
+  // taken even when nothing has verified it against the filesystem at all
+  // (mockExists never resolves true here) — the registry itself, not disk
+  // state, is what should have decided this the moment the first folder's
+  // root was resolved.
+  test('a name already reserved in the registry is skipped even if the filesystem has no record of it', async () => {
+    mockReadFile.mockResolvedValue(JSON.stringify({ '1': { localRoot: 'test' } }));
+    mockExists.mockResolvedValue(false);
+
+    const localRoot = await resolveLocalFolderRoot(2, 'test');
+
+    expect(localRoot).toBe('test (1)');
+  });
 });
 
 describe('markFolderReconciled / getReconciledChildren (P13.2, Issue 2)', () => {
@@ -225,6 +277,26 @@ describe('readAllReconciledChildren (P13.2, Issue 2)', () => {
 
   test('empty object when no registry file exists yet', async () => {
     const all = await readAllReconciledChildren();
+    expect(all).toEqual({});
+  });
+});
+
+describe('readAllLocalRoots (P13.3)', () => {
+  test('returns every folder\'s resolved root name, keyed numerically', async () => {
+    mockReadFile.mockResolvedValue(
+      JSON.stringify({
+        '1': { localRoot: 'test', reconciledChildren: { 'a.txt': 100 } },
+        '2': { localRoot: 'Alpha' },
+      }),
+    );
+
+    const all = await readAllLocalRoots();
+
+    expect(all).toEqual({ 1: 'test', 2: 'Alpha' });
+  });
+
+  test('empty object when no registry file exists yet', async () => {
+    const all = await readAllLocalRoots();
     expect(all).toEqual({});
   });
 });

@@ -2327,3 +2327,254 @@ Two correctness bugs discovered after P13.1, both documented as accepted-but-unf
 - **Byte-identical-size content changes are undetectable.** A file edited without changing its length (same relative_path, same file_size) produces no signal anywhere in the metadata this fix relies on — genuine checksum verification is an explicitly deferred V1 feature (CLAUDE.md's "Not Yet Implemented" list), and adding one was out of this milestone's scope. In practice this only matters for a contrived same-length edit; the milestone's own "changing file contents" verification (a real content edit) was caught correctly because it also changed size.
 - **Orphaned local files are not cleaned up.** A file removed or renamed away from a shared folder leaves its old on-device bytes in place after a re-download reconciles the folder's status — only the *changed* member (added, resized) gets its old copy actively deleted before re-fetching (needed to avoid a spurious "(1)" conflict-rename); a purely-vanished path is simply dropped from the reconciliation record, not deleted from disk. Verified live: `bonus.txt`, `remove_me.txt`, and the pre-rename `keep.txt` all remained in `Downloads/Relay/Alpha/` after their respective updates were fully reconciled.
 - **The local registry does not survive a reinstall**, and does not retroactively cover folders downloaded before this milestone's build. Either case makes a folder's next touch behave as if seen for the first time — for Issue 1, this can mint a `(1)`-suffixed sibling next to an orphaned original directory; for Issue 2, the row simply starts back at "Download" until re-confirmed. Observed live in this session (a folder downloaded before the `reconciledChildren` field existed correctly showed "Download" once, with no data loss, until re-downloaded).
+
+---
+
+# Milestone P13.3 — Folder State Machine Audit & Correctness
+
+## Objective
+
+Not a symptom fix. Four reported problems (a deleted folder still showing
+"Open"; duplicate-named folders occasionally colliding despite P13.2's own
+fix; a transient Download → Downloading → Download → Open flicker during a
+single download; and an unverified claim that the P11 download queue lets
+two transfers stream concurrently) were treated as evidence that folder
+state was assembled from too many independently-refreshed, non-communicating
+sources rather than four unrelated bugs. This entry audits the complete
+lifecycle — Discovery → Proposed → Queued → Downloading → Published → Open →
+Modified → Deleted → Re-downloaded → Restart → Poll → Notification → Open —
+before changing any code, per this milestone's own instructions.
+
+## Audit Findings — Sources of Truth
+
+`FilesScreen`'s `Download / Downloading / Open` label was never a stored
+enum; it is recomputed at every render from **five** independently-polled or
+-cached inputs, on three different cadences, none of which notify each
+other:
+
+1. `GET /transfers/requests` — 2000ms poll. Always empty for a download in
+   practice (both directions auto-accept).
+2. `GET /transfers` — 2000ms poll. `Transfer.status` is set to `in_progress`
+   the instant a download is *proposed* (`transfer_service._create_transfer`),
+   not when its bytes actually start moving — the root cause behind the
+   queue finding below.
+3. `GET /folders` — 5000ms poll. `file_count`/`total_size` only.
+4. `GET /folders/{id}/files` — re-fetched every 5000ms tick (as of P13.2).
+5. The on-device `relay-folder-registry.json` (`folderIdentity.ts`) —
+   `localRoot` (P13.2 Issue 1) and `reconciledChildren` (P13.2 Issue 2),
+   loaded into React state by `useFolderReconciliation`, refreshed on the
+   same 5000ms cadence as #4, plus an explicit `refresh()` call from one of
+   `handleFolderDownload`'s two branches (not the other — see Problem 3).
+
+**Missing from that list, until this milestone: live filesystem state.**
+Every one of the four problems traces back to the same gap — nothing in the
+polling/render path ever asked the actual filesystem whether a folder it
+was about to call "downloaded" was still there, or already there.
+
+## Root Causes
+
+**Problem 1 — deleted folder still shows "Open".** Not a broken check; no
+check existed. `folderDownloadStatus.ts` said so in its own doc comment:
+folder existence was an explicitly accepted V1 gap, unlike the file path
+(`useDownloadExistence`), which already re-verifies a "completed" file
+against `RNFS`-equivalent `fs.exists()` on every poll. `handleOpenFolder`'s
+failed-`ACTION_VIEW` catch block also discarded the failure as an inline
+error string instead of re-verifying and downgrading the row, unlike its
+file counterpart (`handleOpen` → `verify(fileName)`).
+
+**Problem 2 — duplicate folder names still collided after P13.2.** A real
+race P13.2's own regression test didn't catch, because that test's mock
+conflated "registry written" with "directory materialized on disk" — not
+true in production. `folderIdentity.ts`'s `findAvailableRootName` picked a
+free name by checking `fs.exists()` alone. But `resolveLocalFolderRoot`
+resolves and *commits* a name to the registry synchronously, at the moment
+of the download tap — well before any bytes land (streaming may be queued
+behind another transfer, or simply hasn't reached its first
+`.config({path})` write yet). Two different shared folders sharing a
+display name, downloaded in quick succession, could both resolve before
+either's directory existed on disk, both see `fs.exists() === false`, and
+both claim the same name. Confirmed live (see Verification): on a clean
+registry, tapping Download on three same-named folders within the same
+second, before the fix, is exactly the "test / test(1) / test" inconsistency
+described in the milestone's own bug report.
+
+**Problem 3 — Download → Downloading → Download → Open flicker.**
+`TransferStreamManager.notifyIfFolderComplete` writes the folder's
+reconciliation record *synchronously before* it flips that stream's local
+`state.status` to `'completed'` — but it has no reference into `FilesScreen`
+and never told `refreshReconciliation()` to re-read it. The fast 2000ms
+transfers poll could observe "every child completed" well before the slower
+5000ms folder poll's next tick happened to re-read the now-stale-in-memory
+registry, and in between, `deriveFolderDownloadStatus` fell through to
+`'idle'` (`completedCount === children.length` true, `isFolderContentReconciled`
+still false) — reappearing as "Download". Structurally enabled by
+`handleFolderDownload`'s empty-pending branch calling `refreshReconciliation()`
+immediately, while its normal (something-actually-streamed) branch never did.
+
+**Queue investigation — confirmed correct, UI was misleading.** `TransferStreamManager`'s
+FIFO queue (P11) is genuinely one-stream-at-a-time; confirmed again this
+session via backend access logs (`GET .../download` for a queued transfer
+does not start until the active one's finishes — see Verification). The
+*label* was the defect: `FilesScreen` derived `Downloading...` from
+`Transfer.status === 'in_progress'` alone, true for every proposed transfer
+in a batch regardless of whether `TransferStreamManager.isActive()` agreed —
+so a 51 MB active download and a 6 B one still waiting in `queue` both
+showed "Downloading...".
+
+## Architecture Decision
+
+Rather than add a sixth independent source of truth, each fix makes the
+filesystem the tie-breaker exactly where the audit found it missing,
+without changing who owns what:
+
+1. **Registry-checked reservation, not just filesystem-checked.**
+   `findAvailableRootName` now treats a name as taken if *either* the
+   filesystem has it *or* some other registry entry has already reserved it
+   — the registry (already fully serialized by `withRegistryLock`) is
+   authoritative for "has anyone already claimed this," the filesystem
+   remains authoritative for "does something un-registered already occupy
+   this."
+2. **`deriveFolderDownloadStatus` gains an optional `folderExists`
+   parameter**, mirroring `deriveDownloadStatus`'s existing `fileExists` —
+   three-valued (`undefined` = not checked yet, optimistic; `false` =
+   downgrade to `'idle'`), fed by a new `FilesScreen` effect that re-verifies
+   a `'completed'` folder's resolved root directory the same way the
+   existing file effect already does. `useFolderReconciliation` was extended
+   to also expose each folder's `localRoot` (a new `readAllLocalRoots`
+   alongside the existing `readAllReconciledChildren`) since the existence
+   check needs a physical path, not just a shared_folder_id.
+3. **`FilesScreen` subscribes to `TransferStreamManager`** (its existing
+   `subscribe`/`notify` pub-sub, previously used by nothing outside the
+   detail screen) and calls `refreshReconciliation()` the instant a stream
+   transitions to `'completed'` — which is always after
+   `notifyIfFolderComplete`'s registry write in `start()`'s own call order,
+   closing the race instead of just narrowing the poll interval. The same
+   subscription (keyed off a `transferId:status` string so it doesn't fire
+   on every in-flight progress tick) drives a re-render for the queue fix
+   below.
+4. **`active` = `TransferStreamManager.isActive(transferId)`, resolved via a
+   new `latestSendTransferId(fileId, transfers)` helper** — not
+   `isActive(fileId)`. A real bug was caught here during physical
+   verification (see below) before landing: `shared_file_id` and
+   `transfer_id` are different id spaces that don't collide by construction,
+   so passing one where the other was expected silently always returns
+   `false`. `downloadButtonLabel`/`folderDownloadButtonLabel` now show
+   `'Queued'` instead of `'Downloading...'` when `status.kind === 'in_progress'`
+   but this row isn't the one actually streaming.
+5. **A fifth, second-order gap found only through physical re-testing of
+   fix #2 above:** `handleFolderDownload`'s per-child "already reconciled,
+   skip" logic only ever compared backend metadata (Transfer status +
+   `reconciledChildren`) — it had no way to know the *entire folder root*
+   had been deleted out from under it. A row correctly downgraded to
+   "Download" by fix #2, then tapped, found every child still
+   metadata-reconciled and skipped all of them — silently proposing nothing,
+   forever. Fixed by checking the resolved root's existence once, up front;
+   if missing, every child is treated as pending regardless of its
+   individual reconciliation match, the same as a never-before-seen folder.
+
+## Files Modified
+
+- `android/src/files/folderIdentity.ts` — `findAvailableRootName` now takes
+  the in-flight `registry` and checks reserved names, not just `fs.exists()`
+  (Problem 2); added `readAllLocalRoots`.
+- `android/src/files/folderDownloadStatus.ts` — `deriveFolderDownloadStatus`
+  gained the `folderExists` parameter (Problem 1).
+- `android/src/files/useFolderReconciliation.ts` — also loads and exposes
+  `localRootByFolderId`.
+- `android/src/files/downloadStatus.ts` — added `latestSendTransferId`
+  (queue fix).
+- `android/src/screens/files/FilesScreen.tsx` — folder-existence
+  verification effect (Problem 1); `TransferStreamManager` subscription
+  driving both `refreshReconciliation()` on completion (Problem 3) and an
+  `active`-aware re-render (queue fix); `downloadButtonLabel`/
+  `folderDownloadButtonLabel` accept `active` and show `'Queued'`;
+  `handleFolderDownload` checks the resolved root's existence once and
+  forces every child pending if it's missing (Problem 1, second-order);
+  `handleOpenFolder`'s catch now re-verifies existence, matching `handleOpen`.
+- Tests: `__tests__/files/folderIdentity.test.ts` (a regression test that
+  keeps the on-device filesystem genuinely empty throughout — the P13.2 test
+  it sits next to didn't, which is why the race survived that milestone),
+  `__tests__/files/folderDownloadStatus.test.ts`, `__tests__/files/downloadStatus.test.ts`
+  (`latestSendTransferId`), `__tests__/files/useFolderReconciliation.test.tsx` (new).
+
+## Verification
+
+- `npx tsc --noEmit`: clean. `npx jest`: 232/232 passing.
+- Live device (RMX3997, USB-connected; backend rebound to `0.0.0.0` and
+  reached over the phone's own hotspot at `10.169.164.233`; desktop restarted
+  and confirmed it detects and reuses the externally-running backend rather
+  than spawning its own loopback-only instance — the dev-mode path this
+  session discovered is required for any LAN-reachable physical-device test
+  at all), this session:
+  - **Problem 2:** on a registry wiped to a clean baseline, three shared
+    folders all named `test` were tapped Download within about one second of
+    each other. Result: `Relay/test/`, `Relay/test (1)/`, `Relay/test (2)/`,
+    each holding its own distinct, unmerged content (`adb shell cat` on each
+    `note.txt` confirmed three different bodies). Re-ran once *without* the
+    fix's registry-check (filesystem-only) to confirm the collision actually
+    reproduces first — it did, all three tapped downloads on a cross-session-
+    contaminated device state briefly showed the same pre-existing stale
+    reservation before a clean-registry re-run isolated a true first-time
+    collision and the fix.
+  - **Problem 1:** downloaded a single-file folder to "Open", deleted its
+    directory via `adb shell rm -rf` (simulating the user clearing it from a
+    file manager), and — with no app restart or manual navigation — the row
+    downgraded to "Download" on its own within one poll tick. Re-tapping
+    Download initially did **nothing** (the second-order gap above,
+    caught live); after the fix, re-tapping correctly re-streamed the file
+    and the row reached "Open" again.
+  - **Problem 3:** a 3-file folder's download was burst-captured at ~350ms
+    intervals across the whole run (16 frames). Sequence observed:
+    `Downloading...` → intermittently `Queued` (correctly reflecting the
+    real gaps between each child's own stream, not a bug) → `Open`. Zero
+    frames showed `Download` reappearing between the in-progress states and
+    `Open`.
+  - **Queue investigation:** tapped a 60 MB folder then, ~300ms later, a 6 B
+    folder. Before the `isActive` id-space fix: both rows showed
+    `Downloading...`/`Queued` inconsistently with actual backend activity
+    (traced to the bug itself, not real concurrent streaming). After the
+    fix: the 60 MB row showed `Downloading...` and the 6 B row `Queued`,
+    matching backend access logs exactly — `GET /transfers/435/download`
+    (60 MB) ran for the full ~10s duration, and `GET /transfers/436/download`
+    (6 B) did not start until immediately after 435's completion log line.
+    Confirmed again with three concurrent same-named-folder taps (Problem 2's
+    own test): exactly one `Downloading...`/two `Queued` at any sampled
+    instant, never zero or more than one `Downloading...`.
+  - **Full restart cycle:** backend process killed and restarted (rebound to
+    `0.0.0.0`), desktop (Electron) killed and restarted (confirmed reusing
+    the already-running backend), `adb` server cycled, app force-stopped and
+    relaunched. All five previously-downloaded folders' states (`Open`/
+    `Download`) were byte-for-byte consistent with their pre-restart values;
+    the local registry survives all of the above by construction (it's
+    private app storage, untouched by any of these restarts).
+  - **Update scenarios re-confirmed** (add/remove/rename against `UpdateMe`,
+    each via `POST /folders/{id}/refresh`): identical behavior to P13.2's own
+    verification — no regression from this milestone's changes.
+  - Backend access log scanned for the full session: zero `500`s, zero
+    unhandled exceptions. `adb logcat` scanned for `ReactNativeJS` `WARN`/
+    `console.warn`/exceptions across the full session buffer: none found.
+  - Test shares unshared via `DELETE /api/v1/folders/{id}` after
+    verification; physically-downloaded test content left on-device,
+    matching P13.2's own precedent.
+
+## Remaining Limitations
+
+- **Mixed file+folder concurrent queueing was not separately verified.**
+  The fix touches `FileRow` and `FolderRow` identically (same
+  `latestSendTransferId`/`isActive` logic, same underlying
+  `TransferStreamManager` queue with no file/folder distinction at that
+  layer), and folder-vs-folder and multi-child-within-a-folder queueing were
+  both directly verified — but a standalone file queued behind/ahead of a
+  folder specifically was not exercised live this session.
+- **Problem 2's fix narrows, but does not eliminate, every naming race.** A
+  name is now checked against the registry (reserved, even before
+  materialized) and the filesystem (occupied by something the registry
+  doesn't know about) — but a third source, a directory created by
+  something *other than this app* between those two checks and the
+  registry write, remains a (pre-existing, far narrower) TOCTOU window; not
+  addressed, consistent with this being an audit of the app's own state
+  machine, not a general filesystem-race hardening pass.
+- **All P13.2 "Remaining Limitations" still apply unchanged** — orphaned
+  local files on rename/removal are not cleaned up, byte-identical-size
+  content edits remain undetectable, and the registry does not survive a
+  reinstall.

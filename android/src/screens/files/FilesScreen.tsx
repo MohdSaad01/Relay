@@ -8,20 +8,24 @@ import {
   Text,
   View,
 } from 'react-native';
+import ReactNativeBlobUtil from 'react-native-blob-util';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSharedFiles } from '../../files/useSharedFiles';
 import { useSharedFolders } from '../../files/useSharedFolders';
 import { useFolderFilesMap } from '../../files/useFolderFilesMap';
+import { useFolderReconciliation } from '../../files/useFolderReconciliation';
 import { deriveDownloadStatus, FileDownloadStatus } from '../../files/downloadStatus';
-import { deriveFolderDownloadStatus, FolderDownloadStatus } from '../../files/folderDownloadStatus';
+import { deriveFolderDownloadStatus, FolderDownloadStatus, isFolderChildReconciled } from '../../files/folderDownloadStatus';
 import { useDownloadExistence } from '../../files/useDownloadExistence';
+import { downloadedFilePath } from '../../files/downloadExistence';
+import { markFolderReconciled, resolveLocalFolderRoot } from '../../files/folderIdentity';
 import { openDownloadedFile, openDownloadedFolder } from '../../files/downloadActions';
 import { useTransferRequests } from '../../transfers/useTransferRequests';
 import { useTransfers } from '../../transfers/useTransfers';
 import { getFolderFiles } from '../../api/endpoints/folders';
 import { getTransfer, proposeTransfer } from '../../api/endpoints/transfers';
 import { ApiError } from '../../api/client';
-import { AvailableFileResponse, AvailableFolderResponse } from '../../api/types';
+import { AvailableFileResponse, AvailableFolderFileResponse, AvailableFolderResponse } from '../../api/types';
 import { formatFileSize } from '../../utils/formatFileSize';
 import { TransferStreamManager } from '../../streaming/TransferStreamManager';
 import { ensureEmptyFolderStaged } from '../../streaming/blobUtil';
@@ -79,6 +83,7 @@ export function FilesScreen() {
     refreshSilently: refreshFoldersSilently,
   } = useSharedFolders();
   const folderFilesMap = useFolderFilesMap(folders);
+  const { reconciledByFolderId, refresh: refreshReconciliation } = useFolderReconciliation(folders);
   const { requests, refresh: refreshRequests } = useTransferRequests();
   const { transfers, refresh: refreshTransfers } = useTransfers();
   const { existence, verify } = useDownloadExistence();
@@ -230,13 +235,44 @@ export function FilesScreen() {
    * Enumerates a shared folder's children (GET /folders/{id}/files, always
    * fetched fresh here — not read from folderFilesMap — so a retry after an
    * interrupted transfer sees the folder's current contents) and proposes a
-   * download for every one not already 'completed' (reusing
-   * deriveDownloadStatus per child), so retrying a partially-downloaded
-   * folder only fetches what's still missing instead of re-downloading
-   * everything and creating "(1)"-suffixed duplicates of files that already
-   * landed. Each accepted transfer is hand to TransferStreamManager exactly
-   * like a single-file download — its existing FIFO queue is what actually
-   * serializes N files behind one active stream.
+   * download for every one not already 'completed' *and current*
+   * (isFolderChildCurrent, P13.2 Issue 2 — a child whose Transfer already
+   * says 'completed' but whose size has since changed on the desktop still
+   * needs a fresh download, not a skip), so retrying a partially-downloaded
+   * or since-updated folder only fetches what's actually missing or stale
+   * instead of re-downloading everything. Each accepted transfer is handed
+   * to TransferStreamManager exactly like a single-file download — its
+   * existing FIFO queue is what actually serializes N files behind one
+   * active stream.
+   *
+   * P13.2 (Issue 1): resolves this folder's on-device root once up front
+   * (resolveLocalFolderRoot — a cheap read-through after the first ever
+   * download of this shared_folder_id) so every child this call proposes
+   * lands under that same, correctly-disambiguated directory rather than
+   * two different shared folders that happen to share a display name
+   * merging into one.
+   *
+   * P13.2 (Issue 2): a child being re-proposed because it's stale (already
+   * 'completed', but isFolderChildReconciled says otherwise) has its
+   * previous on-device copy deleted first. Without this, the fresh download
+   * would land at the exact same relative path as the old one still sitting
+   * there, and blobUtil.ts's own (unchanged, out of this milestone's scope)
+   * resolveAvailableMediaStoreName would treat that as an ordinary same-name
+   * collision — the same handling that deliberately keeps two *unrelated*
+   * same-named files side by side — and rename the update to "name
+   * (1).ext" instead of replacing the outdated content it's meant to
+   * supersede.
+   *
+   * When nothing at all ends up pending — every current child already
+   * matches the reconciliation record — the record is still rewritten from
+   * `children` before returning. This is what makes a removal-only update
+   * (nothing to actually download, just something to stop counting) able to
+   * self-heal back to "Open": without this, a file dropped from the share
+   * would leave the old, now-too-large record in place forever, since
+   * nothing in this run would otherwise ever touch it. See
+   * folderIdentity.ts's own doc comment for the physical-device failure
+   * this fixed (a folder that had a file removed never came back from
+   * "Download" even after a successful re-download).
    */
   const handleFolderDownload = useCallback(
     async (folder: AvailableFolderResponse) => {
@@ -257,21 +293,41 @@ export function FilesScreen() {
       });
       try {
         const children = await getFolderFiles(folder.id);
+        const localRoot = await resolveLocalFolderRoot(folder.id, folder.folder_name);
         if (children.length === 0) {
           // Empty folder: nothing to stream, so nothing would otherwise ever
           // run for it — see ensureEmptyFolderStaged's own doc comment for
           // why this only ever lands in private staging, never MediaStore.
-          await ensureEmptyFolderStaged(folder.folder_name);
+          await ensureEmptyFolderStaged(localRoot);
           return;
         }
-        const pending = children.filter(
-          child => deriveDownloadStatus(child.id, requests, transfers).kind !== 'completed',
-        );
-        for (const child of pending) {
-          const request = await proposeTransfer({ direction: 'send', shared_file_id: child.id });
-          if (request.status === 'accepted' && request.transfer_id != null) {
-            const transfer = await getTransfer(request.transfer_id);
-            TransferStreamManager.start(transfer);
+        const reconciledChildren = reconciledByFolderId[folder.id];
+        const pending: AvailableFolderFileResponse[] = [];
+        for (const child of children) {
+          const status = deriveDownloadStatus(child.id, requests, transfers);
+          if (status.kind === 'pending' || status.kind === 'in_progress') {
+            continue;
+          }
+          if (status.kind === 'completed') {
+            if (isFolderChildReconciled(child, reconciledChildren)) {
+              continue;
+            }
+            await ReactNativeBlobUtil.fs
+              .unlink(downloadedFilePath(`${localRoot}/${child.relative_path}`))
+              .catch(() => undefined);
+          }
+          pending.push(child);
+        }
+        if (pending.length === 0) {
+          await markFolderReconciled(folder.id, children);
+          refreshReconciliation();
+        } else {
+          for (const child of pending) {
+            const request = await proposeTransfer({ direction: 'send', shared_file_id: child.id });
+            if (request.status === 'accepted' && request.transfer_id != null) {
+              const transfer = await getTransfer(request.transfer_id);
+              TransferStreamManager.start(transfer);
+            }
           }
         }
         await Promise.all([refreshRequests(), refreshTransfers()]);
@@ -288,7 +344,7 @@ export function FilesScreen() {
         });
       }
     },
-    [requests, transfers, refreshRequests, refreshTransfers],
+    [requests, transfers, reconciledByFolderId, refreshReconciliation, refreshRequests, refreshTransfers],
   );
 
   /**
@@ -304,7 +360,13 @@ export function FilesScreen() {
       return next;
     });
     try {
-      await openDownloadedFolder(folder.folder_name);
+      // P13.2 (Issue 1): open whatever this folder's download actually
+      // resolved to on-device, not its raw shared display name — the two
+      // only ever differ once a same-named folder conflict has actually
+      // been resolved (see folderIdentity.ts), so this is a cheap
+      // read-through the rest of the time.
+      const localRoot = await resolveLocalFolderRoot(folder.id, folder.folder_name);
+      await openDownloadedFolder(localRoot);
     } catch {
       setFolderOpenErrors(prev => ({
         ...prev,
@@ -352,7 +414,12 @@ export function FilesScreen() {
               requesting={requestingFolderIds[item.data.id] ?? false}
               requestError={folderRequestErrors[item.data.id]}
               openError={folderOpenErrors[item.data.id]}
-              status={deriveFolderDownloadStatus(folderFilesMap[item.data.id] ?? [], requests, transfers)}
+              status={deriveFolderDownloadStatus(
+                folderFilesMap[item.data.id] ?? [],
+                requests,
+                transfers,
+                reconciledByFolderId[item.data.id],
+              )}
               onDownload={() => handleFolderDownload(item.data)}
               onOpen={() => handleOpenFolder(item.data)}
             />

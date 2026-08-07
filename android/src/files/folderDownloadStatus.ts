@@ -13,6 +13,15 @@ import { deriveDownloadStatus } from './downloadStatus';
  * not extend to a folder child's nested relative_path. A folder therefore
  * shows 'completed' once every child's Transfer says so, even if one was
  * since deleted from disk; documented as an accepted V1 limitation.
+ *
+ * P13.2 (Issue 2): 'completed' additionally requires isFolderContentReconciled
+ * below — every child's Transfer being individually 'completed' is no longer
+ * sufficient once the shared folder can change shape after being downloaded
+ * (a file added, removed, renamed, or resized on the desktop). A folder
+ * whose children are all individually 'completed' but whose content has
+ * since drifted from what was last confirmed on disk (folderIdentity.ts's
+ * reconciledChildren record) reports 'idle' instead, matching how a deleted
+ * single file already downgrades back to 'idle' (useDownloadExistence).
  */
 export interface FolderDownloadStatus {
   kind: 'idle' | 'in_progress' | 'completed' | 'failed';
@@ -20,10 +29,74 @@ export interface FolderDownloadStatus {
   totalCount: number;
 }
 
+/**
+ * Whether one current child's on-device copy matches what this folder's
+ * reconciliation record (folderIdentity.ts's markFolderReconciled — the
+ * (relative_path -> file_size) shape confirmed at the end of the last
+ * successful download, *not* Transfer history) says was actually
+ * downloaded. Used both to gate a folder's aggregate 'completed' status
+ * below and by FilesScreen.handleFolderDownload to decide which children a
+ * re-download of a since-changed folder must actually re-fetch (a child
+ * whose Transfer already says 'completed' but whose size has since changed
+ * on the desktop must still be treated as needing a fresh download, not
+ * skipped as already-done).
+ *
+ * `reconciledChildren` is undefined for a folder that has never finished a
+ * download (or predates this reconciliation record) — every child is
+ * correctly "not reconciled" in that case, same as an empty record.
+ */
+export function isFolderChildReconciled(
+  child: AvailableFolderFileResponse,
+  reconciledChildren: Record<string, number> | undefined,
+): boolean {
+  return reconciledChildren?.[child.relative_path] === child.file_size;
+}
+
+/**
+ * Whether the whole folder's on-device copy matches what's currently
+ * shared. Requires every current child to be individually reconciled
+ * (catches an added or resized file) *and* the reconciled record to hold no
+ * extra entries beyond the current children (catches a removed file, and —
+ * combined with the per-child check above — a renamed one: the old path
+ * lingers as an "extra" reconciled entry while the new path has no entry of
+ * its own, so both directions of a rename are caught even when the file's
+ * size never changed).
+ */
+function isFolderContentReconciled(
+  children: AvailableFolderFileResponse[],
+  reconciledChildren: Record<string, number> | undefined,
+): boolean {
+  const entries = reconciledChildren ?? {};
+  if (Object.keys(entries).length !== children.length) {
+    return false;
+  }
+  return children.every(child => isFolderChildReconciled(child, entries));
+}
+
+/**
+ * Whether every current child's own Transfer has individually finished —
+ * deliberately *not* gated on isFolderContentReconciled above (unlike
+ * deriveFolderDownloadStatus's 'completed' kind): TransferStreamManager
+ * calls this to decide the exact moment a download run itself has finished
+ * and it's time to write the reconciliation record in the first place.
+ * Gating that decision on the record it's about to write would never fire.
+ */
+export function areAllFolderChildrenDownloaded(
+  children: AvailableFolderFileResponse[],
+  requests: TransferRequestResponse[],
+  transfers: TransferResponse[],
+): boolean {
+  return (
+    children.length > 0 &&
+    children.every(child => deriveDownloadStatus(child.id, requests, transfers).kind === 'completed')
+  );
+}
+
 export function deriveFolderDownloadStatus(
   children: AvailableFolderFileResponse[],
   requests: TransferRequestResponse[],
   transfers: TransferResponse[],
+  reconciledChildren: Record<string, number> | undefined,
 ): FolderDownloadStatus {
   if (children.length === 0) {
     return { kind: 'idle', completedCount: 0, totalCount: 0 };
@@ -36,7 +109,7 @@ export function deriveFolderDownloadStatus(
     kind = 'failed';
   } else if (statuses.some(status => status.kind === 'in_progress' || status.kind === 'pending')) {
     kind = 'in_progress';
-  } else if (completedCount === children.length) {
+  } else if (completedCount === children.length && isFolderContentReconciled(children, reconciledChildren)) {
     kind = 'completed';
   } else {
     kind = 'idle';

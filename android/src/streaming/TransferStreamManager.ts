@@ -39,8 +39,9 @@ import { getFolderFiles } from '../api/endpoints/folders';
 import { ApiError } from '../api/client';
 import { TransferResponse } from '../api/types';
 import { SessionManager } from '../session/SessionManager';
-import { deriveFolderDownloadStatus } from '../files/folderDownloadStatus';
+import { areAllFolderChildrenDownloaded } from '../files/folderDownloadStatus';
 import { downloadedFolderContentUri, MEDIASTORE_MIN_SDK } from '../files/downloadExistence';
+import { markFolderReconciled, resolveLocalFolderRoot } from '../files/folderIdentity';
 import { downloadFile, isStreamCancelError, publishDownload, StreamTask, uploadFile } from './blobUtil';
 import { clearUploadSource, getUploadSource } from './uploadSourceRegistry';
 import { startTransferNotification, stopTransferNotification, updateTransferNotification } from './foregroundService';
@@ -86,13 +87,45 @@ function setState(next: StreamState): void {
 // start() moves the finished file into public storage via publishDownload
 // once the download completes. See blobUtil.ts's publishDownload for why.
 //
-// downloadRelativePath (P13) is transfer.folder_relative_path when set (a
-// folder child, e.g. "University Notes/Semester 1/DBMS.pdf") or otherwise
-// just transfer.file_name (the pre-P13, single-file shape) — either way,
-// react-native-blob-util's `.config({ path })` is expected to create any
-// missing intermediate directories itself when writing the response.
-function downloadRelativePath(transfer: TransferResponse): string {
-  return transfer.folder_relative_path ?? transfer.file_name;
+// resolveDownloadRelativePath (P13, P13.2) is transfer.folder_relative_path
+// with its leading segment substituted for the folder's locally-resolved
+// root name when set (a folder child, e.g. "University Notes (1)/Semester
+// 1/DBMS.pdf") or otherwise just transfer.file_name (the pre-P13,
+// single-file shape) — either way, react-native-blob-util's
+// `.config({ path })` is expected to create any missing intermediate
+// directories itself when writing the response.
+//
+// The substitution (P13.2, Issue 1) only ever applies to a SEND transfer
+// with shared_folder_id set — an Android folder *upload*'s own
+// folder_relative_path (RECEIVE direction) has no shared_folder_id at all
+// (see backend/app/models/transfer.py: that column is "set only for a SEND
+// transfer whose source file belongs to a shared folder") and is never
+// actually read for an upload's own relativePath anyway (see start()
+// below), so it's returned unchanged rather than run through folder-root
+// resolution it doesn't need.
+//
+// Resolving here — the one place that actually needs the local path, called
+// exactly once per child as it starts streaming — rather than upfront when
+// the whole folder download is proposed keeps this correct without any
+// extra coordination: TransferStreamManager only ever streams one transfer
+// at a time (this module's own one-active-stream invariant, documented
+// above), so the first child of a folder to actually start is always the
+// one that resolves (and persists) the folder's local root, and every later
+// sibling — started here later, or via FilesScreen's Open/notification call
+// sites — just reads that same answer back (see folderIdentity.ts).
+async function resolveDownloadRelativePath(transfer: TransferResponse): Promise<string> {
+  if (transfer.folder_relative_path == null) {
+    return transfer.file_name;
+  }
+  if (transfer.direction !== 'send' || transfer.shared_folder_id == null) {
+    return transfer.folder_relative_path;
+  }
+  const separatorIndex = transfer.folder_relative_path.indexOf('/');
+  const rawFolderName =
+    separatorIndex >= 0 ? transfer.folder_relative_path.slice(0, separatorIndex) : transfer.folder_relative_path;
+  const rest = separatorIndex >= 0 ? transfer.folder_relative_path.slice(separatorIndex + 1) : '';
+  const localRoot = await resolveLocalFolderRoot(transfer.shared_folder_id, rawFolderName);
+  return rest ? `${localRoot}/${rest}` : localRoot;
 }
 
 function downloadStagingPath(relativePath: string): string {
@@ -103,13 +136,18 @@ function downloadStagingPath(relativePath: string): string {
  * Fires exactly one "folder downloaded" notification (P13.1, Issue 3) once
  * every child of `transfer`'s shared folder has completed, instead of the
  * per-child notifyDownloadComplete a folder download used to produce one of
- * for every single file it contained. Reuses deriveFolderDownloadStatus
- * (files/folderDownloadStatus.ts) — the same aggregate-status logic
- * FilesScreen's folder row already relies on — against freshly-fetched
- * state rather than anything cached here, since this module has no local
- * view of the folder's other children.
+ * for every single file it contained. Reuses areAllFolderChildrenDownloaded
+ * (files/folderDownloadStatus.ts) against freshly-fetched state rather than
+ * anything cached here, since this module has no local view of the folder's
+ * other children.
  *
- * Only ever observes "all completed" on the *last* child to finish: every
+ * Deliberately not deriveFolderDownloadStatus's full 'completed' kind, which
+ * (P13.2, Issue 2) also requires the folder's reconciliation record to
+ * already match — exactly the record this function is about to write below.
+ * Gating on it here would never fire: the record can't already match a
+ * download run that hasn't finished yet.
+ *
+ * Only ever observes "all downloaded" on the *last* child to finish: every
  * child's Transfer row already exists as 'in_progress' the moment
  * FilesScreen.handleFolderDownload proposes it (auto-accepted, per M11), so
  * an earlier child's completion always still finds at least one sibling not
@@ -119,9 +157,11 @@ function downloadStagingPath(relativePath: string): string {
  * children of the same folder.
  *
  * A failed sibling permanently withholds this notification for the whole
- * folder (deriveFolderDownloadStatus never reports 'completed' once any
- * child has 'failed') — deliberate: a partially-failed folder download
- * should not be announced as a success.
+ * folder (areAllFolderChildrenDownloaded never reports true once any child
+ * has 'failed') — deliberate: a partially-failed folder download should not
+ * be announced as a success, and its reconciliation record must not be
+ * written either (the folder should keep offering "Download"/"Retry", not
+ * flip to "Open" over an incomplete copy).
  */
 async function notifyIfFolderComplete(transfer: TransferResponse): Promise<void> {
   const folderId = transfer.shared_folder_id;
@@ -134,16 +174,26 @@ async function notifyIfFolderComplete(transfer: TransferResponse): Promise<void>
       listTransferRequests(),
       listTransfers(),
     ]);
-    const status = deriveFolderDownloadStatus(children, requests, transfers);
-    if (status.kind !== 'completed') {
+    if (!areAllFolderChildrenDownloaded(children, requests, transfers)) {
       return;
     }
+    // P13.2 (Issue 2): record exactly what's now on disk so this folder's
+    // row can tell, on any later poll, whether the shared folder has since
+    // drifted from this snapshot — see folderIdentity.ts's own doc comment
+    // for why this (not Transfer history) is the source of truth for that.
+    await markFolderReconciled(folderId, children);
     // The backend always builds a folder child's folder_relative_path as
     // "<shared_folder.folder_name>/<relative_path>" (see
     // backend/app/services/transfer_service.py's _resolve_download_naming),
-    // so its own first path segment already is the folder's display name —
-    // no need for a separate GET /folders round trip just to look it up.
-    const folderName = transfer.folder_relative_path?.split('/')[0] ?? transfer.file_name;
+    // so its own first path segment already is the folder's raw display
+    // name — no need for a separate GET /folders round trip just to look it
+    // up. resolveLocalFolderRoot (P13.2, Issue 1) then maps that raw name to
+    // whatever this folder's download actually resolved to on-device — by
+    // this point (every child completed) that mapping is already resolved
+    // and persisted, so this is just a cheap read-through, never a fresh
+    // resolution.
+    const rawFolderName = transfer.folder_relative_path?.split('/')[0] ?? transfer.file_name;
+    const folderName = await resolveLocalFolderRoot(folderId, rawFolderName);
     const folderUri = Number(Platform.Version) >= MEDIASTORE_MIN_SDK ? downloadedFolderContentUri(folderName) : null;
     await notifyFolderDownloadComplete(folderName, folderUri);
   } catch (err) {
@@ -235,7 +285,7 @@ export const TransferStreamManager = {
 
     const headers = { Authorization: `Bearer ${sessionToken}` };
 
-    const relativePath = downloadRelativePath(transfer);
+    const relativePath = await resolveDownloadRelativePath(transfer);
 
     try {
       if (transfer.direction === 'send') {

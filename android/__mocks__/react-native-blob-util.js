@@ -59,6 +59,12 @@ module.exports = {
     exists: jest.fn(() => Promise.resolve(false)),
     stat: jest.fn(() => Promise.reject(new Error('ENOENT'))),
     mkdir: jest.fn(() => Promise.resolve()),
+    // Default: no registry file written yet (folderIdentity.ts's own
+    // "first ever download of this id" case) — individual tests override
+    // via mockResolvedValueOnce/mockImplementationOnce to simulate an
+    // already-persisted mapping.
+    readFile: jest.fn(() => Promise.reject(new Error('ENOENT'))),
+    writeFile: jest.fn(() => Promise.resolve()),
   },
   MediaCollection: {
     copyToMediaStore: jest.fn(() => Promise.resolve('content://media/downloads/1')),

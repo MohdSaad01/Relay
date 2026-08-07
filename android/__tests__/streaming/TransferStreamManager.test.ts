@@ -7,6 +7,7 @@ jest.mock('../../src/api/endpoints/folders');
 jest.mock('../../src/session/SessionManager');
 
 import { Platform } from 'react-native';
+import ReactNativeBlobUtil from 'react-native-blob-util';
 import { TransferStreamManager } from '../../src/streaming/TransferStreamManager';
 import { downloadFile, isStreamCancelError, publishDownload, uploadFile } from '../../src/streaming/blobUtil';
 import {
@@ -187,6 +188,7 @@ test('P13.1: the last folder child to complete fires exactly one folder notifica
     shared_file_id: 6,
     shared_folder_id: 77,
     file_name: 'Syllabus.pdf',
+    file_size: 500,
     folder_relative_path: 'University Notes/Syllabus.pdf',
   };
   mockGetFolderFiles.mockResolvedValue([
@@ -194,9 +196,21 @@ test('P13.1: the last folder child to complete fires exactly one folder notifica
     { id: 6, relative_path: 'Syllabus.pdf', file_size: 500, mime_type: null },
   ]);
   // Both children now show as completed Transfers -- this one and the
-  // sibling that finished earlier.
+  // sibling that finished earlier. Both need shared_folder_id/
+  // folder_relative_path set (P13.2's staleness check is folder-scoped and
+  // path-keyed, like the backend's own transfer history) and a file_size
+  // matching their sibling child above, or deriveFolderDownloadStatus
+  // correctly treats the "download" as not actually matching what's shared.
   mockListTransfers.mockResolvedValue([
-    { ...sendTransfer, id: 900, shared_file_id: 5, status: 'completed' },
+    {
+      ...sendTransfer,
+      id: 900,
+      shared_file_id: 5,
+      shared_folder_id: 77,
+      file_size: 1000,
+      folder_relative_path: 'University Notes/DBMS.pdf',
+      status: 'completed',
+    },
     { ...lastChild, status: 'completed' },
   ]);
 
@@ -208,6 +222,58 @@ test('P13.1: the last folder child to complete fires exactly one folder notifica
     'University Notes',
     expect.stringContaining('University%20Notes'),
   );
+});
+
+test('P13.2 (Issue 1): two shared folders with the same raw name stage/publish into distinct local roots', async () => {
+  mockDownloadFile.mockReturnValue(makeTask(Promise.resolve()));
+  const mockExists = ReactNativeBlobUtil.fs.exists as jest.Mock;
+  // Simulates on-device state: a directory "exists" once a file has
+  // actually published into it, tracked independently of the (also mocked,
+  // and in this test never actually persisted across calls) folder-root
+  // registry file — this alone is enough to prove the disambiguation
+  // itself, regardless of how the registry is backed.
+  const published = new Set<string>();
+  mockExists.mockImplementation((path: string) => Promise.resolve(published.has(path)));
+  mockPublishDownload.mockImplementation((_stagingPath: string, relativePath: string) => {
+    published.add(`/mock/downloads/Relay/${relativePath.split('/')[0]}`);
+    return Promise.resolve(null);
+  });
+
+  const folderAChild: TransferResponse = {
+    ...sendTransfer,
+    id: 920,
+    shared_file_id: 40,
+    shared_folder_id: 200,
+    file_name: 'a.txt',
+    folder_relative_path: 'Duplicate/a.txt',
+  };
+  const folderBChild: TransferResponse = {
+    ...sendTransfer,
+    id: 921,
+    shared_file_id: 41,
+    shared_folder_id: 201,
+    file_name: 'b.txt',
+    folder_relative_path: 'Duplicate/b.txt',
+  };
+
+  await TransferStreamManager.start(folderAChild);
+  expect(mockDownloadFile).toHaveBeenLastCalledWith(
+    expect.any(String),
+    expect.any(Object),
+    expect.stringContaining('Duplicate/a.txt'),
+    1000,
+    expect.any(Function),
+  );
+
+  await TransferStreamManager.start(folderBChild);
+  expect(mockDownloadFile).toHaveBeenLastCalledWith(
+    expect.any(String),
+    expect.any(Object),
+    expect.stringContaining('Duplicate (1)/b.txt'),
+    1000,
+    expect.any(Function),
+  );
+  expect(mockPublishDownload).toHaveBeenLastCalledWith(expect.any(String), 'Duplicate (1)/b.txt');
 });
 
 test('start() on a send transfer shows a download-complete notification with the published content URI', async () => {

@@ -41,15 +41,3 @@ export async function downloadedFileExists(fileName: string): Promise<boolean> {
     return false;
   }
 }
-
-/**
- * Human-readable description of where a completed download was saved, for
- * FilesScreen's "Saved to ..." caption -- purely informational text, not
- * something used to build a path or intent, so it doesn't need to match
- * downloadedFilePath()'s exact value.
- */
-export function downloadedFileLocationLabel(): string {
-  return Number(Platform.Version) >= MEDIASTORE_MIN_SDK
-    ? `Downloads/${PUBLIC_DOWNLOAD_FOLDER}`
-    : "Relay's app storage (not visible to other apps on this Android version)";
-}

@@ -12,7 +12,6 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useSharedFiles } from '../../files/useSharedFiles';
 import { deriveDownloadStatus, FileDownloadStatus } from '../../files/downloadStatus';
 import { useDownloadExistence } from '../../files/useDownloadExistence';
-import { downloadedFileLocationLabel } from '../../files/downloadExistence';
 import { openDownloadedFile } from '../../files/downloadActions';
 import { useTransferRequests } from '../../transfers/useTransferRequests';
 import { useTransfers } from '../../transfers/useTransfers';
@@ -299,7 +298,6 @@ function FileRow({
           {formatFileSize(file.file_size)}
           {file.mime_type ? ` · ${file.mime_type}` : ''}
         </Text>
-        {canOpen && <Text style={styles.savedLocation}>Saved to {downloadedFileLocationLabel()}</Text>}
         {errorMessage && <Text style={styles.rowError}>{errorMessage}</Text>}
       </View>
       {canOpen ? (
@@ -351,11 +349,6 @@ const styles = StyleSheet.create({
   meta: {
     marginTop: 2,
     color: '#666',
-  },
-  savedLocation: {
-    marginTop: 2,
-    color: '#16a34a',
-    fontSize: 12,
   },
   rowError: {
     marginTop: 4,

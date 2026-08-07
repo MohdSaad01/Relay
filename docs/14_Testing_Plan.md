@@ -1967,6 +1967,87 @@ byte-transfer pipeline itself was confirmed clean (see Root Cause).
 
 ---
 
+## P11 — Concurrent Download Freeze (TransferStreamManager Queueing)
+
+### Status
+
+**Completed** (fix verified live on physical device, this session)
+
+### Summary
+
+Tapping Download on 3+ shared files in quick succession left all but one
+permanently stuck in "Downloading..." at 0 bytes — no transport error, no
+backend error, no "Download interrupted" — until the user opened the
+frozen transfer's own detail screen, which made it complete almost
+instantly. UI work was frozen for this milestone, so only the underlying
+lifecycle could change. Investigated live on RMX3997 (USB-connected, backend
+reached over the phone's own hotspot) with temporary instrumentation and
+`adb logcat`/backend-log correlation before any code was touched, per this
+milestone's own instruction. Full investigation notes and evidence are in
+`docs/15_QA_NOTEBOOK.md`'s Milestone P11 entry; this section records the
+verification result.
+
+### Root Cause
+
+`TransferStreamManager` (`android/src/streaming/TransferStreamManager.ts`)
+deliberately allows only one active stream for the whole app at a time —
+that part is correct, documented design, not the bug. The bug was that a
+`start()` call arriving while another transfer was already streaming was
+silently dropped (an unconditional early `return`, no queue, no retry).
+`FilesScreen` proposes a download and calls `start()` exactly once; its
+Download button then disables itself once the transfer is `in_progress`, so
+nothing on that screen ever calls `start()` again for it. The only other
+call site, `TransferProgressDetail`'s opportunistic effect, only fires if
+the user happens to navigate to that specific transfer's detail screen —
+which is exactly why doing so "unstuck" it. `backend/logs/relay.log`
+confirmed the dropped transfers never even received their `GET
+/transfers/{id}/download` request — this was never a networking, backend,
+or `ActiveStreamRegistry` issue.
+
+### Solution
+
+`android/src/streaming/TransferStreamManager.ts`: a `start()` call that
+arrives while another transfer is active now joins an in-memory FIFO
+`queue` instead of being dropped. Both places a transfer stream can finish
+(the normal `try/finally`, and the early-return path for a missing
+session) now drain one queued transfer and start it automatically.
+`enqueue()` dedupes against the currently-active transfer and anything
+already queued, so both existing call sites (FilesScreen, and
+TransferProgressDetail's opportunistic effect) stay safe to call
+redundantly, as this module's own doc comment already required. The
+one-stream-at-a-time invariant is unchanged; only the fate of the rest of
+a burst of proposals changed, from stuck to automatically continued. No
+screen/UI files were modified, consistent with this milestone's UI freeze.
+
+### Verification
+
+- `npx tsc --noEmit`: clean.
+- Live device (RMX3997), this session: repeated 2-, 3-, and 5-tap
+  concurrent download batches against fresh shared files after the fix.
+  Every proposed transfer streamed and completed automatically in order,
+  confirmed in both `backend/logs/relay.log` (`Download completed` for
+  every transfer id, no gaps) and the Files screen (`Downloading...` →
+  `Open` for every row) with no visit to the Transfers tab required.
+  `adb logcat` showed no errors, warnings, or crashes across the full
+  regression run; the backend log showed no error/warning entries for any
+  transfer from this session.
+
+### Known Limitations
+
+- Queued transfers are still processed one at a time — this milestone
+  fixed the silent drop, not the underlying single-stream architecture,
+  which remains an intentional V1 simplification.
+- A queued transfer cancelled server-side before its turn comes up is not
+  specially guarded: it will still be attempted when dequeued and hit the
+  backend's existing 409 response, surfaced the same way any other stream
+  failure already is.
+- UI work remained frozen for this milestone; nothing surfaces queue
+  depth/position to the user. A future milestone that lifts the UI freeze
+  could distinguish "queued" from "downloading" in the Files/Transfers
+  screens.
+
+---
+
 # 4. Bug Classification
 
 Critical

@@ -19,6 +19,16 @@
  * transfer's detail screen without having started it from FilesScreen (e.g.
  * an accepted upload, or a download started from another app instance).
  * Both call sites are safe to call redundantly — see start()'s own guards.
+ *
+ * A start() call that arrives while another transfer is already streaming
+ * does not run its bytes immediately, but it is never simply dropped either
+ * (Milestone P11): it joins `queue` and is started automatically the moment
+ * the active stream finishes, preserving the one-at-a-time invariant above
+ * without ever leaving a proposed transfer stuck at 0 bytes until something
+ * happens to call start() again for that exact transfer (previously only
+ * TransferProgressDetail's own opportunistic effect could do that, so a
+ * transfer proposed anywhere else — e.g. a second/third rapid tap on
+ * FilesScreen — froze until its detail screen was visited).
  */
 
 import { PermissionsAndroid } from 'react-native';
@@ -46,7 +56,18 @@ let activeTask: StreamTask | null = null;
 // begin streaming, breaking the one-active-stream-at-a-time invariant this
 // module documents above.
 let starting = false;
+// Transfers whose start() call arrived while another was already active —
+// drained in FIFO order as each active stream finishes. See this module's
+// own doc comment above (Milestone P11).
+const queue: TransferResponse[] = [];
 const listeners = new Set<Listener>();
+
+function enqueue(transfer: TransferResponse): void {
+  if (transfer.id === state?.transferId || queue.some(queued => queued.id === transfer.id)) {
+    return;
+  }
+  queue.push(transfer);
+}
 
 function notify(): void {
   listeners.forEach(listener => listener());
@@ -76,16 +97,17 @@ export const TransferStreamManager = {
   },
 
   /**
-   * Starts streaming `transfer`'s bytes. A no-op if this app is already
-   * streaming something (including this same transfer) — the caller
-   * (TransferProgressDetail) falls back to server-polled state in that
-   * case. Also a no-op if this transfer already ran to a terminal local
-   * result (completed/failed/cancelled): V1 has no retry — a failed
-   * transfer must be explicitly cancelled and re-proposed, not silently
-   * restarted the next time its detail screen regains focus.
+   * Starts streaming `transfer`'s bytes. If this app is already streaming
+   * something else, `transfer` is queued and started automatically once the
+   * active stream finishes (see `queue` above) rather than dropped. A no-op
+   * if this exact transfer is already streaming, already queued, or already
+   * ran to a terminal local result (completed/failed/cancelled): V1 has no
+   * retry — a failed transfer must be explicitly cancelled and re-proposed,
+   * not silently restarted the next time its detail screen regains focus.
    */
   async start(transfer: TransferResponse): Promise<void> {
     if (state?.status === 'streaming' || starting) {
+      enqueue(transfer);
       return;
     }
     if (state?.transferId === transfer.id) {
@@ -103,6 +125,13 @@ export const TransferStreamManager = {
         status: 'failed',
         error: 'No active session.',
       });
+      // No try/finally ran for this transfer (the session check short-
+      // circuits before it), so the queue must be drained here too — a lost
+      // session must not strand every transfer still waiting behind it.
+      const next = queue.shift();
+      if (next) {
+        void TransferStreamManager.start(next);
+      }
       return;
     }
 
@@ -189,6 +218,10 @@ export const TransferStreamManager = {
       activeTask = null;
       clearUploadSource(transfer.id);
       await stopTransferNotification();
+      const next = queue.shift();
+      if (next) {
+        void TransferStreamManager.start(next);
+      }
     }
   },
 

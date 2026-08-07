@@ -176,11 +176,15 @@ test('start() calls fired back-to-back do not both begin streaming', async () =>
       }),
     ),
   );
+  // 41 loses the race and is queued (Milestone P11) rather than dropped, so
+  // it runs on its own once 40 finishes — mock its own downloadFile call too,
+  // and drain it below, so it doesn't run unobserved after this test ends.
+  mockDownloadFile.mockReturnValueOnce(makeTask(Promise.resolve()));
 
   const first = TransferStreamManager.start({ ...sendTransfer, id: 40 });
   const second = TransferStreamManager.start({ ...sendTransfer, id: 41 });
 
-  // second is rejected synchronously, in the same tick as first's guard
+  // second resolves synchronously, in the same tick as first's guard
   // checks (before first's own first `await` yields back to the event
   // loop) — this doesn't depend on first's continuation ever resuming.
   await second;
@@ -191,9 +195,14 @@ test('start() calls fired back-to-back do not both begin streaming', async () =>
 
   resolveFirst();
   await first;
+
+  // 41 was queued behind 40 rather than dropped — let it run to completion
+  // so no background work from this test leaks into the next one.
+  await waitUntil(() => TransferStreamManager.getState()?.transferId === 41);
+  await waitUntil(() => TransferStreamManager.getState()?.status === 'completed');
 });
 
-test('start() is a no-op while another transfer is already streaming', async () => {
+test('start() defers (does not start) a transfer while another is already streaming', async () => {
   let resolveFirst: () => void = () => {};
   mockDownloadFile.mockReturnValueOnce(
     makeTask(
@@ -202,6 +211,7 @@ test('start() is a no-op while another transfer is already streaming', async () 
       }),
     ),
   );
+  mockDownloadFile.mockReturnValueOnce(makeTask(Promise.resolve()));
 
   const firstStart = TransferStreamManager.start({ ...sendTransfer, id: 10 });
   await waitUntil(() => TransferStreamManager.getState()?.status === 'streaming');
@@ -213,6 +223,68 @@ test('start() is a no-op while another transfer is already streaming', async () 
 
   resolveFirst();
   await firstStart;
+  await waitUntil(() => mockDownloadFile.mock.calls.length === 2);
+});
+
+test('start() queued behind an active stream runs automatically once that stream finishes (Milestone P11)', async () => {
+  // Regression test: start() used to silently drop a call that arrived
+  // while another transfer was streaming, with no path back to running it
+  // short of some other code (TransferProgressDetail's own opportunistic
+  // effect) calling start() again for that exact transfer later. A
+  // transfer proposed anywhere else — e.g. a second rapid tap on
+  // FilesScreen — stayed stuck at 0 bytes forever. It must now queue and
+  // run on its own once the active stream finishes.
+  let resolveFirst: () => void = () => {};
+  mockDownloadFile.mockReturnValueOnce(
+    makeTask(
+      new Promise<void>(resolve => {
+        resolveFirst = resolve;
+      }),
+    ),
+  );
+  mockDownloadFile.mockReturnValueOnce(makeTask(Promise.resolve()));
+
+  const firstStart = TransferStreamManager.start({ ...sendTransfer, id: 60 });
+  await waitUntil(() => TransferStreamManager.getState()?.status === 'streaming');
+
+  // Arrives while 60 is streaming — queued, not dropped, and not started yet.
+  await TransferStreamManager.start({ ...sendTransfer, id: 61 });
+  expect(mockDownloadFile).toHaveBeenCalledTimes(1);
+
+  resolveFirst();
+  await firstStart;
+
+  // 61 starts on its own, with no further start() call from the test.
+  await waitUntil(() => TransferStreamManager.getState()?.transferId === 61);
+  expect(mockDownloadFile).toHaveBeenCalledTimes(2);
+  await waitUntil(() => TransferStreamManager.getState()?.status === 'completed');
+});
+
+test('a transfer queued twice behind an active stream only runs once (Milestone P11)', async () => {
+  let resolveFirst: () => void = () => {};
+  mockDownloadFile.mockReturnValueOnce(
+    makeTask(
+      new Promise<void>(resolve => {
+        resolveFirst = resolve;
+      }),
+    ),
+  );
+  mockDownloadFile.mockReturnValueOnce(makeTask(Promise.resolve()));
+
+  const firstStart = TransferStreamManager.start({ ...sendTransfer, id: 70 });
+  await waitUntil(() => TransferStreamManager.getState()?.status === 'streaming');
+
+  // Same call site invoked redundantly (e.g. FilesScreen and
+  // TransferProgressDetail both observing the same in_progress transfer) —
+  // must be deduped rather than queued (and later started) twice.
+  await TransferStreamManager.start({ ...sendTransfer, id: 71 });
+  await TransferStreamManager.start({ ...sendTransfer, id: 71 });
+
+  resolveFirst();
+  await firstStart;
+
+  await waitUntil(() => mockDownloadFile.mock.calls.length === 2);
+  expect(mockDownloadFile).toHaveBeenCalledTimes(2);
 });
 
 test('start() does not restart a transfer that already ran to a terminal result', async () => {

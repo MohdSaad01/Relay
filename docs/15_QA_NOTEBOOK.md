@@ -1,4584 +1,957 @@
 # QA Notebook
 
-Version: 1.0
+Version: 1.1 — condensed 2026-08-09.
 
 Practical notes from real issues hit during Relay development — not a
-specification. See `docs/08_Architecture_Decisions.md` for architectural
-decisions and `CLAUDE.md` for milestone history.
+specification. Entries are condensed to the durable lesson (problem, real
+root cause, fix, and anything still open); exhaustive step-by-step
+investigation transcripts and per-milestone test-count logs have been
+trimmed — current aggregate test status lives in `docs/14_Testing_Plan.md`
+§3. See `docs/08_Architecture_Decisions.md` for architectural decisions and
+`CLAUDE.md` for milestone history.
+
+All physical-device entries below used a single test device: a realme C65
+5G (model RMX3997, ColorOS/RealmeUI, Android 16/API 36). Several defects
+were specific to this OEM's native library behavior — treat "verified live"
+as "verified on this one device," not as multi-device coverage.
 
 ---
 
-# Android Build - CMake/Ninja Path Length Issue
+# Android Build — CMake/Ninja Path-Length Failure
 
-## Problem
+**Problem:** `npx react-native run-android` failed on Windows with `ninja:
+error: Filename longer than 260 characters` during `buildCMakeDebug`, even
+after enabling Windows Long Paths.
 
-On Windows, building the Android app failed with:
+**Root cause:** AGP silently falls back to its own bundled default CMake
+(3.22.1) for any native module that doesn't explicitly pin
+`externalNativeBuild.cmake.version` — nothing in the project pinned one, so
+CMake 3.22.1 (and its shorter path tolerance) kept getting reinstalled
+regardless of the registry Long Paths fix.
 
-```
-npx react-native run-android
-...
-> Task :app:buildCMakeDebug[arm64-v8a] FAILED
-ninja: error: Filename longer than 260 characters
-```
+**Fix:** Installed CMake 4.1.2 via the SDK Manager and pinned
+`externalNativeBuild.cmake.version = "4.1.2"` in
+`android/android/app/build.gradle`. No `node_modules` or SDK-internal files
+were touched (those changes don't survive a clean install and aren't
+visible to other developers).
 
-Both `configureCMakeDebug` and `buildCMakeDebug` were affected. Gradle kept
-resolving to `cmake/3.22.1/bin/ninja.exe`, and re-installed CMake 3.22.1 on
-every sync even after it was manually uninstalled.
-
-## Investigation
-
-- Installed Android Studio and the Android SDK.
-- Fixed `JAVA_HOME`, which was pointing at JDK 25 — switched to JDK 17.
-- Ran `npx react-native doctor` to confirm the environment was otherwise
-  clean (it reported no errors).
-- Enabled Windows Long Paths (registry `LongPathsEnabled`).
-- None of the above resolved the error, so investigated why CMake 3.22.1
-  specifically kept getting reinstalled.
-- Found that AGP (Android Gradle Plugin) silently falls back to its own
-  bundled default CMake (3.22.1) for any native module that doesn't
-  explicitly pin `externalNativeBuild.cmake.version` — which is exactly the
-  case here. Confirmed no version was pinned in any project file.
-
-## Solution
-
-- Installed CMake 4.1.2 via the SDK Manager (alongside 3.22.1).
-- Pinned `externalNativeBuild.cmake.version = "4.1.2"` in the app module's
-  own `android { }` block, in `android/android/app/build.gradle`.
-- Did **not** modify anything under `node_modules`.
-- Did **not** manually replace `ninja.exe` in the SDK's CMake folder.
-- Rebuilt: `assembleDebug` completed successfully, with the native build
-  now running on CMake 4.1.2's `ninja.exe`, and no path-length errors.
-
-## Notes
-
-- Use JDK 17 for this project — newer JDKs (e.g. 25) are not supported by
-  the AGP version in use.
-- Run `npx react-native doctor` early when debugging build issues — it
-  quickly rules out the environment as the cause.
-- If this error reappears, check which CMake version Gradle is actually
-  invoking (look for `cmake\<version>\bin\ninja.exe` in the build log)
-  before trying anything else.
-- Prefer fixing this at the project-config level (a `build.gradle` you own)
-  over patching SDK files or `node_modules` — those changes don't survive
-  a clean SDK install or `npm install` and aren't visible to other
-  developers or CI.
+**Notes for future builds:** Use JDK 17 for this project (newer JDKs, e.g.
+25, aren't supported by the AGP version in use — run `npx react-native
+doctor` early to catch this). If this error reappears, check which CMake
+version Gradle is actually invoking (`cmake\<version>\bin\ninja.exe` in the
+build log) before trying anything else.
 
 ---
 
 # Android FilesScreen Stuck on "Requested" After a Completed Download
 
-## Problem
+**Problem:** After a transfer completed successfully (desktop and the
+Android Transfers screen both correctly showed `Completed`), the Files
+screen kept showing that file's Download button as "Requested" forever.
 
-After a full pair → discover → propose → accept → stream flow completed
-successfully (desktop and the Android Transfers screen both correctly showed
-the transfer as `Completed`), the Android **Files** screen kept showing that
-file's Download button as "Requested" indefinitely.
+**Root cause:** `FilesScreen` tracked download status in a local
+`useState` set once to `'requested'` when the propose call resolved, and
+never updated again — it had no subscription to the real
+request/transfer lifecycle already tracked server-side and already polled
+by `TransferListScreen`.
 
-## Investigation
-
-- Traced the button's state from `FilesScreen.handleDownload` forward:
-  `downloadStatus` was a local `useState<Record<number, DownloadStatus>>`
-  that was set to `'requested'` once `proposeTransfer()` resolved — and
-  never touched again.
-- `FilesScreen` had no subscription to the actual transfer lifecycle
-  (`TransferRequestStatus` accepted → `Transfer.status` in_progress →
-  completed). That lifecycle is tracked server-side by `TransferManager`
-  (pending requests) and the `transfers` table, and is already surfaced to
-  `TransferListScreen` via `useTransferRequests`/`useTransfers`, polled on a
-  focus-driven interval.
-- Root cause: `FilesScreen` owned a parallel, disconnected status enum that
-  only ever reflected the outcome of the `POST /transfers/requests` call
-  itself, instead of deriving its label from the real request/transfer
-  state. Nothing on that screen fetched, polled, or otherwise learned that
-  the request had since been accepted, streamed, and completed.
-
-## Solution
-
-- Added `android/src/files/downloadStatus.ts` — a pure function,
-  `deriveDownloadStatus(fileId, requests, transfers)`, that maps a shared
-  file to `idle | pending | in_progress | completed | failed` by matching
-  `shared_file_id` against the same `TransferRequestResponse[]` /
-  `TransferResponse[]` lists `TransferListScreen` already polls (a
-  persisted `Transfer` supersedes the pending request that spawned it; the
-  most recent `Transfer` wins if a file was downloaded more than once).
-- `FilesScreen` now calls `useTransferRequests`/`useTransfers` and polls
-  them on the same focus-driven interval as `TransferListScreen`, deriving
-  each row's button label/enabled state from `deriveDownloadStatus` instead
-  of a local flag. The only state `FilesScreen` still owns locally is the
-  transient `requesting`/propose-call-failed feedback for the button press
-  itself, which isn't tracked anywhere server-side.
-
-## Verification
-
-- `android/__tests__/files/downloadStatus.test.ts` (new): covers idle,
-  pending, in_progress, completed (the case that previously stayed stuck
-  on "Requested"), failed, cancelled-falls-back-to-idle, a transfer
-  superseding a stale pending request, most-recent-transfer-wins, and
-  cross-file/cross-direction isolation.
-- Full Android suite: `npx jest` — 21 suites / 108 tests passing.
-- `npx tsc --noEmit` and `npx eslint` clean on the changed files.
-- Live device E2E (pair → discover → propose → accept → stream, watching
-  Files screen transition Download → Requested → Downloaded) was not
-  re-run as part of this fix — no physical device/desktop pair was
-  available in the environment the fix was made in. Recommended before
-  closing this out.
+**Fix:** Added `deriveDownloadStatus(fileId, requests, transfers)` — a pure
+function mapping a shared file to `idle | pending | in_progress |
+completed | failed` from the same polled request/transfer lists
+`TransferListScreen` already used. `FilesScreen` now polls those lists
+itself and derives each row's label from this function instead of local
+state. This function became the foundation every later Files-screen
+milestone built on.
 
 ---
 
 # Downloaded Files Invisible to the User (Written to App-Private Storage)
 
-## Problem
+**Problem:** A "Completed" download could not be found anywhere on the
+device via search or file manager.
 
-After a fully successful transfer (desktop `Completed`, Android Transfers
-screen `Completed`, Files screen `Downloaded`), the downloaded file could
-not be found anywhere on the Android device — not via search, not by
-browsing to `/storage/emulated/0/Android/data/com.relay.mobile/`
-("Access denied", expected on modern Android).
+**Root cause:** The download destination
+(`ReactNativeBlobUtil.fs.dirs.DocumentDir`) resolves to the app's
+**internal private storage** (`ctx.getFilesDir()`), not any
+user-accessible location — never indexed by MediaStore or search, and
+different from the `Android/data/...` directory a user might try to browse
+to instead.
 
-## Investigation
+**Fix:** Added `publishDownload()` — after a download finishes at its
+(still private) staging path, copies it into `Downloads/Relay/<fileName>`
+via MediaStore (`copyToMediaStore`, permission-free on API 29+) and deletes
+the staging copy. Deliberately best-effort/non-throwing: the transfer has
+already fully succeeded by this point, so a publish failure must not turn
+it into a reported failure.
 
-- Traced the write path: `TransferStreamManager.start()` (direction
-  `send`) called `downloadFile()` (`android/src/streaming/blobUtil.ts`)
-  with a destination built by `downloadDestinationPath()`:
-  `` `${ReactNativeBlobUtil.fs.dirs.DocumentDir}/Downloads/${fileName}` ``.
-- Confirmed in `react-native-blob-util`'s native source
-  (`ReactNativeBlobUtilFS.java`) that `DocumentDir` resolves to
-  `ctx.getFilesDir()` — the app's **internal, private storage**
-  (`/data/user/0/com.relay.mobile/files`), not the external
-  `Android/data/com.relay.mobile/` directory the user tried to browse to.
-  Internal storage is stricter than `Android/data`: it is inaccessible to
-  any file manager, is never indexed by MediaStore/search, and cannot be
-  reached even by the tester's manual browse attempt (which was hitting a
-  *different*, less-restrictive location than where the file actually
-  lived).
-- Confirmed no `WRITE_EXTERNAL_STORAGE`/`MANAGE_EXTERNAL_STORAGE` permission
-  was requested anywhere in the app, consistent with the app never having
-  intentionally targeted public storage.
-- Verified the "Completed" status is trustworthy, not a false positive:
-  the backend (`transfer_stream_service.py`) only marks a transfer
-  `COMPLETED` after its streaming generator fully sends the file body, and
-  the Android side (`TransferStreamManager.start()`) only sets local status
-  `completed` after `downloadFile()`'s promise resolves — which
-  `react-native-blob-util` only does once the full HTTP response has been
-  written to disk at the destination path. So a "Completed" transfer was
-  never a phantom: the file genuinely existed on disk, just in a location
-  no user-facing tool can reach.
-
-## Solution
-
-- Chose **MediaStore into a `Relay` subfolder of the public Downloads
-  directory** over the alternatives:
-  - *Continue with app-private storage* — rejected; this is the bug.
-  - *Raw public Downloads path* (`Environment.DIRECTORY_DOWNLOADS`) —
-    rejected; writing there directly requires either legacy
-    `WRITE_EXTERNAL_STORAGE` (API < 29 only) or `MANAGE_EXTERNAL_STORAGE`
-    on modern Android, neither of which this app should need to request
-    for a single-file save.
-  - *MediaStore, no subfolder* — works, but files from multiple different
-    apps/sources mix together in one Downloads listing.
-  - *MediaStore + `Relay` subfolder* (chosen) — no permission needed on
-    API 29+ (`resolver.insert()` into `MediaStore.Downloads` is
-    permission-free by design), visible immediately in the Downloads app
-    and any file manager, and keeps Relay's files grouped together.
-- Added `publishDownload()` (`android/src/streaming/blobUtil.ts`): after a
-  download finishes at its (still app-private) staging path, copies it into
-  `Downloads/Relay/<fileName>` via `react-native-blob-util`'s
-  `MediaCollection.copyToMediaStore`, then deletes the staging copy.
-  Deliberately best-effort/non-throwing — the transfer has already fully
-  received its bytes by the time this runs, V1 has no retry, so a failure
-  publishing to public storage must not turn an otherwise-successful
-  transfer into a reported failure; worst case the file is left at its
-  (pre-existing-behavior) private staging path instead.
-- `TransferStreamManager.start()` now calls `publishDownload()` for
-  `direction === 'send'` transfers after the stream completes and before
-  setting local status `completed`. The staging path function was renamed
-  `downloadStagingPath` to make clear it's no longer the final resting
-  place.
-- **Known V1 limitation**: `MediaStore.Downloads` requires Android 10
-  (API 29); the app's `minSdkVersion` is 26. Below API 29,
-  `publishDownload()` is a no-op and the file remains at its private
-  staging path — unchanged from prior (broken) behavior, not a regression,
-  but still not user-visible on Android 8/9. Given how small that install
-  base is by 2026, this was deliberately left out of scope rather than
-  adding legacy `WRITE_EXTERNAL_STORAGE` permission/runtime-request
-  handling; flagging for the developer to decide whether to raise
-  `minSdkVersion` to 29 or add legacy support later.
-
-## Verification
-
-- `android/__tests__/streaming/blobUtil.test.ts`: new `publishDownload`
-  tests — copies into `Downloads/Relay` and deletes the staging file on
-  success; no-ops below API 29; swallows a MediaStore failure without
-  throwing.
-- `android/__tests__/streaming/TransferStreamManager.test.ts`: asserts
-  `publishDownload` is called for a `send` transfer and not for a
-  `receive` transfer.
-- Full Android suite: `npx jest` — 21 suites / 112 tests passing.
-- `npx tsc --noEmit` and `npx eslint` clean on the changed files.
-- Live device E2E (confirming the file now actually appears in the
-  Downloads app / a file manager after a real transfer) was not re-run as
-  part of this fix — no physical device/desktop pair was available in the
-  environment the fix was made in. Recommended before closing this out.
+**Known limitation:** `MediaStore.Downloads` requires API 29; the app's
+`minSdkVersion` is 26, so below API 29 `publishDownload()` is a no-op and
+the file stays at its private path (not a regression, just not
+user-visible on very old Android — accepted given the shrinking install
+base).
 
 ---
 
-# Download Flow Required Manual Desktop Approval, Manual Transfers-Tab Visit, and Gave No Completion Feedback
+# Download Flow Required Manual Desktop Approval, Manual Transfers-Tab Visit, and No Completion Feedback
 
-## Problem
+**Problem:** Downloading a shared file required three manual steps adding
+no real value: the desktop had to click Accept on every download even
+though sharing the file was already the real decision; Android had to
+separately visit the transfer's detail screen before bytes started moving;
+nothing told the user a download had finished.
 
-Confirmed on physical hardware (full pair → discover → share → download
-flow otherwise working end-to-end): downloading a shared file required three
-manual steps that added no real value for V1 — (1) the desktop user had to
-open the Electron app and click Accept on every single download, even though
-they had already chosen to share the file; (2) after that, the Android user
-had to separately open the Transfers tab and tap into the transfer's detail
-screen before its bytes actually started moving; (3) once a download
-finished, nothing on Android told the user it had completed.
+**Root cause:** `TransferService.request_transfer` always created a
+`PENDING` request needing a separate `accept` call; `TransferStreamManager.start()`
+was only ever invoked from the detail screen's own mount effect; nothing
+posted a notification after the transfer-progress notification tore down.
 
-## Root Cause
-
-- **(1) Manual accept.** `TransferService.request_transfer` always created a
-  `PENDING` `PendingTransferRequest` regardless of direction, requiring a
-  separate desktop-initiated `POST /transfers/requests/{id}/accept` call
-  (`TransferService.accept_request`) before a `Transfer` row — and therefore
-  the download itself — could exist. For `direction=send` (a download), that
-  second decision is redundant: the desktop already made the only decision
-  that matters (sharing the file) when it called `POST /files`.
-- **(2) Manual stream start.** `TransferStreamManager.start()` was only ever
-  called from `TransferProgressDetail`'s `useEffect`, which only runs once
-  that specific detail screen mounts and observes an `in_progress` transfer.
-  `FilesScreen.handleDownload` only proposed the transfer and left the user
-  to separately navigate to Transfers → tap the row to actually start moving
-  bytes.
-- **(3) No completion feedback.** `TransferStreamManager.start()`'s success
-  path tore down the in-progress foreground-service notification
-  (`stopTransferNotification()`) but never posted anything in its place —
-  `@supersami/rn-foreground-service`'s notification is tied to that
-  foreground service's own lifecycle and cannot outlive it or carry a real
-  tap-to-open action.
-
-## Solution
-
-- **Backend:** `TransferService.request_transfer` now auto-accepts a `send`
-  request in the same call that proposes it — `_create_transfer` (extracted
-  from what was `accept_request`'s body, now shared by both) creates the
-  `Transfer` row immediately, and the returned request already carries
-  `status=ACCEPTED`/`transfer_id`. A `receive` (upload) proposal is
-  untouched: it still only lives in `TransferManager`, `PENDING`, until the
-  desktop explicitly accepts or rejects it, since the desktop hasn't seen
-  that file before and still needs to decide. `accept_request`/
-  `reject_request`/`withdraw_request` now 404 for a download's request id,
-  since it's never left `PENDING` for them to claim.
-- **Android, auto-start:** `FilesScreen.handleDownload` now fetches the
-  accepted `Transfer` (`getTransfer(request.transfer_id)`) right after
-  `proposeTransfer()` resolves and hands it directly to
-  `TransferStreamManager.start()`, instead of waiting for the user to visit
-  the Transfers tab. `TransferProgressDetail`'s own start-on-observe effect
-  is kept as a resume/fallback path (e.g. viewing a transfer this app
-  instance didn't start streaming itself), and `start()`'s existing
-  already-streaming/already-terminal guards make calling it from either site
-  redundantly safe.
-- **Android, completion notification:** added `@notifee/react-native` (the
-  only notification-capable dependency already present,
-  `@supersami/rn-foreground-service`, is scoped to the transfer's foreground
-  service and can't show a standalone notification after that service stops,
-  nor does it support a real tap-to-open intent — decided with the
-  developer rather than stretching that library beyond its purpose).
-  `publishDownload()` (`android/src/streaming/blobUtil.ts`) now returns the
-  `content://` MediaStore URI it publishes to (`null` below API 29 or on
-  failure) instead of discarding it. New
-  `android/src/streaming/downloadNotification.ts` shows
-  "✓ `<fileName>` downloaded successfully" once a `send` transfer completes;
-  when a content URI is available its press action opens that file directly
-  via `Linking.openURL`, otherwise it falls back to just opening the app.
-
-## Verification
-
-- Backend: `backend/tests/services/test_transfer_service.py` and
-  `backend/tests/api/test_transfers.py` — new/updated coverage for
-  auto-accept (`request_transfer` for `send` returns `status=accepted` with
-  a working `transfer_id`; the request never appears in `list_requests`;
-  `accept_request`/`reject_request`/`withdraw_request` all 404 for it), plus
-  `backend/tests/api/test_transfer_streaming.py` and
-  `backend/tests/services/test_transfer_stream_service.py` fixture helpers
-  updated for the new propose-is-accept flow. Full backend suite:
-  `pytest` — 298 passed, 2 skipped. `ruff check` clean.
-- Android: `android/__tests__/streaming/TransferStreamManager.test.ts` — new
-  cases asserting a completion notification fires with the published content
-  URI (or `null` when publishing failed) for a `send` transfer, and never
-  for a `receive` transfer. `android/__tests__/streaming/blobUtil.test.ts`
-  updated for `publishDownload`'s new `Promise<string | null>` return. New
-  `android/__tests__/streaming/downloadNotification.test.ts` covers channel
-  creation, notification content/press-action shape with and without a
-  content URI, and both the foreground and background press-event handlers
-  opening the URI via `Linking`. Full Android suite: `npx jest` — 22 suites
-  / 121 tests passing. `npx tsc --noEmit` and `npx eslint` clean.
-- Live device E2E (confirming the desktop no longer shows an Accept step for
-  downloads, a tap on Download starts streaming immediately, and the
-  completion notification appears and opens the file on tap) was not re-run
-  as part of this fix — no physical device/desktop pair was available in the
-  environment the fix was made in. Recommended before closing this out,
-  particularly the notification's tap-to-open behavior, which cannot be
-  exercised by the Jest suite (no real Android notification tray/intent
-  system).
+**Fix:** Backend: `request_transfer` now auto-accepts a `send` (download)
+request in the same call that proposes it, creating the `Transfer` row
+immediately (uploads were still manual at this point — see Milestone P1
+below). Android: `FilesScreen.handleDownload` now fetches the accepted
+`Transfer` and hands it straight to `TransferStreamManager.start()` instead
+of waiting for a Transfers-tab visit. Added `@notifee/react-native` (the
+only notification-capable dependency, `@supersami/rn-foreground-service`,
+is scoped to its own foreground-service lifecycle and can't show a
+standalone notification with a real tap-to-open action) for a completion
+notification that opens the published file directly via its MediaStore
+content URI.
 
 ---
 
 # Milestone P1 — Upload Workflow Still Required Manual Desktop Approval
 
-## Problem
+**Problem:** The entry above removed download friction; the mirror-image
+upload flow still required the desktop to click Accept on every proposed
+upload under an "Incoming Transfer Requests" panel.
 
-The download flow's manual-approval friction (see the entry above) was
-already removed, but the mirror-image upload flow was not: proposing an
-upload from Android still left it sitting under the desktop's "Incoming
-Transfer Requests" panel until someone clicked Accept, even though the
-desktop had already paired with that device — the only decision that
-actually matters for whether it should be allowed to send bytes at all.
+**Root cause:** `request_transfer` special-cased `direction=send` only —
+a `receive` (upload) proposal stayed `PENDING` until a separate
+desktop-initiated accept call.
 
-## Root Cause
-
-- `TransferService.request_transfer` (`app/services/transfer_service.py`)
-  special-cased `direction=send`: only a download's `Transfer` row was
-  created in the same call that proposed it. A `receive` (upload) proposal
-  was still stored `PENDING` in `TransferManager`, requiring a separate
-  desktop-initiated `POST /transfers/requests/{id}/accept` call
-  (`TransferService.accept_request`) before it became a `Transfer` row.
-- `desktop/src/renderer/views/transfers.js` rendered that `PENDING` list as
-  the "Incoming Transfer Requests" table with Accept/Reject buttons — the
-  only reason that table (and the corresponding "Requests" section in
-  Android's `TransferListScreen`) ever had anything to show.
-- `TransferListScreen.handleUpload` (Android) proposed the transfer and
-  navigated to `TransferRequestDetail`, a screen dedicated to watching a
-  still-pending request and letting the user withdraw it — infrastructure
-  that only existed to support this now-redundant approval step.
-
-## Solution
-
-- **Backend:** `request_transfer` now creates the `Transfer` row
-  immediately for *both* directions — the `send`/`receive` branch only
-  decides how the file/size snapshot is resolved, not whether a decision
-  step happens afterward. `accept_request`, `reject_request`, and
-  `withdraw_request` were deleted from `TransferService` (nothing is ever
-  left `PENDING` for them to act on), along with their routes
-  (`POST /transfers/requests/{id}/accept|reject`,
-  `DELETE /transfers/requests/{id}`) in `app/api/v1/transfers.py`.
-  `GET /transfers/requests` and `GET /transfers/requests/{id}` were kept
-  unchanged — Android's download-status derivation already polls the
-  former defensively, and the latter still lets a caller look up a request
-  it just made.
-- **Desktop:** `transfers.js` dropped the `/transfers/requests` fetch and
-  the "Incoming Transfer Requests" table/Accept/Reject wiring entirely —
-  the view now only ever renders the `Transfers` list, which already
-  showed both directions once a `Transfer` row existed.
-- **Android:** `TransferListScreen.handleUpload` now mirrors
-  `FilesScreen.handleDownload` exactly: since the auto-accepted proposal's
-  response already carries a `transfer_id`, it registers the picked file's
-  local content URI under that id (`registerUploadSource`, simplified to
-  take a `transfer_id` directly instead of a request-id-to-transfer-id
-  promotion dance that no longer had a reason to exist), fetches the
-  `Transfer`, and hands it straight to `TransferStreamManager.start()` —
-  no navigation to a pending-request screen in between.
-  `TransferRequestDetail.tsx` and `useTransferRequest.ts` were deleted
-  (nothing is ever left pending to view or withdraw), and
-  `TransferDetailScreen`'s route param collapsed from a
-  `{kind: 'request'|'transfer'}` union to a plain `{transferId: number}`,
-  since only the persisted-transfer view is ever reachable now.
-
-## Verification
-
-- Backend: `backend/tests/services/test_transfer_service.py` and
-  `backend/tests/api/test_transfers.py` rewritten for the upload
-  auto-accept path (mirroring the existing download coverage), plus
-  updated fixture helpers in `backend/tests/api/test_transfer_streaming.py`
-  and `backend/tests/services/test_transfer_stream_service.py` that
-  previously drove a transfer into existence via the now-deleted
-  `accept_request`. Full backend suite: `python -m pytest` — 286 passed, 2
-  skipped. `ruff check app tests` clean.
-- Android: `android/__tests__/streaming/uploadSourceRegistry.test.ts`
-  updated for the simplified by-`transfer_id` API;
-  `android/__tests__/transfers/useTransferRequest.test.tsx` deleted (its
-  subject no longer exists). Full suite: `npx jest` — 21 suites / 118 tests
-  passing. `npx tsc --noEmit` and `npx eslint` clean.
-- Desktop: no automated test suite exists for the plain-JS renderer
-  (unchanged from T1); `transfers.js` was syntax-checked
-  (`node --check`) and traced by hand against the `/transfers`-only
-  response shape it now consumes.
-- Live device E2E (confirming a file picked on Android starts uploading
-  immediately with no desktop interaction, and that the desktop's
-  Transfers view shows it in progress without ever presenting an
-  accept/reject prompt) was not re-run as part of this fix — no physical
-  device/desktop pair was available in the environment the fix was made
-  in. Recommended before closing this out, mirroring the same caveat noted
-  for the download-side fix above.
+**Fix:** `request_transfer` now creates the `Transfer` row immediately for
+**both** directions (the desktop already made the decision that matters
+when it paired with the device). Deleted `accept_request`/`reject_request`/
+`withdraw_request` and their routes (nothing is ever left `PENDING` for
+them to act on), the desktop's "Incoming Transfer Requests" table, and
+Android's `TransferRequestDetail`/`useTransferRequest` (nothing is ever
+left pending to view or withdraw). `TransferListScreen.handleUpload` now
+mirrors `FilesScreen.handleDownload` exactly.
 
 ---
 
 # Milestone P2 — Shared Files Screen Never Re-Validated What It Displayed
 
-## Problem
+**Problem:** Three issues, all rooted in the same theme — the Files
+screen trusted state it never re-checked: (1) a deleted download still
+read "Downloaded"; (2) every download showed a meaningless `'...'` button
+state before "Downloading..."; (3) a newly shared file didn't appear
+without a manual pull-to-refresh.
 
-Three separate issues were raised against the Android Files screen, all
-scoped to `FilesScreen.tsx`/`android/src/files/`:
+**Root cause:** (1) `deriveDownloadStatus` mapped a `completed` Transfer
+straight to `'completed'` with no on-device existence check — a
+genuinely different question the backend has no way to answer, since the
+download happens entirely client-side after the backend already finished
+streaming. (2) The `'...'` label covered a window where the eventual state
+("Downloading...") was already a foregone conclusion — the backend creates
+the `Transfer` row as `IN_PROGRESS` in the same call that proposes it. (3)
+`useSharedFiles()` only fetched on mount and on manual pull-to-refresh, no
+focus-driven poll (unlike transfers, which already had one).
 
-1. A file downloaded once kept showing "Downloaded" even after the user
-   deleted it, cleared the `Relay` Downloads subfolder, or reinstalled the
-   app.
-2. Every download briefly showed a bare `'...'` button state between
-   tapping Download and the button settling into "Downloading...".
-3. A file newly shared from the desktop did not appear on Android until
-   the user manually pulled to refresh.
-
-## Investigation
-
-- **Issue 1.** Traced `deriveDownloadStatus()`
-  (`android/src/files/downloadStatus.ts`) — it maps a shared file straight
-  to `{ kind: 'completed' }` whenever the most recent matching `Transfer`
-  has `status === 'completed'`. That backend status is written once, when
-  `TransferStreamService`'s download stream finishes, and never revisited
-  afterward (by design — V1 has no resume/retry). Nothing on the Android
-  side ever asked "is the file this status implies actually still there?"
-  — the check plainly did not exist. Confirmed this is a genuinely
-  different condition from the transfer's own state: the `Transfer` row
-  and its `status='completed'` are both *correct* — the file really was
-  downloaded successfully — the staleness is entirely in what the file
-  *system* looks like now, which the backend's database has no way to
-  know about (the download happens entirely on the Android side, after
-  the backend has already finished streaming its bytes).
-- **Issue 2.** Traced the button's label function,
-  `downloadButtonLabel()` in `FilesScreen.tsx`: it returns `'...'`
-  whenever the screen's local `requesting` flag is true, which spans
-  `handleDownload`'s `proposeTransfer()` → `refreshRequests()`/
-  `refreshTransfers()` → `getTransfer()` round trip. Cross-referenced
-  against `backend/app/services/transfer_service.py`'s
-  `_create_transfer()`: a download's `Transfer` row is created with
-  `status=TransferStatus.IN_PROGRESS` synchronously, in the very same
-  `POST /transfers/requests` call `proposeTransfer()` makes — i.e. by the
-  time `requesting` even becomes true, the eventual "Downloading..."
-  state is already a foregone conclusion sitting in the response Android
-  is about to receive. The "..." wasn't covering genuine uncertainty; it
-  was just a slower way of saying "Downloading...".
-- **Issue 3.** Traced `useSharedFiles()` — `getAvailableFiles()` is called
-  once on mount (`useEffect`) and again only via `refresh()`, which is
-  wired to `FilesScreen`'s `<RefreshControl onRefresh={refresh}>` (a
-  manual pull gesture) and nothing else. Compared against
-  `FilesScreen`'s own handling of transfer state, which already polls
-  `useTransferRequests`/`useTransfers` every 2 seconds via a
-  `useFocusEffect` — the shared-file list had no equivalent. Considered
-  three options: (a) a real push channel (WebSockets/SSE) from desktop to
-  Android — rejected, explicitly deferred per `docs/11_File_Transfer.md`
-  §16 and disproportionate to a UX-polish milestone; (b) polling at the
-  same 2-second cadence already used for transfers — rejected as
-  unnecessarily chatty, since the shared-file list changes only when a
-  human on the desktop clicks "Share," nowhere near as often as an active
-  transfer's byte-level progress; (c) refresh-on-focus plus a slower,
-  screen-scoped poll — chosen, since it reuses the exact
-  `useFocusEffect` pattern already in this file and costs one extra
-  `GET /files` every few seconds only while a user is actually looking at
-  the Files screen.
-
-## Solution
-
-- **Issue 1:** Added `android/src/files/downloadExistence.ts`
-  (`downloadedFileExists(fileName)`) and
-  `android/src/files/useDownloadExistence.ts` (a small existence-cache
-  hook, `{ existence, verify }`). `deriveDownloadStatus()` gained an
-  optional 4th parameter, `fileExists`: when the derived status would be
-  `'completed'` and `fileExists === false`, it downgrades to `'idle'`
-  instead — an explicit `true`, or the default `undefined` (not checked
-  yet), leaves `'completed'` alone. `FilesScreen` now verifies existence
-  for every file its polled data reports as completed, on every focus
-  tick, via a small `useEffect` — not a one-time check, since a file can
-  be deleted at any point after a prior check found it present.
-  `downloadedFileExists()` mirrors (rather than imports) the destination
-  logic from `streaming/blobUtil.ts`'s `publishDownload()` — `Relay`
-  subfolder of the public Downloads directory on API 29+, private staging
-  path below it — since `android/src/streaming/**` was out of scope to
-  modify for this milestone.
-- **Issue 2:** `downloadButtonLabel()`'s `requesting` branch now returns
-  `'Downloading...'` instead of `'...'`. `requesting` itself is unchanged
-  — it still exists, still disables the button for the duration of the
-  propose call, and still drives the error message on failure — only the
-  label shown while it's true changed, since the state it represents was
-  never actually ambiguous.
-- **Issue 3:** `useSharedFiles()` gained `refreshSilently()`, sharing the
-  same `load()` core as the existing `refresh()` but never touching
-  `loading`/`refreshing` (so it can't flash the pull-to-refresh spinner).
-  `FilesScreen` calls it immediately on focus and then every 5 seconds
-  while focused, via its own `useFocusEffect` — separate from, and
-  slower than, the screen's existing 2-second transfer-progress poll.
-
-## Verification
-
-- New/updated Android tests: `__tests__/files/downloadExistence.test.ts`
-  (path resolution on and below API 29, missing-file and error cases),
-  `__tests__/files/useDownloadExistence.test.tsx` (records a check's
-  result, dedupes a concurrent in-flight check for the same file, re-checks
-  on a later call rather than caching forever, tracks multiple files
-  independently), new cases in `__tests__/files/downloadStatus.test.ts`
-  (completed stays completed when `fileExists` is omitted/`true`,
-  downgrades to idle when explicitly `false`, ignored for non-completed
-  statuses), and new cases in `__tests__/files/useSharedFiles.test.tsx`
-  (`refreshSilently()` re-fetches without ever setting
-  `loading`/`refreshing`, still surfaces a failure message).
-- Full Android suite: `npx jest` — 23 suites / 134 tests passing.
-  `npx tsc --noEmit` and `npx eslint` clean on all changed/added files.
-- Live device E2E (confirming a deleted download reverts to "Download" the
-  next time Files regains focus, a tap on Download shows "Downloading..."
-  immediately with no visible "..." step, and a file shared from the
-  desktop appears on Android without a manual pull) was not re-run as part
-  of this fix — no physical device/desktop pair was available in the
-  environment the fix was made in. Recommended before closing this out,
-  mirroring the same caveat noted throughout this notebook.
+**Fix:** (1) Added `downloadedFileExists()`/`useDownloadExistence()`;
+`deriveDownloadStatus` gained an optional `fileExists` parameter —
+`false` downgrades `'completed'` to `'idle'`, `undefined` ("not checked
+yet") or `true` leave it alone. (2) The `'...'` label was replaced with
+"Downloading...". (3) Added `refreshSilently()` (same fetch core as
+`refresh()`, never toggles the pull-to-refresh spinner), called
+immediately on focus and then every 5s while focused.
 
 ---
 
 # Milestone P3 — Transfer State Consistency & Download Reliability
 
-## Problem
+**Problem:** Three inconsistencies: (1) the Transfers tab took ~2-3s to
+show a just-started download; (2) a transfer's detail screen briefly showed
+stale, smaller byte counts than the Overview list already showed
+Completed; (3) multiple downloads could all report Completed while only
+one file actually existed in `Downloads/Relay`.
 
-Three separate inconsistencies were raised against the transfer workflow:
+**Root cause:** (1) `TransferListScreen`'s focus effect started a polling
+interval but never refreshed immediately, and `createBottomTabNavigator`
+keeps tab screens mounted (no remount to force a fresh fetch) — the exact
+staleness class P2 already fixed for shared files, not yet applied here.
+(2) The detail screen merged server state with `TransferStreamManager`'s
+live state unconditionally; the live state doesn't reach `'completed'`
+until *after* `publishDownload`/`notifyDownloadComplete` finish, even
+though the backend (and the Overview list) already show `completed`. (3)
+`publishDownload`'s underlying MediaStore call had no conflict handling at
+all — the backend's own upload-side `resolve_available_path` "name
+(1).ext" convention had no Android download-side equivalent.
 
-1. After a download auto-starts from the Files screen, the Transfers tab
-   sometimes takes ~2-3 seconds to show it.
-2. A transfer the Overview list already shows as `Completed` (e.g.
-   "702.3 KB / 702.3 KB") briefly shows something inconsistent — a smaller
-   byte count and a different status — when its detail screen is opened,
-   before correcting itself 10-15 seconds later.
-3. Multiple downloads all report `Completed`, but only one file actually
-   ends up in `Downloads/Relay`.
-
-## Investigation
-
-- **Issue 1.** Traced `Transfer` persistence first, to rule out the
-  backend: `TransferService._create_transfer`
-  (`backend/app/services/transfer_service.py`) commits the row
-  synchronously inside `POST /transfers/requests`, so it already exists by
-  the time `proposeTransfer()` resolves on Android — the delay could not be
-  a backend or API-response issue. Traced Android's polling next:
-  `TransferListScreen`'s `useFocusEffect`
-  (`android/src/screens/transfers/TransferListScreen.tsx`) and
-  `FilesScreen`'s equivalent request/transfer `useFocusEffect`
-  (`android/src/screens/files/FilesScreen.tsx`) both started a
-  `setInterval(refresh, POLL_INTERVAL_MS)` on regaining focus but never
-  called `refresh()` immediately — the first refresh only happened on the
-  interval's own first tick, up to 2000ms later.
-  `createBottomTabNavigator` (`android/src/navigation/MainTabs.tsx`) keeps
-  tab screens mounted after their first visit, so switching from Files to
-  Transfers after starting a download does not remount
-  `TransferListScreen` and force a fresh fetch — only the delayed interval
-  tick would eventually show it. This is the exact staleness class
-  Milestone P2 already fixed for the shared-file list
-  (`refreshSilently()` called immediately on focus, then on an interval) —
-  that fix was never applied to transfer/request polling.
-- **Issue 2.** Traced `TransferProgressDetail`
-  (`android/src/screens/transfers/TransferProgressDetail.tsx`): it merges
-  the server-polled `Transfer` (`useTransfer`) with
-  `TransferStreamManager`'s live state (`useTransferStream`) whenever
-  `stream?.transferId === transferId`
-  (`useLiveStream`), with no check on whether that local state was actually
-  caught up with the server. Traced `TransferStreamManager.start()`
-  (`android/src/streaming/TransferStreamManager.ts`): once the byte
-  transfer itself finishes (`await activeTask.promise`), a `send` transfer
-  still has to `await publishDownload(...)` (MediaStore copy) and
-  `await notifyDownloadComplete(...)` (notification post) — both I/O-bound
-  — *before* `state` is set to `'completed'` with `bytesTransferred` reset
-  to the full total. Until that finishes, `stream.status` can still read
-  `'streaming'` with whatever partial byte count its last 250ms progress
-  tick observed (for a small/fast file, possibly just one early tick).
-  Meanwhile the backend has already committed the transfer as `completed`
-  the moment its own streaming generator finished
-  (`transfer_stream_service.py`'s `_finalize`), and the Overview list's own
-  `GET /transfers` poll already reflects that. Opening the detail screen
-  during this window showed the stale local view instead of the
-  already-correct server one; it "corrected itself" once
-  `publishDownload`/`notifyDownloadComplete` finished and flipped `state`.
-- **Issue 3.** Traced the full `publishDownload()` path
-  (`android/src/streaming/blobUtil.ts`) into `react-native-blob-util`'s
-  Android implementation
-  (`node_modules/react-native-blob-util/android/src/main/java/com/ReactNativeBlobUtil/ReactNativeBlobUtilMediaCollection.java`):
-  `createNewMediaFile` calls `ContentResolver.insert()` with the requested
-  `DISPLAY_NAME` verbatim — no conflict handling of any kind, every single
-  call. Compared against the backend's own upload path
-  (`backend/app/utils/filesystem.resolve_available_path`), which
-  deliberately resolves a "name (1).ext" alternative before ever writing a
-  file — nothing on the Android download-publish side has an equivalent.
-  Two downloads landing on the same file name is a genuinely reachable
-  case: Milestone P2's own existence-check-driven re-download flow lets a
-  file whose local copy was deleted revert to re-downloadable (same file
-  name, new `Transfer`), and two different shared files can trivially share
-  a basename. `publishDownload()`'s error handling is deliberately
-  best-effort and swallows any `copyToMediaStore` failure (by design — a
-  publish failure must not turn an otherwise-successful byte transfer into
-  a reported failure), which means a MediaStore insert failing against an
-  already-taken name fails *silently*: the file is left at its private,
-  invisible staging path while both the backend `Transfer` and the local
-  stream state still correctly report `completed`, since neither of them
-  is aware `publishDownload` even ran, let alone whether it succeeded.
-  Whether the underlying platform call actually fails outright on a
-  `DISPLAY_NAME` collision, silently reuses the existing row, or something
-  else could not be confirmed without a physical device — but the absence
-  of any conflict handling at all, for a reachable same-name case, was
-  independently verifiable by code alone.
-
-## Root Cause
-
-All three trace to state living in more than one place without a rule for
-which copy wins when they disagree, or without ever noticing a name
-collision at all:
-
-- Issue 1: Android's UI polling had no "refresh now" trigger on regaining
-  focus, only a delayed interval — a gap already closed once (Milestone
-  P2, shared files) but not for transfers.
-- Issue 2: the merge of server state and local stream state had no
-  freshness rule — local state was trusted even after the server state it
-  was supposed to supplement had already become final and more accurate.
-- Issue 3: nothing on the Android side treated a download's destination
-  file name as something that could collide, even though the exact same
-  problem was already solved once, on the backend, for uploads.
-
-## Solution
-
-- **Issue 1:** `TransferListScreen`'s `useFocusEffect` and `FilesScreen`'s
-  request/transfer `useFocusEffect` now call their refresh function(s)
-  immediately on regaining focus, before starting the polling interval —
-  mirroring `useSharedFiles().refreshSilently()`'s existing pattern from
-  Milestone P2.
-- **Issue 2:** `TransferProgressDetail`'s `useLiveStream` now additionally
-  requires `transfer.status === 'in_progress'`. Once the freshly-polled
-  server transfer reaches a terminal status, it wins outright instead of
-  being second-guessed by a potentially-lagging local stream view; while
-  the server transfer is genuinely in progress, the live stream is still
-  preferred exactly as before, for its finer-grained updates.
-- **Issue 3:** Added `resolveAvailableMediaStoreName()`
-  (`android/src/streaming/blobUtil.ts`), the same "name (1).ext" naming
-  convention as the backend's `resolve_available_path`, checked via a raw
-  filesystem read under the public Downloads directory (the same
-  technique, and the same unverified-on-a-physical-device caveat,
-  `files/downloadExistence.ts` already relies on). `publishDownload()` now
-  resolves a conflict-free name before calling `copyToMediaStore`, instead
-  of handing it the requested name unconditionally — removing the
-  collision rather than depending on how the platform would have handled
-  it.
-
-## Verification
-
-- New/updated Android tests: three new cases in
-  `__tests__/streaming/blobUtil.test.ts` covering
-  `resolveAvailableMediaStoreName`'s conflict resolution (renames to
-  "(1)", keeps incrementing past an already-taken "(1)", and leaves a free
-  name unchanged).
-- Full Android suite: `npx jest` — 23 suites / 137 tests passing.
-  `npx tsc --noEmit` and `npx eslint` clean on all changed files.
-- Backend: untouched by this milestone — `python -m pytest` still 286
-  passed, 2 skipped; `ruff check app tests` clean. Confirmed by code trace
-  (not just by the suite staying green) that `Transfer` persistence is
-  synchronous and therefore not a contributor to Issue 1.
-- Live device E2E (confirming the Transfers tab shows a new download
-  immediately after switching tabs, a transfer's detail screen matches
-  Overview the instant it's opened rather than settling a few seconds
-  later, and downloading the same file name twice produces two distinct
-  files in `Downloads/Relay`) was not run as part of this fix — no
-  physical device/desktop pair was available in the environment the fix
-  was made in. Recommended before closing this out, mirroring the same
-  caveat noted throughout this notebook — particularly for Issue 3, since
-  the exact platform behavior on a `DISPLAY_NAME` collision could not be
-  confirmed independently of this fix.
+**Fix:** (1) Both screens' focus effects now refresh immediately before
+starting their polling interval. (2) The detail screen's live-stream
+preference now additionally requires `transfer.status === 'in_progress'` —
+once the server is terminal, it wins outright. (3) Added
+`resolveAvailableMediaStoreName()`, the same "name (1).ext" convention,
+checked via a raw filesystem read before `copyToMediaStore` runs.
 
 ---
 
-# Milestone P4 — Download Completion Notification Never Appeared, and Nothing Useful to Do With a Finished Download
+# Milestone P4 — Download Completion Notification Never Appeared, No Action on a Finished Download
 
-## Problem
+**Problem:** (1) The completion notification added in the entry above
+never actually appeared. (2) A completed download's Files-screen row was a
+disabled, dead-end "Downloaded" pill.
 
-Two issues were raised against the final stage of the Android download
-experience:
+**Root cause:** (1) Two compounding defects in `downloadNotification.ts`:
+`notifyDownloadComplete()` was awaited unguarded — any failure (most
+plausibly a denied `POST_NOTIFICATIONS` permission, silently dropped by
+Android with no exception) propagated up and wrongly marked an
+already-successful transfer `'failed'`; and `ensureChannel()` cached the
+*promise* from `notifee.createChannel()` even when it rejected, so one
+early failure permanently disabled notifications for the rest of the app
+session. (2) No Open/Share action had ever been wired up — investigated
+what the existing dependencies actually support:
+`react-native-blob-util`'s `actionViewIntent` (`ACTION_VIEW`, with
+FileProvider handling built in) worked; React Native's own `Share` module
+discards its `url` field entirely on Android, so true sharing would need a
+new native dependency (not added — flagged for a future milestone).
 
-1. A completed download should show a notification (added in the
-   "Download Flow Required Manual Desktop Approval..." entry above), but no
-   notification ever appeared on the device.
-2. Once a file finished downloading, the Files screen's button for it
-   became a disabled, dead-end "Downloaded" pill — nothing could be done
-   with the file from inside the app.
-
-## Investigation
-
-- **Issue 1.** Worked through the pipeline in the order this milestone's
-  checklist specified: permission, channel, Notifee initialization,
-  callback execution, foreground/background behavior, Android version
-  differences.
-  - Ruled out the most suspicious-looking interaction first: `notifyDownloadComplete()`
-    (which *displays* the notification) runs inside `TransferStreamManager.start()`'s
-    `try` block, immediately followed in the `finally` block by
-    `stopTransferNotification()` — a *different* library
-    (`@supersami/rn-foreground-service`) tearing down the unrelated
-    transfer-progress notification. Read that library's actual Android
-    source
-    (`node_modules/@supersami/rn-foreground-service/android/src/main/java/com/supersami/foregroundservice/ForegroundService.java`,
-    `ForegroundServiceModule.java`) to confirm `stopService()` only ever
-    calls `stopSelf()` against its own foreground-service notification
-    (`ACTION_FOREGROUND_SERVICE_STOP` → `running -= 1` → `stopSelf()`), never
-    `NotificationManager.cancelAll()` or anything scoped beyond its own
-    notification ID. Confirmed this cannot be clearing Notifee's separate
-    notification.
-  - Ruled out Notifee's own event-handler registration timing: `downloadNotification.ts`
-    registers `notifee.onForegroundEvent`/`onBackgroundEvent` at module load,
-    and traced the import chain (`index.js` → `App.tsx` → `RootNavigator` →
-    `MainTabs` → `FilesStack` → `FilesScreen` → `TransferStreamManager` →
-    `downloadNotification`) — all static imports, no `React.lazy` — so this
-    registration runs at JS bundle startup regardless of which screen the
-    user is on, ruling out "the module was never loaded" as a cause.
-  - Found the actual defect by reading `downloadNotification.ts` against its
-    own sibling, `blobUtil.ts`'s `publishDownload()`: `publishDownload` is
-    explicitly documented and implemented as best-effort (wrapped in its own
-    `try/catch`, returns `null` on failure) specifically so a publish
-    failure can never turn a successful transfer into a reported failure.
-    `notifyDownloadComplete()` had no equivalent protection — it was awaited
-    directly in `TransferStreamManager.start()`'s `try` block with nothing
-    catching a rejection from it. Any failure inside it (channel creation,
-    the notification post itself) would propagate into `start()`'s own
-    `catch`, marking an already-successfully-downloaded transfer `'failed'`.
-  - Found a second, compounding defect in `ensureChannel()`: it cached the
-    *promise* returned by `notifee.createChannel()` in a module-level
-    variable on the very first call — including a rejected one. Once a
-    single channel-creation attempt failed, every subsequent
-    `notifyDownloadComplete()` call for the rest of the app session reused
-    that same rejected promise, with no path to ever retry.
-  - Considered the most plausible real-world trigger for an initial
-    failure: this app's `targetSdkVersion` is 36, so Android 13+'s
-    `POST_NOTIFICATIONS` runtime permission gates every notification,
-    including Notifee's. `TransferStreamManager.start()` does request it
-    (`PermissionsAndroid.request(...)`) before starting a stream, but never
-    inspects the resolved value — a denial (easy to do on an unexplained
-    first-run system dialog) causes Android to silently drop any later
-    `notifee.displayNotification()` call with no exception at all, which
-    would not, by itself, explain "the notification never appears" turning
-    into a thrown error — but combined with the two defects above, *any*
-    other transient failure (not just a permission denial) would silently
-    and permanently disable notifications for the rest of the session while
-    also mis-reporting the transfer as failed.
-  - No physical device or emulator was available in this environment (same
-    constraint T1 and every subsequent milestone already recorded), so the
-    permission-denial trigger itself could not be independently confirmed —
-    the two code defects were, however, fully verifiable and reproducible
-    by code alone, and are real bugs regardless of which specific failure
-    first triggers them.
-- **Issue 2.** Traced what "Open"/"Share"/"Show location" could actually
-  reuse:
-  - `react-native-blob-util` (already a dependency) exposes
-    `android.actionViewIntent(path, mime, chooserTitle)` — an `ACTION_VIEW`
-    intent with FileProvider content-URI wrapping already built in. Usable
-    directly against the same on-device path
-    `downloadExistence.ts` already computes for its existence check.
-  - React Native's own built-in `Share` module was checked next
-    (`node_modules/react-native/Libraries/Share/Share.js`): on Android, its
-    `static share()` method builds `newContent` from only `content.title`
-    and `content.message` — `content.url` is read for the `invariant` check
-    that at least one of `url`/`message` is present, but is never actually
-    passed to `NativeShareModule.share()`. There is no way to hand a file or
-    URL to another app via this API on Android at all.
-  - No other sharing-capable dependency exists in `android/package.json`.
-    Genuine `ACTION_SEND` sharing would require a new native dependency.
-
-## Root Cause
-
-- Issue 1: `notifyDownloadComplete()` broke this codebase's own established
-  best-effort convention (the one `publishDownload()` already follows), and
-  `ensureChannel()`'s cache had no failure-recovery path — together, one
-  glitch (most plausibly a denied notification permission, but not limited
-  to that) could silently and permanently disable download notifications
-  for a session, while additionally corrupting an unrelated piece of state
-  (the transfer's reported status).
-- Issue 2: the completed-download row offered no action because none had
-  ever been wired up, not because the platform lacked the capability — Open
-  was fully supported by an already-present dependency and simply unused.
-
-## Solution
-
-- **Issue 1:** `notifyDownloadComplete()` now wraps its body in `try/catch`,
-  logging via `console.warn` instead of throwing — matching
-  `publishDownload()`'s contract exactly, so `TransferStreamManager.start()`
-  needed no changes at its call site (it already trusted that sibling
-  function the same way). `ensureChannel()` now clears its cached promise
-  on a failed `createChannel()` call so the next `notifyDownloadComplete()`
-  call retries from scratch instead of reusing a permanently-poisoned
-  cache.
-- **Issue 2:** Added `android/src/files/downloadActions.ts`
-  (`openDownloadedFile`), reusing `actionViewIntent` and the path helper
-  exported from `downloadExistence.ts` (`downloadedFilePath`, previously
-  private). `FilesScreen`'s completed-download row now shows an "Open"
-  button and a "Saved to Downloads/Relay" caption in place of the old
-  disabled pill, gated strictly on `useDownloadExistence` having confirmed
-  (`=== true`) the file is still present — not the softer "not checked yet"
-  default the status label itself tolerates — so the action never appears
-  for a file that isn't genuinely there. Real "Share" was investigated and
-  found unsupported by anything already in the codebase (see Investigation
-  above) and was deliberately not implemented, rather than adding a new
-  native dependency for a UX-polish milestone.
-
-## Verification
-
-- New/updated Android tests: two new regression cases in
-  `__tests__/streaming/downloadNotification.test.ts` (a `displayNotification`
-  failure is swallowed rather than thrown; a failed channel creation is
-  retried on the next call rather than cached forever), plus a new
-  `__tests__/files/downloadActions.test.ts` (three cases: correct
-  path/MIME/chooser arguments, the `application/octet-stream` fallback when
-  a shared file has no MIME type, and a rejection from `actionViewIntent`
-  propagating so `FilesScreen` can surface it). A test-only
-  `__resetNotificationChannelForTests()` export was added to
-  `downloadNotification.ts` so the channel-cache regression test doesn't
-  depend on running before any other test in its file.
-- Full Android suite: `npx jest` — 24 suites / 142 tests passing (137
-  existing + 5 new). `npx tsc --noEmit` and `npx eslint .` clean.
-- Backend, Desktop: untouched by this milestone.
-- Live device E2E (confirming a real notification now appears after a
-  download completes, denying `POST_NOTIFICATIONS` no longer causes the
-  transfer to show "failed," and the new Open button/caption behave
-  correctly against a real MediaStore-published file) was not run as part
-  of this fix — no physical device/desktop pair was available in the
-  environment the fix was made in. Recommended before closing this out,
-  mirroring the same caveat noted throughout this notebook — this milestone
-  in particular, since Issue 1's most plausible trigger (a denied
-  notification permission) is Android runtime behavior that cannot be
-  exercised by the Jest suite.
+**Fix:** `notifyDownloadComplete()` now wraps its body in `try/catch`
+(matching `publishDownload()`'s existing best-effort contract);
+`ensureChannel()` clears its cached promise on failure so the next call
+retries. Added `downloadActions.ts` (`openDownloadedFile`) — Files screen
+now shows an "Open" button plus a "Saved to Downloads/Relay" caption, gated
+on `useDownloadExistence` having explicitly confirmed the file still
+exists.
 
 ---
 
 # Milestone P5 — Live Synchronization & UX Responsiveness
 
-## Problem
+**Problem:** Explicitly a responsiveness pass over the existing polling
+architecture (no WebSockets/push): (1) a redundant extra request fired on
+every screen's first mount; (2) a download/upload's stream start waited on
+an unrelated list refresh before bytes began moving; (3) the detail
+screen's status badge/Cancel button lagged a few seconds behind the
+progress bar already reaching 100%.
 
-A UX-polish pass asked whether the Files screen, Transfer list, and
-Transfer detail screen were reflecting things the app already knew as
-promptly as the existing polling architecture allows — explicitly without
-introducing WebSockets, push notifications, or a redesigned sync system.
+**Root cause:** (1) Each hook already fetched once on mount, and P3's
+focus-refresh fired again at that same first-mount moment. (2) Handlers
+`await`ed the list refresh before calling `getTransfer()`/`start()`, even
+though the two don't depend on each other. (3) P3 fixed the
+server-ahead-of-local case; the reverse (local stream reaches a terminal
+state before the next 2s server poll) fell through to a stale
+`transfer.status`.
 
-## Investigation
-
-- **Duplicate fetch on mount.** Traced `useSharedFiles`/`useTransferRequests`/
-  `useTransfers` — each fetches once via its own `useEffect` on mount.
-  Cross-referenced against Milestone P3's fix, which made
-  `FilesScreen`/`TransferListScreen` call their refresh functions
-  immediately inside `useFocusEffect` (not just on the next interval tick)
-  so a screen regaining focus after being backgrounded doesn't wait. A
-  screen's first focus fires at the same moment it mounts, so on every
-  fresh mount both effects fired: the hook's own initial fetch, and the
-  screen's "refresh immediately on focus" call — one redundant extra
-  request per list, every time a tab was first visited.
-- **Stream start waited on an unrelated refresh.** Traced
-  `FilesScreen.handleDownload` and `TransferListScreen.handleUpload`: both
-  `await`ed `Promise.all([refreshRequests(), refreshTransfers()])` /
-  `refreshTransfers()` — which only exist to update the polled list state
-  driving the row's button label — before calling `getTransfer()` and
-  `TransferStreamManager.start()`. Since the list refresh and the stream
-  start read/act on independent data (the refresh doesn't feed the
-  `getTransfer` call, and `start()` doesn't need the refreshed lists),
-  forcing them to run sequentially added one full extra network round trip
-  of latency before a newly proposed download or upload's bytes actually
-  started moving.
-- **Detail screen lagged behind its own local stream.** Traced
-  `TransferProgressDetail`'s merge logic, added by Milestone P3:
-  `useLiveStream = stream?.transferId === transferId && transfer.status ===
-  'in_progress'`, then `displayStatus = useLiveStream && stream.status ===
-  'streaming' ? 'in_progress' : transfer.status`. P3's fix covered the
-  server-ahead-of-local case (server already `completed`, local stream
-  still reporting a stale partial count) by making the server win once
-  terminal. It did not cover the reverse: once `TransferStreamManager`'s
-  own state reaches a terminal outcome (`completed`/`failed`/`cancelled`)
-  — which happens the instant the byte transfer, `publishDownload`, and
-  `notifyDownloadComplete` all finish — but the next 2-second server poll
-  hasn't landed yet, `stream.status` is no longer `'streaming'`, so the
-  ternary fell through to the still-stale `transfer.status` value
-  (`'in_progress'`). `bytesTransferred` (read straight from `stream` in
-  that same window) already correctly showed the full total, so the
-  progress bar sat at 100% while the status text still read "In progress"
-  and the Cancel button — gated on the same stale `transfer.status ===
-  'in_progress'` — stayed visible and tappable, routing a tap to the REST
-  `cancel()` call against a transfer that had, from this app's own
-  perspective, already finished.
-
-## Solution
-
-- Added a `useRef` first-focus guard in `FilesScreen` and
-  `TransferListScreen` so the immediate refresh-on-focus call added in P3
-  only fires from the *second* focus onward, leaving the underlying hooks'
-  own mount-time fetch as the single source of the initial load. The hooks
-  themselves were left fetching on mount unconditionally, so they remain
-  correct in isolation for any future caller that doesn't pair them with a
-  focus-driven refresh.
-- `handleDownload`/`handleUpload` now start the list refresh without
-  awaiting it immediately, run `getTransfer()`/`TransferStreamManager.start()`
-  concurrently with it, and only await the refresh promise afterward —
-  still before the `finally` block clears the row/button's local
-  `requesting`/`uploading` flag, so the button's label handoff timing (no
-  flicker back to "Download"/"Upload a File" before the polled state has
-  caught up) is unchanged.
-- Added `android/src/transfers/mergeLiveTransferState.ts`
-  (`mergeLiveTransferState(transfer, stream)`), mirroring the project's
-  existing `downloadStatus.ts` pure-derivation pattern: the server still
-  wins outright once terminal (P3, unchanged), but while the server still
-  reports `in_progress`, a local stream that has itself already reached a
-  terminal status now wins over that stale value too — for both the status
-  text and a new `showCancel` field the Cancel button is gated on directly.
-  `TransferProgressDetail` also gained a `useEffect` that fires one
-  immediate `refresh()` the moment its local stream reaches a terminal
-  outcome while `transfer.status` is still `'in_progress'`, closing the gap
-  from the local side rather than only ever waiting on the existing
-  2-second poll.
-
-## Verification
-
-- New `android/__tests__/transfers/mergeLiveTransferState.test.ts`: 7 cases
-  covering no stream, a stream for a different transfer id, server-terminal
-  winning even against a matching "streaming" stream (regression coverage
-  for P3's original fix), server `in_progress` with a live streaming view,
-  and all three "local stream already terminal while the server is still
-  stale" cases (completed/cancelled/failed), each asserting the resulting
-  status and `showCancel`.
-- Full Android suite: `npx jest` — 25 suites / 149 tests passing (142
-  existing + 7 new). `npx tsc --noEmit` clean. `npx eslint .` clean across
-  the whole project.
-- No component-level render test exists for `FilesScreen`,
-  `TransferListScreen`, or `TransferProgressDetail` in this codebase (only
-  their extracted pure-logic modules and hooks are unit tested — the same
-  convention every prior Files/Transfers milestone in this notebook has
-  followed). The screen-level changes (first-focus guards, the
-  refresh/stream-start reordering) were verified by code trace against the
-  existing hook-level test suites (confirming each hook still fetches
-  exactly once on mount) plus a clean `tsc`/`eslint` pass, rather than
-  introducing a new component-testing setup out of scope for this
-  UX-polish milestone.
-- Backend, Desktop: untouched by this milestone.
-- Live device E2E (confirming no duplicate request fires on first tab
-  visit, a download/upload's progress visibly starts sooner after tapping
-  the button, and the transfer detail screen's status/Cancel button update
-  in lockstep with the progress bar reaching 100% instead of a few seconds
-  later) was not run as part of this fix — no physical device/desktop pair
-  was available in the environment the fix was made in. Recommended before
-  closing this out, consistent with every prior milestone's own caveat.
+**Fix:** (1) A `useRef` first-focus guard skips the immediate
+refresh-on-focus call only on a screen's very first focus. (2) Handlers now
+start the refresh without awaiting it, run `getTransfer()`/`start()`
+concurrently, and only await the refresh afterward. (3) Added
+`mergeLiveTransferState.ts` — server still wins once terminal (P3,
+unchanged), but a local stream that's *itself* already terminal now also
+wins over a still-`in_progress` server poll; this module became the single
+place both the status text and the Cancel-button gate read from, and the
+foundation for several later fixes (P9, P13.3).
 
 ---
 
 # Milestone P6 — File Browser UX Refinement
 
-## Problem
+**Problem:** (1) A completed download could still briefly show the
+disabled "Downloaded" pill P4 was supposed to have removed. (2) A stale
+"couldn't open this file" message could linger after a row no longer
+offered Open.
 
-A UX-polish pass asked whether the Files screen still behaved like a
-modern cloud-storage app after P1-P5: specifically, whether a downloaded
-file could ever get stuck on a disabled "Downloaded" button instead of
-staying actionable, whether the completed-file experience had any
-remaining clutter, whether shared-file freshness still felt responsive,
-and whether every reachable row state (never downloaded, downloading,
-completed, locally deleted, failed, cancelled) was worded and laid out
-consistently with no dead ends.
+**Root cause:** Both from the same pattern — a piece of UI state computed
+its own second opinion instead of deferring to a single source of truth
+nearby. (1) `FileRow`'s `canOpen` required `fileExists === true`, stricter
+than `deriveDownloadStatus`'s own tolerance (which already treats
+"not checked yet" as good enough). (2) `openErrors` was only cleared at the
+top of a successful `handleOpen`, not by a fresh download attempt or by the
+row leaving the completed state.
 
-## Investigation
-
-- **Disabled "Downloaded" pill.** Traced `FileRow`'s `canOpen` gate
-  (`android/src/screens/files/FilesScreen.tsx`, added in Milestone P4):
-  `status.kind === 'completed' && fileExists === true`. Cross-referenced
-  against `deriveDownloadStatus` (`downloadStatus.ts`), which computes that
-  same `status.kind === 'completed'` result: its own `fileExists` handling
-  already treats `undefined` ("not checked yet," the value
-  `useDownloadExistence` reports before its async `verify()` call for this
-  file resolves) as good enough to stay `'completed'` — only an explicit
-  `false` downgrades it to `'idle'`. `FileRow`'s `canOpen` re-checked the
-  same field with a stricter `=== true` comparison that does *not* extend
-  that same tolerance to `undefined`. The two checks were answering the
-  same underlying question ("is this file still here?") with different
-  defaults, and the gap between them was exactly the window this
-  milestone's brief described: the instant a transfer's status reaches
-  `'completed'`, `status.kind` is `'completed'` but `fileExists` for that
-  file is still `undefined` on the very next render, until the existence
-  effect's `verify()` call resolves. During that window `canOpen` was
-  `false`, so `FileRow` rendered its other branch — a `Pressable` disabled
-  because `status.kind === 'completed'` was also one of `disabled`'s
-  conditions, styled green via `downloadButtonDone`, labeled "Downloaded"
-  by `downloadButtonLabel`'s dedicated `'completed'` case — a real disabled
-  dead-end button, not a hypothetical one.
-- **Stale open-failure messages.** Traced `openErrors` state alongside the
-  above: it was only ever cleared at the top of `handleOpen`, never by
-  `handleDownload` starting a new attempt, and `errorMessage`'s computation
-  read `openError` unconditionally rather than only while `canOpen` was
-  still true. Two related staleness paths followed from this: (a) a file
-  re-downloaded after a previous failed "Open" attempt kept showing the old
-  "couldn't open" message alongside the fresh "Downloading..." label; (b) a
-  file whose "Open" failed because it was genuinely deleted (not yet caught
-  by the existence check) kept showing that message even after a
-  subsequent poll or re-verify downgraded the row back to a plain
-  "Download" state — a message about opening a file next to a button that
-  no longer offered to open anything.
-- **Completed-file experience, freshness, and remaining consistency.**
-  Reviewed the rest of the completed-download row, the Transfers tab's list
-  row, and `TransferProgressDetail`'s completed view for clutter or unclear
-  affordances (none found — see docs/14_Testing_Plan.md's P6 entry for the
-  full breakdown); reviewed `useSharedFiles.ts`'s focus/poll strategy
-  established by P2/P5 for responsiveness (found adequate, no
-  justification to poll more aggressively per this milestone's own
-  constraint); and walked every reachable row state for wording/color/
-  placement consistency, finding only one small gap — a failed download's
-  retry button was labeled identically to a never-attempted download's
-  ("Download"), making the two states indistinguishable at a glance.
-
-## Root Cause
-
-Both defects trace to the same pattern several prior entries in this
-notebook already describe: a piece of UI state (`FileRow`'s `canOpen`,
-`errorMessage`) computed its own second opinion instead of consistently
-deferring to a single source of truth that had already answered the same
-question nearby (`deriveDownloadStatus`'s existing `fileExists` tolerance;
-which row state an error message was actually raised for).
-
-## Solution
-
-- `FileRow`'s `canOpen` is now `status.kind === 'completed'` alone — the
-  `fileExists` prop was removed from `FileRow` entirely, since
-  `deriveDownloadStatus` already guarantees `'completed'` excludes a file
-  confirmed missing, and now also gets the same "not checked yet" trust
-  `deriveDownloadStatus` itself extends. This closes the disabled-pill
-  window: a completed download's row always shows an actionable green
-  "Open" button (plus its existing "Saved to ..." caption), consistent with
-  how a modern cloud-storage app treats a downloaded file as still tappable
-  rather than a disabled receipt. The now-dead `status.kind === 'completed'`
-  checks in `disabled` and the download button's style array (unreachable
-  once `canOpen` covers that case unconditionally) were removed alongside
-  it.
-- `downloadButtonLabel` now returns "Retry" for `status.kind === 'failed'`
-  instead of falling through to the same "Download" label used for a file
-  that was never attempted.
-- `handleOpen`'s failure path now calls `verify(file.file_name)` before
-  setting its error message, so a genuinely-missing file re-syncs
-  `useDownloadExistence`'s cache and the row recovers to a re-downloadable
-  `'idle'` state instead of staying stuck offering an "Open" that will keep
-  failing. `handleDownload` now clears any existing `openErrors` entry for
-  the file at the start of a fresh attempt (mirroring its existing
-  `requestErrors` clearing), and `FileRow`'s `errorMessage` only reads
-  `openError` while `canOpen` is still true, so a stale "couldn't open"
-  message can no longer outlive the row's Open action.
-- `downloadActions.ts`'s docstring was updated to describe the new
-  optimistic-but-still-safe gating (previously documented the stricter,
-  now-removed `=== true` requirement as a P4 guarantee).
-
-## Verification
-
-- Full Android suite: `npx jest` — 25 suites / 149 tests passing (no
-  suites added or removed; this was a UI-composition fix over already-
-  tested pure logic in `downloadStatus.ts`/`useDownloadExistence.ts`, both
-  of which already had coverage for the `fileExists` tolerance `FileRow`
-  now consistently trusts). `npx tsc --noEmit` clean; `npx eslint` clean on
-  the changed files.
-- No component-level render test harness exists for `FilesScreen` in this
-  codebase (consistent with every prior Files milestone in this notebook).
-  Verified by code trace: confirmed `deriveDownloadStatus`'s existing test
-  suite already covers `fileExists === undefined` staying `'completed'`
-  and `=== false` downgrading to `'idle'`, and that `FileRow`'s simplified
-  `canOpen` now matches that behavior exactly rather than a stricter
-  subset of it.
-- Backend, Desktop: untouched by this milestone — no backend defect was
-  found or required to make this fix, consistent with this milestone's
-  constraints (no backend/API/streaming/protocol changes).
-
-## Known Limitations
-
-- Not verified live end-to-end — no physical Android device/desktop pair
-  was available in the environment this change was made in, consistent
-  with every prior milestone's own caveat throughout this notebook.
-  Recommended before closing this out: confirm on a real device that a
-  download's row hands off straight from "Downloading..." to a live "Open"
-  button with no visible disabled "Downloaded" flash in between, that
-  deleting the saved file and returning to the app reverts the row to
-  "Download" without a lingering stale error, and that a failed download
-  now reads "Retry" rather than "Download."
-- "Share" (`ACTION_SEND`) remains unimplemented — unchanged from Milestone
-  P4's investigation, still out of scope without adding a new native
-  dependency.
+**Fix:** `canOpen` simplified to `status.kind === 'completed'` alone (the
+`fileExists` prop was removed from `FileRow` entirely). `handleOpen`'s
+failure path now calls `verify()` to re-sync existence; `handleDownload`
+clears any stale open-error at the start of a fresh attempt. Also: a failed
+download's retry button now reads "Retry" instead of "Download", so the
+two states are distinguishable at a glance.
 
 ---
 
 # Milestone P7 — Android Download Publishing: Only `.txt` Files Reached Downloads/Relay
 
-## Problem
+**Problem:** On a physical device, `.txt` downloads worked end-to-end;
+every larger type tested (`.pdf`, `.docx`, `.pptx`, `.jpg`, `.png`) instead
+showed "Download interrupted" with no published file and no notification —
+despite clean backend logs confirming every byte was sent correctly for
+every type.
 
-On a physical Android device, `.txt` downloads consistently completed,
-appeared in `Downloads/Relay`, fired the completion notification, and
-opened correctly. Every other tested type (`.pdf`, `.docx`, `.pptx`,
-`.jpg`, `.png`) instead: showed the Files screen return to a plain
-"Download" state, showed "Download interrupted" on the Transfer detail
-screen, never produced a file in `Downloads/Relay`, and never showed a
-notification. Backend logs were clean for every type tested — `POST
-/transfers/requests` → 201, `GET /transfers/{id}/download` → 200, and
-`Download completed: transfer_id=... bytes=...` at the correct byte count
-— so the divergence had to be client-side, after the bytes had already
-fully arrived.
+**Investigation:** Traced the full pipeline before assuming a cause. Ruled
+out the backend (headers are correct and type-independent; no compression
+middleware exists). Ruled out any type/MIME branching anywhere in
+`react-native-blob-util`'s download path (confirmed by reading the native
+source in full) — `publishDownload()` already hardcodes
+`application/octet-stream` for every download regardless of type, so MIME
+can't be the differentiator either. The actual differentiator was response
+**size**: `.txt` test files fit in one chunk; the failing types didn't.
 
-## Investigation
+**Root cause:** `react-native-blob-util`'s
+`ReactNativeBlobUtilFileResp.isDownloadComplete()` — an exact
+`bytesDownloaded == Content-Length` equality check — can false-negative on
+a real device connection even after every byte has already been written to
+disk, and is more exposed on larger, multi-chunk downloads (an openly
+reported upstream issue, react-native-blob-util #268). No existing test
+could have caught this: `blobUtil.test.ts` mocks the library entirely and
+never executes this native code path.
 
-Traced the full pipeline per the milestone brief:
-`TransferStreamManager.start()` → `blobUtil.downloadFile()`
-(`react-native-blob-util`'s native `FileStorage` response handling) →
-`blobUtil.publishDownload()` → `MediaCollection.copyToMediaStore()` →
-`downloadNotification.notifyDownloadComplete()`.
-
-- **`TransferStreamManager.start()`
-  (`android/src/streaming/TransferStreamManager.ts`).** For a `send`
-  (download) transfer, the sequence is: `await activeTask.promise` (the
-  native download), then — only if that resolves — `publishDownload()`,
-  then `notifyDownloadComplete()`, then `setState({ status: 'completed' })`.
-  If `activeTask.promise` *rejects*, execution jumps straight to the
-  `catch` block: `publishDownload` and `notifyDownloadComplete` are never
-  reached, and `state.status` is set to `'failed'` with `state.error` set
-  to the rejection's message. This single branch point explains all three
-  symptoms as one failure, not three: no file in `Downloads/Relay` (never
-  published), no notification (never called), and "Download interrupted"
-  on the Transfer screen (the rejection's message, surfaced verbatim by
-  `TransferProgressDetail`).
-- **Where "Download interrupted" actually comes from.** That exact string
-  does not appear anywhere in this repository's own TypeScript source —
-  confirmed by search. It originates natively, in
-  `node_modules/react-native-blob-util`'s
-  `ReactNativeBlobUtilReq.java`/`done()` (the `FileStorage` response case):
-  `if (!fileResp.isDownloadComplete()) invoke_callback("Download interrupted.", ...)`.
-  `ReactNativeBlobUtilFileResp.isDownloadComplete()`
-  (`Response/ReactNativeBlobUtilFileResp.java`) is:
-  `bytesDownloaded == contentLength() || (contentLength() == -1 && isEndMarkerReceived)`
-  — an exact-equality check between bytes actually written to disk and the
-  response's parsed `Content-Length`.
-- **Ruled out: the backend.** `guess_media_type()`
-  (`backend/app/services/transfer_stream_service.py`) sets a real
-  per-file `Content-Type` (`text/plain` for `.txt`, `application/pdf` for
-  `.pdf`, etc.), but the download route
-  (`backend/app/api/v1/transfers.py`) sets `Content-Length` explicitly to
-  `transfer.file_size` regardless of type. Confirmed in Starlette's
-  `Response.init_headers()` (`starlette/responses.py`) that an
-  explicitly-provided `content-length` header is passed through verbatim
-  for a `StreamingResponse` — nothing server-side manipulates it by
-  content type. No compression middleware is registered. This matches the
-  milestone's own instruction to treat the backend as correct — every
-  avenue traced back to the client.
-- **Ruled out: a code-level type branch.** Read `react-native-blob-util`'s
-  entire `FileStorage` response path (`ReactNativeBlobUtilReq.java`'s
-  `done()`, `ReactNativeBlobUtilFileResp.java`). The byte-copy loop, the
-  completeness check, and the MediaStore write
-  (`ReactNativeBlobUtilMediaCollection.java`) are all agnostic to
-  `Content-Type`/MIME — `isBlobResponse()`'s content-type branching only
-  affects the unrelated in-memory (`KeepInMemory`) response mode, which
-  this download never uses (`config({ path: destPath })` always selects
-  `FileStorage`). `publishDownload()`
-  (`android/src/streaming/blobUtil.ts`) also already hardcodes
-  `mimeType: 'application/octet-stream'` for every download regardless of
-  real type, so MIME type cannot be what differentiates `.txt` from the
-  rest here either.
-- **The actual differentiator: response size, not type.** With every
-  code-level type-based explanation ruled out, and with backend logs
-  confirming a full, correct byte count reaches the OS socket for every
-  file in the report — including the failing ones — the mismatch has to
-  be a false negative in the exact-equality check itself, not a real data
-  loss. `.txt` test files are small enough to be read and sent in a single
-  `STREAM_CHUNK_SIZE_BYTES` chunk; `.pdf`/`.docx`/`.pptx`/`.jpg`/`.png`
-  test files are larger and require several. This exact failure mode —
-  "downloads succeed sometimes, fail with 'Download interrupted' other
-  times, on the same library version, uncorrelated with the server" — is
-  an openly reported, unresolved upstream behavior
-  (react-native-blob-util issue #268), consistent with a real-world,
-  non-loopback connection being more likely to expose it on a longer,
-  multi-chunk transfer than on a single small one. The one backend
-  warning worth naming directly: `Download connection closed early:
-  transfer_id=26 bytes_sent=3145728`. That log line comes from the
-  server's own `except GeneratorExit` — it fires only when the ASGI
-  connection genuinely drops mid-stream, which is a *different* failure
-  than the one described above (where the server always logged a clean
-  `Download completed`). Given the milestone's report frames this as one
-  isolated line among many repeated `.pdf`/`.jpg`/etc. failures — not one
-  per failure — it does not correlate with the reproducible bug and is
-  treated here as a separate, ordinary network hiccup rather than forced
-  into the same explanation.
-
-## Root Cause
-
-`react-native-blob-util`'s native `FileStorage` download path
-(`ReactNativeBlobUtilFileResp.isDownloadComplete()`) can reject with
-"Download interrupted" even after every byte has already been written to
-the staging file on disk — an upstream false negative that this
-investigation found is more exposed on larger, multi-chunk downloads over
-a real device connection than on tiny single-chunk ones. `.txt` test files
-happened to be small enough to avoid tripping it; every other type tested
-was large enough not to. `TransferStreamManager.start()` treated that
-rejection as unconditional proof of failure, so it never proceeded to
-`publishDownload()`/`notifyDownloadComplete()` even when the file was
-already complete and correct at its staging path — turning one upstream
-false negative into three visible failures (no published file, no
-notification, "Download interrupted" on screen).
-
-**Why previous milestones didn't expose this:** `blobUtil.test.ts`
-(Jest) mocks `react-native-blob-util` entirely
-(`android/__mocks__/react-native-blob-util.js`) — every existing test
-drives the mocked task's `__resolve`/`__reject` directly and never
-executes the real native Android `FileStorage` code path this bug lives
-in. No test in this repository could have caught it; it is only
-observable via `isDownloadComplete()`'s real OkHttp/Okio behavior on an
-actual device connection, which is exactly how it was found.
-
-## Solution
-
-`downloadFile()` (`android/src/streaming/blobUtil.ts`) now takes the
-transfer's declared `file_size` and, if the native promise rejects, stats
-the file already written to `destPath` before giving up: if its on-disk
-size already equals the declared size, the download is treated as
-successful (the rejection is swallowed) instead of failing outright. A
-genuine cancellation (`isStreamCancelError`) is explicitly exempted from
-this recovery — it must always propagate, never be masked by a
-coincidentally-complete partial file. A real interruption (the file is
-genuinely short) still rejects exactly as before.
-`TransferStreamManager.start()`'s only change is passing
-`transfer.file_size` through to `downloadFile()`; its own success/failure
-handling, `publishDownload`, and `notifyDownloadComplete` are unchanged.
-
-This is deliberately not a fix to `react-native-blob-util` itself (a
-`node_modules` dependency, out of scope to patch per this milestone's own
-"no unrelated refactoring" instruction) — it makes the app trust the file
-it actually has on disk over a library completion check with a known
-false-negative mode, without weakening the check for a real interruption.
-
-## Verification
-
-- Full Android suite: `npx jest` — 25 suites / 153 tests passing (4 new
-  regression tests added to `blobUtil.test.ts`; `TransferStreamManager.test.ts`
-  updated for `downloadFile`'s new `expectedBytes` parameter). `npx tsc
-  --noEmit` and `npx eslint` (on the changed files) both clean.
-- New regression coverage in `blobUtil.test.ts`: a native "Download
-  interrupted" rejection is swallowed when the on-disk file already
-  matches the declared size; it still rejects when the on-disk file is
-  short (a genuine interruption) or when `stat()` itself fails (the file
-  was never created); a real cancellation still rejects even when the
-  partial file happens to already match the declared size.
-- Backend: full suite still passing (`pytest -q` — 286 passed, 2 skipped),
-  unchanged by this milestone — no backend defect was found, consistent
-  with the milestone's instruction to assume the backend correct absent
-  contrary evidence, which the investigation did not surface.
-
-## Known Limitations
-
-- Not verified live end-to-end — no physical Android device was available
-  in the environment this change was made in, consistent with every prior
-  milestone's own caveat throughout this notebook. This is the one entry
-  in this notebook where that caveat matters most: the defect itself was
-  only reachable on a physical device, and this fix's correctness rests on
-  reasoning about `react-native-blob-util`'s real native behavior plus a
-  from-first-principles JS regression test of the recovery path, not a
-  reproduction of the original bug in this environment. Recommended
-  before closing this out: reinstall on the physical device that
-  originally reproduced this and confirm, for at least `.pdf`, `.jpg`, and
-  one larger file (`.pptx` or `.mp4`, if available) — download completes,
-  the file exists in `Downloads/Relay`, the completion notification
-  appears, "Open" works, and the Transfer screen settles on "Completed"
-  with no "Download interrupted" text.
-- If the on-disk file is short by even one byte (a genuine interruption),
-  the original "Download interrupted" failure is preserved unchanged — by
-  design, this fix only recovers the false-negative case where the file is
-  already exactly the declared size.
-- The upstream `react-native-blob-util` behavior itself is unpatched; a
-  future `react-native-blob-util` upgrade that fixes this false negative
-  natively would make this recovery path a (harmless) no-op rather than
-  something to revert.
+**Fix (mitigation only — see Milestone P10 for the actual native root
+cause):** `downloadFile()` now takes the transfer's declared `file_size`
+and, on a native rejection, stats the file already on disk — an exact size
+match is treated as success (a genuine cancellation is exempted and always
+propagates; a genuinely short file still rejects).
 
 ---
 
 # Milestone P8 — Streaming Failure Root Cause Investigation (Backend)
 
-## Problem
+**Problem:** Physical retest of P7's fix surfaced a more serious, distinct
+failure: a `.mp3` disconnected at exactly 3,145,728 bytes (= 3 ×
+`STREAM_CHUNK_SIZE_BYTES` — how much the client had read before stopping,
+not a backend limit), a `.jpg` hung indefinitely, and the backend then
+logged hundreds of `sqlite3.OperationalError: database is locked`.
 
-Physical-device re-verification of P7's fix (device RMX3997, connected over
-its own hotspot) surfaced a different, more serious failure class that P7's
-fix does not touch: a `.zip` completed, but a `.mp3` consistently disconnected
-at exactly **3,145,728 bytes** (twice), a `.jpg` hung indefinitely, and the
-backend then began logging hundreds of `sqlite3.OperationalError: database is
-locked` errors. Backend logs showed `Download connection closed early`,
-meaning Android closed the connection before the backend finished sending.
-Instructed to find the verified root cause before writing any fix.
+**Investigation:** Built a real raw-socket reproduction (an abrupt RST
+mid-download) against a real `uvicorn` process, since `TestClient`'s
+in-process ASGI transport can't simulate an actual dropped connection.
+Ruled out the classic FastAPI+`Depends(get_db)`+`StreamingResponse`
+early-session-close bug by reading the installed FastAPI version's actual
+source (it uses a two-stack `AsyncExitStack`; the DB session stays open
+through the full response in this version). Confirmed `Request.is_disconnected()`
+and forcing `SelectorEventLoop` over Windows' default `ProactorEventLoop`
+both made no difference.
 
-## Investigation
+**Root cause:** Two independent bugs. (1) `_generate_download`'s only
+disconnect signal was Starlette's `send()` raising `OSError` — entirely
+dependent on the OS/event loop noticing a dead socket, which on this
+Windows target took up to 19s or, while otherwise idle, never happened at
+all (confirmed with an 80 MiB reproduction that "completed" successfully
+server-side against a peer gone the entire time). (2)
+`AuthService.authenticate()` flushed `last_used_at`/`last_seen_at` on
+*every* authenticated request, including read-only GETs that never commit
+— holding SQLite's single write lock for the whole request. Not
+independently proven sufficient alone to cause the reported storm on this
+machine's fast SQLite I/O, but a real, unnecessary contributor that bug (1)
+directly aggravates by leaving a transfer stuck and re-polled far longer
+than it should be.
 
-**Why P7's hypothesis doesn't apply here.** P7's fix (`isActuallyComplete` in
-`blobUtil.ts`) addresses `react-native-blob-util`'s own post-download
-completion check rejecting a file that is already fully and correctly on
-disk. That is a *client-side, post-hoc* false negative on an otherwise
-successful transfer. This report is different in kind: the backend's own log
-line, and the exact byte count, show the connection was actually severed
-mid-stream, with only 3 of the file's 5 MiB delivered — there is no complete
-file on disk for the P7 recovery path to rescue. `isActuallyComplete` never
-even runs a download that never received all its bytes in the first place.
+**Fix:** Added a `_WriteTimeoutStreamingResponse` wrapping each chunk's
+`send()` in `anyio.fail_after(STREAM_WRITE_TIMEOUT_SECONDS)` (new setting,
+default 15s); on timeout, `TransferStreamService.abort_stalled_download`
+finalizes the transfer and releases the stream-registry guard.
+`AuthService.authenticate()` now mutates already-tracked ORM objects
+directly instead of calling repository `update()` methods that flush
+immediately — removing the accidental write-lock acquisition while keeping
+the method's existing "informational, may be lost on a read-only route"
+design.
 
-**Tracing the byte count.** `Settings.STREAM_CHUNK_SIZE_BYTES` is 1 MiB
-(`backend/app/core/config.py`), and 3,145,728 = 3 × 1,048,576 exactly. This
-is not a limit anywhere in the backend, BlobUtil, OkHttp, or Android — it is
-simply the chunk-read granularity `TransferStreamService._generate_download`
-already used (`backend/app/services/transfer_stream_service.py`), and the
-number lines up because that's how much the client had already read before
-whatever caused it to stop. Confirmed by reproducing the exact scenario (see
-below): the cutoff tracks *how many chunks the client actually consumed*, not
-any backend-side threshold.
-
-**Ruled out the classic FastAPI+StreamingResponse+DB-session bug.** The
-textbook failure mode here is a `Depends(get_db)` session getting closed
-(via a dependency's `finally: db.close()`) before a `StreamingResponse`'s
-generator is actually iterated, since older FastAPI closed `yield`
-dependencies as soon as the route function returned — before the response
-body was ever sent. Read the installed FastAPI's actual source
-(`fastapi/routing.py`, `fastapi/dependencies/utils.py`, version 0.141.1 in
-`backend/.venv`, 0.139.2 globally) to check, rather than assume: this version
-uses two separate `AsyncExitStack`s (`fastapi_inner_astack` /
-`fastapi_function_astack`), and a `Depends(get_db)` yield-dependency
-defaults to the *inner* stack, which stays open until *after*
-`await response(scope, receive, send)` completes. So the download's DB
-session is not closed early — this specific, commonly-cited bug does not
-apply to this codebase's FastAPI version.
-
-**Built a real reproduction, since `TestClient` can't show this.** Every
-existing test in `tests/api/test_transfer_streaming.py` uses `TestClient`,
-which drives the ASGI app in-process over httpx's `ASGITransport` — there is
-no real socket, so a hard client disconnect can never be simulated this way,
-and no existing test exercises it. Started the real backend
-(`uvicorn app.main:app`) against an isolated SQLite file, paired a device,
-shared a file, and used a raw Python `socket` to `GET
-/transfers/{id}/download`, read exactly 3 chunks, then force-closed the
-connection with `SO_LINGER=0` (an RST, matching an abrupt hotspot/link drop
-more closely than a graceful close). This is what actually surfaced the
-defect:
-
-- With the *original* code, after the abrupt disconnect the `Transfer` row
-  stayed `status=in_progress`, `bytes_transferred=0` — indefinitely. One run
-  logged `Download connection closed early` after **19 seconds**; a repeat
-  of the identical scenario with *no* other server traffic logged nothing at
-  all for over **60 seconds**; only firing 200 unrelated HTTP requests at the
-  idle server finally "unstuck" it. This is the direct cause of "jpg hangs
-  indefinitely" and of the delayed/absent detection generally — it is not
-  timing noise, it is the actual, reproducible mechanism.
-- Root of that: Starlette's `StreamingResponse.stream_response` (installed
-  version 1.3.1) only detects a dead client by letting `await send(...)`
-  raise `OSError`, wrapped into `ClientDisconnect`. Whether that `send()`
-  call ever raises — and how soon — depends entirely on the OS/event loop
-  noticing the socket is dead, which this project's Windows target does not
-  do reliably or promptly while otherwise idle. Confirmed this is not just
-  slow but genuinely *unbounded* by testing an 80 MiB file with the same
-  abrupt-disconnect scenario: the backend's `send()` calls kept "succeeding"
-  (silently absorbed by the OS's own buffering) for the *entire* file, and
-  the transfer was marked `completed` even though the client had been gone
-  for the whole transfer.
-- Tried the officially-recommended alternative, `Request.is_disconnected()`
-  (checks the ASGI receive channel directly instead of waiting on a failed
-  write), polled once per chunk. Empirically no better — it depends on the
-  same underlying OS/event-loop notification the send-failure path does, and
-  in the same "quiet server" test it never fired either.
-- Tried forcing Python's `SelectorEventLoop` instead of Windows' default
-  `ProactorEventLoop` (uvicorn explicitly selects Proactor on `win32`,
-  confirmed by reading `uvicorn/loops/asyncio.py`) via a custom
-  `loop_factory`. No difference — ruled out the event-loop implementation as
-  the deciding factor.
-- What did work: wrapping each chunk's `await send(...)` in a bounded
-  `anyio.fail_after(...)` timeout, so detection no longer depends on the OS
-  ever reporting the dead connection at all. This is real `asyncio`-level
-  cancellation of a suspended `await`, not an attempt to interrupt a blocked
-  OS thread (which is not reliably possible in Python) — verified this is
-  the correct mechanism to apply here specifically because `send()` inside
-  Starlette's `stream_response` is itself an `await` on the event loop, not
-  a blocking call dispatched to a worker thread.
-
-**The "database is locked" storm.** Traced whether this is cause or effect
-of the above, per the milestone's instruction not to assume. Read every
-repository `update()` method: `DeviceRepository.update()` and
-`TransferRepository.update()` both call `self.db.flush()` immediately.
-`AuthService.authenticate()` — which runs on *every* authenticated request,
-including plain `GET`s — calls both, to record `last_used_at`/`last_seen_at`.
-Because the project's `SessionLocal` uses `autocommit=False` and no `GET`
-route ever calls `db.commit()` (confirmed by reading every route in
-`app/api/v1/transfers.py`, `shared_files.py`), that `flush()` sends real
-`UPDATE` statements to SQLite and acquires SQLite's one process-wide write
-lock for the rest of that request — a lock that is only released when the
-session closes at the end of the request (an implicit rollback, since
-nothing ever committed it). With no WAL mode configured
-(`backend/app/database/session.py` has no `PRAGMA journal_mode=WAL`) and no
-explicit `busy_timeout` override (Python's `sqlite3` defaults to 5s), enough
-concurrent authenticated requests — Files/Transfers/Transfer-Detail polling,
-described in `CLAUDE.md` as hitting the backend every few seconds, compounded
-by however many extra retries a stuck transfer provokes — contend for that
-one lock, and any request that loses the race past the 5s default raises
-`database is locked`. This makes the lock storm a downstream *effect*: it is
-plausible chiefly *because* Bug A (above) leaves a transfer stuck and
-retried/polled for a long, open-ended window, giving far more opportunity
-for authenticated requests to pile up than a transfer that fails within a
-second or two ever would.
-
-Direct repro attempts (up to 2,000 concurrent authenticated `GET /transfers`
-requests overlapping a live 80 MiB download, both before and after the fix)
-did not by themselves trip `database is locked` on this development machine
-— each `flush()`'s lock hold is brief enough, and this machine's SQLite I/O
-fast enough, that even heavy concurrency serializes within the 5s timeout
-without visible errors. The lock-acquisition-on-every-GET behavior itself is
-proven directly (by reading the code and tracing the call graph, not
-inferred); that it is *sufficient on its own*, versus a real device's slower
-storage/timing plus a much longer stuck-transfer retry window, to produce
-the reported storm is not independently proven in this environment — see
-Known Limitations.
-
-## Root Cause
-
-Two independent, both real, both fixed in this milestone:
-
-1. **Unbounded/unreliable disconnect detection.** `_generate_download`'s
-   only way of learning the client is gone was Starlette's own `send()`
-   failure path, which depends on the OS/event loop surfacing a dead socket
-   — on this Windows target, that can take tens of seconds or, while the
-   server is otherwise idle, not happen within any bounded time at all. This
-   is the actual cause of "jpg hangs indefinitely," the delayed
-   `Download connection closed early` log for the mp3 case, and the
-   `ActiveStreamRegistry` guard staying held the whole time. The exact
-   3,145,728-byte cutoff itself was never a backend bug — it is simply how
-   much the client happened to read before disconnecting.
-2. **Unnecessary SQLite write-lock acquisition on every authenticated
-   request.** `AuthService.authenticate()`'s `last_used_at`/`last_seen_at`
-   bookkeeping flushed immediately on every call, including pure `GET`s that
-   never commit — taking SQLite's single write lock for the full duration of
-   every authenticated request regardless of whether it ever writes
-   anything else. Not proven in isolation to be sufficient for the reported
-   storm, but a genuine, unnecessary source of lock contention that Bug A's
-   long stuck-transfer window would directly aggravate.
-
-## Solution
-
-- `backend/app/api/v1/transfers.py`: added `_WriteTimeoutStreamingResponse`,
-  a small `StreamingResponse` subclass used only by the download route. It
-  wraps each chunk's `send()` in `anyio.fail_after(Settings.
-  STREAM_WRITE_TIMEOUT_SECONDS)`; on timeout it calls
-  `TransferStreamService.abort_stalled_download` (via `anyio.to_thread.
-  run_sync`, off the event loop, matching how this codebase already keeps
-  DB work out of async code) and stops — the client is already gone, so
-  there is nothing left to send.
-- `backend/app/services/transfer_stream_service.py`: added
-  `abort_stalled_download` (finalizes the transfer FAILED and releases the
-  `ActiveStreamRegistry` guard) and factored the existing `GeneratorExit`
-  handler to share the same `_mark_connection_lost` logic, so a transfer is
-  only ever finalized once regardless of which path notices the disconnect
-  first (`_finalize` is already a no-op past the first terminal write). The
-  existing `GeneratorExit` path is left in place as a fallback for whichever
-  case it does still catch (e.g. faster/cleaner client disconnects) — this
-  is a second detection path, not a replacement.
-- `backend/app/core/config.py`: added `STREAM_WRITE_TIMEOUT_SECONDS: float =
-  15.0` — generous relative to how long even a slow real transfer should
-  need to send one 1 MiB chunk, while still bounding the worst case to
-  something a user would notice but not an indefinite hang.
-- `backend/app/services/auth_service.py`: `authenticate()` no longer calls
-  `DeviceSessionRepository.update()`/`DeviceRepository.update()` (both
-  flush immediately) — it only mutates the already-tracked `session`/
-  `device` ORM attributes. SQLAlchemy still picks these up at whatever
-  commit the route's own service performs, exactly matching this method's
-  existing documented "informational only, may be lost on a purely
-  read-only route" design — the fix removes the *accidental* side effect
-  (an eager write-lock acquisition on every request) without changing that
-  intentional trade-off.
-
-No architecture changes, no new technologies, no changes outside the
-streaming/auth path this milestone investigated.
-
-## Verification
-
-- `pytest -q` (backend): **286 passed, 2 skipped** — unchanged pass count,
-  confirming neither change altered any existing observable behavior.
-- Reproduction re-run against the fix, same raw-socket abrupt-disconnect
-  scenario: transfer status confirmed to leave `in_progress` and reach a
-  terminal state without relying on the flaky OS-level signal (the write-
-  timeout path is what a slow/dead real network connection would actually
-  exercise; see Known Limitations for why this exact mechanism could not be
-  triggered on every local loopback run).
-- Concurrency check for the auth-bookkeeping fix: 2,000 concurrent
-  authenticated `GET /transfers` requests overlapping a live download,
-  before and after — no behavioral regression, and the fix removes a
-  provable, unnecessary lock acquisition from every such request.
-
-## Known Limitations
-
-- **Not verified on the physical RMX3997 device.** Everything above was
-  reproduced against the real backend process on the development machine,
-  using a raw socket to simulate an abrupt disconnect as closely as
-  possible — not the real Android app over a real hotspot. Per this
-  milestone's own instructions, physical-device re-verification (all of
-  `.txt`, `.pdf`, `.docx`, `.pptx`, `.jpg`, `.png`, `.zip`, `.mp3`, and
-  `.mp4` if available) is still required before this can be considered
-  closed, exactly as P7's own Known Limitations already flagged for that
-  milestone.
-- **Loopback does not reliably reproduce a stalled write.** On this
-  machine's Windows loopback, the OS's own socket buffering sometimes
-  absorbed an entire 80 MiB file without `send()` ever blocking, even
-  against a dead peer — an artifact of loopback not needing to actually
-  transmit anything over a physical link. A real Wi-Fi hotspot connection
-  has genuine bandwidth and round-trip latency, so backpressure (and thus a
-  stalled write) should occur far more readily and far sooner than on
-  loopback — meaning the `anyio.fail_after` write-timeout fix is expected to
-  matter *more*, not less, on the real device, but its exact firing
-  behavior in the field is unverified.
-- **The SQLite lock-storm fix reduces risk; it is not independently proven
-  to eliminate the reported storm.** The unnecessary lock acquisition on
-  every authenticated request is proven directly by reading the code; that
-  it was *sufficient by itself* to produce hundreds of `database is locked`
-  errors was not reproduced in this environment even under heavy concurrent
-  load, likely because this machine's SQLite writes are fast enough to stay
-  under the 5s default busy-timeout even when serialized. The real device
-  may have slower storage, and — more importantly — Bug A's indefinite hang
-  gives a much longer window for retries/polling to pile up than anything
-  reproduced here. If `database is locked` errors still occur after this
-  fix on the physical device, the next place to look is SQLite's journal
-  mode (no `PRAGMA journal_mode=WAL` is currently configured — see
-  `backend/app/database/session.py` — WAL allows concurrent readers
-  alongside a single writer, which the current rollback-journal default
-  does not).
-- `docs/13_Database_Design.md`'s notes on `sessions.last_used_at` /
-  `devices.last_seen_at` do not mention the flush-timing change; a doc
-  update is recommended but was not made automatically, per `CLAUDE.md`'s
-  documentation-ownership rule.
+**Gotcha for future backend work:** loopback doesn't reliably reproduce a
+stalled write (the OS can buffer an entire file without `send()` ever
+blocking, even against a dead peer) — a real Wi-Fi link has genuine
+backpressure and should trigger the timeout far sooner. If `database is
+locked` ever recurs on-device, `backend/app/database/session.py` has no
+`PRAGMA journal_mode=WAL` configured — that's the next thing to try.
 
 ---
 
 # Milestone P8.1 — Physical Device Verification (Post-P8)
 
-## Problem
+**Result:** P8's fix held cleanly (8 file types, zero disconnect/lock
+errors on RMX3997 over its own hotspot). Two Android-only defects found,
+unrelated to P8:
 
-P8's own Known Limitations flagged that its fixes (bounded write-timeout
-disconnect detection, the auth-bookkeeping lock fix) were never verified
-against a real Android device. This milestone re-ran the full transfer
-matrix (`.txt`, `.pdf`, `.docx`, `.pptx`, `.jpg`, `.png`, `.zip`, `.mp3`) on
-device RMX3997 — the same physical device P7/P8 used — over its own Wi-Fi
-hotspot (not loopback/USB), the exact condition P8's Known Limitations
-called out as necessary to exercise real backpressure.
+**Defect 1 — `publishDownload()` reported success for a file that was
+never actually published.** `ReactNativeBlobUtilMediaCollection
+.writeToMediaFile()` redundantly opens the destination output stream a
+*second* time and immediately closes it without writing — dead code (a
+commented-out `IS_PENDING` dance nearby suggests an abandoned refactor)
+that truncates/orphans the just-written MediaStore row on this device
+without throwing. **Fixed at the symptom level, not the library bug
+itself:** `publishDownload()` now stats the real destination after
+`copyToMediaStore` resolves and only reports success if the published size
+matches the staged size; otherwise it warns and falls back to the
+private-storage path rather than lying about where the file ended up.
+Files downloaded on this specific device/OS still won't actually appear in
+Downloads until the library bug is patched or bypassed.
 
-## Backend result: PASS
+**Defect 2 — the notification channel had no sound.** `ensureChannel()`
+never passed a `sound` field to `notifee.createChannel()` — notifee's own
+docs state the default is silent. **Fixed:** `sound: 'default'`. (Could not
+be confirmed audibly on this device in the same session: Android channel
+settings, including sound, are fixed at first creation and don't update
+from a later `createChannel()` call with the same ID — expected platform
+behavior, not a flaw in the fix.)
 
-All 8 required file types (plus a few repeats from tap-coordinate mistakes,
-13 downloads total including the two most implicated in the original P8
-report — `.jpg` and `.mp3`) completed cleanly: `Download completed:
-transfer_id=N bytes=<declared size>` for every one, byte-for-byte matching
-the shared file's declared size. Zero occurrences of `Download connection
-closed early` and zero occurrences of `database is locked` across the
-entire session. P8's fix holds on the real device it was written for.
-
-## Android result: two defects found, neither caused by P8
-
-Per this milestone's own instructions, testing stopped at the first
-failure (`.txt`) for root-cause investigation before continuing.
-
-### Defect 1 — publishDownload() reported success for a file that was never actually published
-
-**Symptom:** immediately after a `.txt` download, the Files screen showed
-"Saved to Downloads/Relay" and an "Open" button, then silently reverted to
-"Download" a few seconds later.
-
-**Investigation:** `adb shell content query --uri
-content://media/external/downloads` and a raw `ls` on
-`/storage/emulated/0/Download/Relay/` both confirmed, on two independent
-reproductions (transfer_id 35 and 36), that the file never existed at its
-public destination — only at its private staging path
-(`files/Downloads/test.txt`, confirmed present via `run-as`). Traced into
-`node_modules/react-native-blob-util`'s native Android implementation
-(`ReactNativeBlobUtilMediaCollection.java`, `writeToMediaFile()`): after
-correctly writing the source file's bytes into the new MediaStore `Uri` via
-a `ParcelFileDescriptor` opened in write mode, the method redundantly opens
-`resolver.openOutputStream(fileUri)` a *second* time and immediately closes
-it without writing anything — dead code, evidenced by a commented-out
-`IS_PENDING` dance sitting right next to it that suggests an abandoned
-refactor. On this device (RMX3997, ColorOS/RealmeUI, Android 16/API 36),
-that redundant open-close truncates or orphans the just-written MediaStore
-row, but throws no exception — so `publishDownload()`'s own try/catch
-(`blobUtil.ts`) never saw a failure to report, and the transfer's local
-state proceeded straight to `'completed'` with a URI pointing at nothing.
-This is deterministic (hit on every attempt, both `.txt` downloads), not a
-timing flake, and affects every file type identically since the code path
-is direction-agnostic.
-
-This bug lives entirely in third-party library code, not Relay's own, and
-P8 touched zero Android/frontend files — confirmed unrelated to P8's
-backend fix.
-
-**Decision:** presented three options to the developer (accurately report
-the failure without fixing the underlying publish; reimplement the
-MediaStore write in Relay's own code to bypass the buggy library call
-entirely; or leave it undiagnosed-fixed and only document it). Developer
-chose the first — the smallest, lowest-risk fix, matching this milestone's
-"do not redesign" instruction. `publishDownload()` (`blobUtil.ts`) now
-stats the real destination path after `copyToMediaStore` resolves and only
-treats the copy as successful if the published file's size matches the
-staged file's; otherwise it warns and returns `null`, leaving the file at
-its (already-existing) private-storage fallback rather than lying about
-where it ended up. **This does not make the underlying publish actually
-work on this device** — files downloaded here still won't appear in the
-Downloads app or `Downloads/Relay` until the react-native-blob-util bug
-itself is fixed or worked around, which was explicitly out of scope for
-this fix.
-
-### Defect 2 — the download-complete notification channel was created with no sound
-
-**Symptom:** a "Relay" notification did appear for each completed download
-(confirmed via the notification shade — "✓ test.pdf downloaded
-successfully" — and via `adb shell dumpsys notification`), but per this
-milestone's own matrix item ("Notification has sound"), sound was
-suspect.
-
-**Investigation:** `adb shell dumpsys notification` showed the
-`relay-downloads` channel with `mSound=null` and `mAudioAttributes=null` —
-compare the app's *other* channel
-(`com.supersami.foregroundservice.channel`, the transfer-progress
-notification), which explicitly carries
-`mSound=content://settings/system/notification_sound`. `downloadNotification.ts`'s
-`ensureChannel()` called `notifee.createChannel(...)` without a `sound`
-field. notifee's own type declaration
-(`NotificationAndroid.d.ts`) documents this exactly: *"The default value is
-to play no sound. To play the default system sound use 'default'."* This is
-Relay's own code (added in Milestone P4), not a third-party bug, and a
-one-line fix with no meaningful alternative to weigh — applied directly
-rather than re-raising as a decision.
-
-**Solution:** `ensureChannel()` now passes `sound: 'default'` to
-`createChannel()`.
-
-**Verified at the code level, not audibly on this device:** confirmed via
-the running Metro bundle (`grep`'d for `sound.*default`) and a new unit
-test (`downloadNotification.test.ts`) asserting `createChannel` is called
-with `sound: 'default'`. Could **not** be confirmed audibly on the
-RMX3997 test device itself: Android notification channel settings
-(including sound) are fixed at first creation and are not updated by a
-later `createChannel()` call with the same channel ID — this device's
-`relay-downloads` channel already existed from earlier (pre-fix) test runs
-in this same session, and `dumpsys notification` still showed `mSound=null`
-after the fix was live and reloaded. This is expected Android platform
-behavior, not a flaw in the fix — a fresh install (or manually deleting the
-channel via Settings) is required to observe the sound on this specific
-device. Recommended before fully closing this out.
-
-## Files changed
-
-- `android/src/streaming/blobUtil.ts` — `publishDownload()` verifies the
-  publish actually landed before trusting it (Defect 1).
-- `android/src/streaming/downloadNotification.ts` — channel now created
-  with `sound: 'default'` (Defect 2).
-- `android/__tests__/streaming/blobUtil.test.ts` — two new regression
-  tests for Defect 1.
-- `android/__tests__/streaming/downloadNotification.test.ts` — one new
-  regression test for Defect 2.
-
-## Testing summary
-
-- Backend: unaffected by either Android-side fix; the existing `pytest`
-  suite (286 passed, 2 skipped per P8) was not re-run since no backend file
-  changed in this milestone — only re-verified live against the physical
-  device as described above.
-- Android: `npx jest` — 25 suites / 156 tests passing (155 + 1 new; two new
-  cases added to `blobUtil.test.ts`, one to `downloadNotification.test.ts`,
-  net +3 across the two files after accounting for the pre-existing count).
-  `npx tsc --noEmit` clean. `npx eslint` clean on all changed files.
-- ADB: full manual matrix executed live (see Backend/Android results
-  above) — this milestone's verification was physical-device-only by
-  design, not simulated.
-- `.mp4`: not tested — no sample file was available in the environment and
-  no tool (`ffmpeg` or equivalent) was present to synthesize one; explicitly
-  optional ("if available") per this milestone's brief.
-
-## Known Limitations
-
-- The react-native-blob-util `writeToMediaFile` bug itself (Defect 1's root
-  cause) is not fixed — only its silent-false-success symptom is. Files
-  downloaded on this specific device/OS combination will continue to land
-  only in private app storage, invisible to the Downloads app or any file
-  manager, until either the library is patched/upgraded or Relay's own code
-  is changed to bypass the buggy call with a working alternative (deferred;
-  see the three options presented to the developer above).
-- Defect 2's fix is unverified audibly on this device for the reason
-  described above (channel immutability) — verified at the code/test level
-  only.
-- The app's own debug instrumentation (`'[QR-DEBUG] ...'` console logging in
-  `src/api/client.ts`, invoked on every single HTTP request/response) is
-  extremely high-volume — high enough that it evicted the device's logcat
-  ring buffer within roughly a minute of normal polling traffic during this
-  session's investigation, repeatedly losing the exact moment being
-  diagnosed. Left untouched as out of scope for this milestone, but flagged
-  since it measurably slowed root-causing Defect 1 and would do the same to
-  any future on-device investigation.
+**Gotcha:** the app's own `[QR-DEBUG]` debug logging in `src/api/client.ts`
+is high-volume enough to evict the device's logcat ring buffer within about
+a minute of normal polling traffic — measurably slowed this investigation.
+Still present as of the latest milestone (see `docs/14_Testing_Plan.md` §6).
 
 ---
 
 # Milestone P9 — Android Download Reliability (Detail Screen "Download Interrupted")
 
-## Problem
+**Problem:** `.pdf`/`.png`/`.zip` downloaded successfully while
+`.txt`/`.docx`/`.pptx`/`.jpg`/`.mp3` showed "Completed" on the Overview
+list but "Download interrupted" on the detail screen — sometimes
+self-correcting only once another transfer began.
 
-Physical-device testing after P8/P8.1 reported `.pdf`, `.png`, and `.zip`
-downloading successfully, while `.txt`, `.docx`, `.pptx`, `.jpg`, and `.mp3`
-showed "Completed" on the Overview list but "Download interrupted" when
-their detail screen was opened — a state that sometimes changed only after
-another transfer began. This milestone's brief explicitly warned not to
-assume MediaStore is the cause and asked for a full pipeline trace of both
-a working and a failing type before any fix.
+**Investigation:** Read every layer in full (backend headers, RNBU's
+native `FileStorage`/MediaStore code) and found no file-extension or
+MIME-type branching anywhere — corroborated by this project's own history:
+P7's matrix found the *opposite* ranking on the same code area. A
+deterministic per-extension rule cannot produce two contradictory rankings;
+a size/timing-dependent flake can (this is the same P7 false-negative,
+more exposed on larger files — most reports simply used larger sample
+files for the "failing" extensions).
 
-## Investigation
+**Root cause:** `TransferListScreen` and the detail screen's primary
+status text both correctly read server state (the backend marks
+`COMPLETED` unconditionally once bytes finish; `mergeLiveTransferState`
+already defers to it once terminal, per P3/P5). But a *second*, separate
+block in the same detail screen read `TransferStreamManager`'s raw local
+`stream.status === 'failed'` directly, bypassing that same merge rule —
+so a stale local failure (from whatever caused the local promise to
+reject) could render underneath an already-correct "Completed" status
+indefinitely. It only ever cleared when a *different* transfer's `start()`
+overwrote the singleton — exactly matching "changes after another transfer
+begins."
 
-Traced every stage named in the brief — streaming, staging, publish,
-`TransferStreamManager`, `Transfer` state, `TransferProgressDetail`, Files
-screen, MediaStore, notification path — reading full files rather than
-excerpts, on both the backend and the Android/native side.
-
-- **Backend response path** (`backend/app/api/v1/transfers.py`,
-  `backend/app/services/transfer_stream_service.py`): `Content-Length` is
-  always set explicitly to the exact declared `transfer.file_size`, for
-  every file, regardless of type. `guess_media_type()` only affects the
-  `Content-Type` header (via `mimetypes.guess_type`), never chunking,
-  never the byte loop, never the finalize/complete logic. No middleware
-  (no `GZipMiddleware` or equivalent) is registered anywhere in the app —
-  confirmed by grepping the entire backend for "middleware". Ruled out as
-  a source of any type-dependent behavior.
-- **`react-native-blob-util`'s native Android layer** (read in full, not
-  excerpted): `ReactNativeBlobUtilReq.java`'s constructor picks
-  `ResponseType.FileStorage` purely from whether `options.path` is set
-  (always true for this app's downloads) — never from `Content-Type`.
-  Content-type-based branching (`isBlobResponse()`) exists only for the
-  unrelated `KeepInMemory` in-memory response mode, never reached here.
-  `ReactNativeBlobUtilFileResp.isDownloadComplete()`
-  (`bytesDownloaded == contentLength()`) is pure byte-count arithmetic
-  against the parsed `Content-Length` header — no MIME involvement.
-  `ReactNativeBlobUtilMediaCollection.createNewMediaFile`/
-  `writeToMediaFile` (the actual MediaStore publish) use whatever
-  `MediaType`/`mimeType` the *caller* passes — and the caller
-  (`android/src/streaming/blobUtil.ts`'s `publishDownload()`) hardcodes
-  `MediaType.Download` and `mimeType: 'application/octet-stream'` for
-  every single download, never derived from the real file type. Per this
-  milestone's own instruction not to assume MediaStore is the cause: it
-  was investigated fully and ruled out on the evidence, not skipped.
-- **Cross-referenced against this project's own history**: P7's own
-  physical-device matrix (`docs/15_QA_NOTEBOOK.md`'s P7 entry, this same
-  file) found the *opposite* ranking — `.txt` succeeded while `.pdf`,
-  `.docx`, `.pptx`, and `.jpg` all failed. A genuinely type-keyed,
-  deterministic bug cannot produce two contradictory rankings of the same
-  extensions across two separate test passes with no code change to the
-  byte-transfer path in between. P7's own diagnosis already identified the
-  actual mechanism: `ReactNativeBlobUtilFileResp.isDownloadComplete()`'s
-  exact byte-count check can false-negative, and is "more exposed on
-  larger, multi-chunk downloads" — a size/timing property, not a type
-  property. The most likely explanation for the apparent type correlation
-  in both P7's and P9's reports is simply which sample files a tester
-  happened to use for each extension (a quick test `.pdf`/`.png`/`.zip` is
-  often small/single-chunk; a real `.jpg` photo or `.mp3` track or
-  `.docx`/`.pptx` document people keep around is often several MB and
-  multi-chunk) — not a rule the code implements.
-- **The actual, deterministic bug**, found by comparing how the Overview
-  list and the detail screen each read transfer state (per this
-  milestone's specific hint that this divergence is a prime suspect):
-  - `TransferListScreen` (`android/src/screens/transfers/
-    TransferListScreen.tsx`) reads `transfer.status` exclusively from the
-    polled `GET /transfers` response (`useTransfers.ts`) — no
-    `TransferStreamManager` involvement at all. This is why it always
-    correctly shows "Completed": the backend marks a `Transfer`
-    `COMPLETED` unconditionally the instant it finishes writing all bytes
-    to the socket (`transfer_stream_service._generate_download`,
-    `_finalize`), independent of anything that happens to those bytes on
-    the client afterward.
-  - `TransferProgressDetail.tsx` merges server and local state via
-    `mergeLiveTransferState()`, which already defers to the server outright
-    once `transfer.status` is terminal (Milestone P3's rule) — this is why
-    the screen's primary status text also correctly showed "Completed."
-  - But a second, separate block in the same file —
-    ```
-    {stream?.transferId === transferId && stream.status === 'failed' && stream.error && (
-      <Text style={styles.error}>{stream.error}</Text>
-    )}
-    ```
-    — read `TransferStreamManager`'s raw module-singleton `stream` object
-    directly, gated only on `stream.status === 'failed'`, completely
-    bypassing `mergeLiveTransferState()`'s server-wins-once-terminal rule
-    that the rest of the same screen already correctly follows.
-  - `TransferStreamManager`'s `state` (`android/src/streaming/
-    TransferStreamManager.ts`) is a plain module-level singleton, only
-    ever reassigned from inside its own `start()` method — grepped every
-    call site in `android/src` and confirmed there is no `reset()`/
-    `clear()` export anywhere. Once a download's local
-    `activeTask.promise` rejects (P7's native false-negative being the
-    most likely trigger) and P7's own `isActuallyComplete()` recovery
-    doesn't rescue it (e.g. the on-disk file isn't yet byte-for-byte
-    flushed at the exact moment of rejection), `state` is stamped
-    `{status: 'failed', error: 'Download interrupted.'}` for that
-    `transferId` — and stays there forever, because `start()`'s own guard
-    (`if (state?.transferId === transfer.id) return;`) explicitly refuses
-    to ever touch that transfer's local state again ("V1 has no retry").
-  - That stale text can only ever disappear when `stream?.transferId ===
-    transferId` becomes false — i.e. when a *different* transfer's
-    `TransferStreamManager.start()` call overwrites the singleton with a
-    new `transferId`. This is precisely, and only, what "the state
-    sometimes changes after another transfer begins" describes: a
-    poll-based staleness bug would have self-corrected on the very next
-    2-second poll tick or screen refocus regardless of whether another
-    transfer started; this one specifically doesn't, because nothing else
-    in the codebase ever touches `state`.
-  - No render/component test exists for `TransferProgressDetail.tsx`
-    (confirmed: no matching file anywhere under `android/__tests__`;
-    `@testing-library/react-native` is not even an installed dependency),
-    so `mergeLiveTransferState.test.ts` — which does correctly test the
-    merge logic in isolation — never exercised this stray, ungated JSX
-    block at all.
-
-## Root Cause
-
-Two things, clearly separated:
-
-1. **Verified, deterministic, code-provable**: `TransferProgressDetail`'s
-   trailing error block reads `TransferStreamManager`'s raw local state
-   directly instead of going through `mergeLiveTransferState()`'s
-   server-wins-once-terminal rule, so a stale local `'failed'` result can
-   render underneath an already-correct "Completed" status indefinitely,
-   for any transfer, of any file type, until an unrelated transfer starts.
-   This alone fully and exactly explains every symptom in the bug report:
-   Overview = Completed, detail = "Download interrupted", self-corrects
-   only when another transfer begins.
-2. **Plausible but not newly proven, and explicitly not type-keyed**: what
-   makes the local `activeTask.promise` reject in the first place is most
-   likely P7's already-documented `isDownloadComplete()` false-negative
-   (a size/timing-dependent flake, not a per-extension rule) — exhaustive
-   tracing of the backend, `blobUtil.ts`, `TransferStreamManager.ts`, and
-   every relevant native `react-native-blob-util` Java source found no
-   file-extension or MIME-type branching anywhere in the byte-transfer,
-   completion-check, or MediaStore-publish path. This is independently
-   corroborated by P7's own matrix showing the opposite type ranking on
-   the same codebase area.
-
-## Solution
-
-`android/src/screens/transfers/TransferProgressDetail.tsx`: changed the
-trailing error block's guard from the raw `stream.status === 'failed'` to
-`merged.status === 'failed'` — the same server-aware value that already
-drives this screen's status text and Cancel button. Once
-`mergeLiveTransferState()` sees a terminal server `transfer.status`, it
-already ignores the local stream outright (Milestone P3), so once the
-server confirms `'completed'`, this block can no longer render a stale
-local error underneath it — for any file type, regardless of what
-originally caused the local promise to reject. Nothing else changed:
-`TransferStreamManager`, `mergeLiveTransferState`, the backend, and the
-MediaStore/publish path were all traced and confirmed clean, so touching
-any of them would have been outside this milestone's "smallest correct
-fix" instruction.
-
-## Verification
-
-- `android/__tests__/transfers/mergeLiveTransferState.test.ts`: added a
-  case — server `status: 'completed'` merged against a local stream still
-  reporting `status: 'failed', error: 'Download interrupted.'` — asserting
-  the merge result is `status: 'completed'` outright, documenting the
-  exact scenario the fix now depends on.
-- Full Android suite: `npx jest` — 25 suites / 157 tests passing (156 + 1
-  new). `npx tsc --noEmit` clean.
-- Backend: untouched by this milestone; not re-run.
-- Live device E2E across the full `.txt`/`.docx`/`.pptx`/`.jpg`/`.mp3`/
-  `.pdf`/`.png`/`.zip` matrix was **not** run as part of this fix — no
-  physical device/desktop pair was available in the environment the fix
-  was made in, the same constraint recorded throughout this notebook.
-  **Required before closing this out.**
-
-## Remaining Limitations
-
-- The upstream trigger for the local completion promise occasionally
-  rejecting at all (P7's `isDownloadComplete()` false-negative) is
-  unchanged by this fix — this milestone only stops that rejection from
-  producing a permanently stale, contradictory error message once the
-  server has already confirmed success. A transfer whose local stream
-  never recovers and whose server-side transfer also genuinely fails will
-  still correctly show its real failure reason.
-- The five-extension list in the original bug report should not be read
-  as a reliable reproduction recipe — see Investigation above for why
-  P7's own matrix produced the reverse ranking on the same underlying
-  mechanism. Physical re-verification should test with both small and
-  large files of a given type, not assume the extension itself is what
-  matters.
-- As with every prior milestone in this notebook, this fix's correctness
-  rests on a full code trace and the existing/updated Jest suite, not a
-  live device run — flagged as the load-bearing gap to close before this
-  milestone can be considered done.
+**Fix:** The trailing error block now gates on `merged.status === 'failed'`
+(the same server-aware value already driving the rest of the screen)
+instead of the raw local value.
 
 ---
 
-# Milestone P9.1 — Live Physical Device Investigation: Two Verified, Fixed Defects, One Verified, Unfixed Defect
+# Milestone P9.1 — Live Investigation: Two Fixed Defects, One Confirmed-Unfixed
 
-## Problem
+**Problem:** P9's fix was accepted, but the underlying defect was still
+reported live: several types "completing" per the Overview yet ending up
+unavailable/unusable.
 
-P9's fix (the detail screen's stale "Download interrupted" text) was accepted, but the primary defect was reported as still present: `.pdf`/`.png`/`.zip` downloads succeeding, `.txt`/`.docx`/`.pptx`/`.jpg`/`.mp3` failing, with the transfer still reaching `Completed` and the actual file ending up "unavailable or unusable." This milestone required a live run against the physical device (RMX3997, connected over its own Wi-Fi hotspot, backend and Metro started locally), not a code-only trace — comparing one known-good and one known-bad file's complete execution end to end.
+**Defect 1 — `DownloadDir` vs `LegacyDownloadDir` confusion (fixed).**
+`isPublishedAt()`/`downloadedFilePath()` statted
+`ReactNativeBlobUtil.fs.dirs.DownloadDir`, which resolves to the app's own
+private scoped external directory (a path that doesn't even exist) —
+**not** the real public folder `copyToMediaStore` actually publishes into
+(`LegacyDownloadDir`, despite the name). This made even a **genuinely
+successful** publish unconditionally report as unavailable, for every
+file type — the actual explanation for most of the "unavailable" reports.
+Fixed by statting `LegacyDownloadDir` instead, in both `blobUtil.ts` and
+`downloadExistence.ts`.
 
-## Investigation
+**Defect 2 — real, live, non-deterministic connection loss on
+multi-TCP-segment downloads (confirmed real, root cause found later — see
+Milestone P10).** Live instrumentation showed on-disk sizes strictly
+*below* the declared size at rejection, in multiples of ~1460 bytes
+(standard TCP MSS) — genuine data loss during the network read itself, not
+a false-negative-on-an-already-complete-file. Traced into
+`ReactNativeBlobUtilReq.java`'s `done()`: the response-draining loop is
+wrapped in `catch (Exception ignored) {}` with logging commented out — any
+real `IOException` mid-read is silently discarded, which is why no prior
+milestone could see the real cause; it never left the native layer.
 
-Backend (`uvicorn`) and Metro were started locally; `adb` confirmed the RMX3997 device connected and authorized. The already-paired, already-installed app was launched, driven via `adb shell input tap` against screenshots (`adb exec-out screencap`), with temporary `[P9.1]`-tagged `console.log` instrumentation added to `blobUtil.ts` and `TransferStreamManager.ts` (removed after use) and captured via `adb logcat`, cross-referenced against `backend/logs` and direct filesystem/MediaStore inspection (`adb shell ls`, `adb shell content query`).
-
-- **`test.pdf` (reported good) traced completely.** `downloadFile` resolved cleanly, on-disk size matched the declared 1422 bytes exactly. `publishDownload` → `copyToMediaStore` resolved with a real content URI. Confirmed via `adb shell ls /storage/emulated/0/Download/Relay/` that the file genuinely landed there, byte-for-byte correct. **The divergence:** `isPublishedAt()` (`blobUtil.ts`) statted `${DownloadDir}/Relay/test.pdf`, which resolved (per `ReactNativeBlobUtilFS.java`) to `Context.getExternalFilesDir(DIRECTORY_DOWNLOADS)` — the app's own private, scoped external directory (`/storage/emulated/0/Android/data/com.relay.mobile/files/Download/Relay/`), a path that doesn't even exist — not the real public folder `copyToMediaStore` actually publishes into. The stat always failed, so `publishDownload()` unconditionally returned `null` regardless of whether the publish genuinely succeeded, leaving the staging copy never deleted, the completion notification's tap-to-open URI always `null`, and — since `downloadExistence.ts`'s `downloadedFilePath()` duplicated the exact same wrong path — `useDownloadExistence` always reported `false`, which `deriveDownloadStatus()` then downgraded from `completed` back to `idle`. Confirmed live: the Files screen's button for `test.pdf` reverted from "Downloading..." straight to plain "Download" a few seconds after a fully successful transfer — the literal "file is unavailable" symptom, on a file that was not actually unavailable. This is unconditional and applies identically to every file type — it is not what makes some extensions fail and others succeed.
-- **`test.jpg`/`test.txt`/`test.png` (reported bad) traced completely.** Backend logs were clean for all three — `Download completed: transfer_id=N bytes=<declared size>`, matching P7/P8/P9's own prior finding that the backend is not the source. The client side was genuinely different this time: `isActuallyComplete()`'s own stat showed on-disk sizes strictly below the declared size at the moment of rejection — `test.jpg` 1460/17868, `test.txt` 1460/3000, `test.png` 2920/4311 on a first attempt and 1460/4311 on an immediate retry of the same file. Every observed cutoff is a multiple of ~1460 bytes (standard TCP MSS payload size), never a fixed value, never equal to the declared size — ruling out P7's false-negative-on-an-already-complete-file mechanism (which requires an exact size match) and proving genuine, live, reproducible data loss during the network read itself. `test.pdf` (1422 bytes, fits inside one TCP segment) never exhibited this; every file requiring more than one segment did, non-deterministically. This directly reproduces, with hard byte-count evidence for the first time, what P9's own investigation already inferred from history alone: the extension correlation in every prior report (including this milestone's own bug report) is coincidental — a function of which sample files happened to be small vs. large — not a rule the code implements. Read `react-native-blob-util`'s native `ReactNativeBlobUtilReq.java`'s `done()` (`FileStorage` case): the loop that drains the response body (and, as a side effect, performs the actual disk write) is wrapped in `catch (Exception ignored) {}` with `printStackTrace()` commented out — any real `IOException` that kills the connection mid-read is silently discarded, and only the generic, post-hoc `isDownloadComplete()` byte-count mismatch ever surfaces, as `"Download interrupted."` This is why no prior milestone could see the real cause: it never leaves the native layer.
-- **A third, independent defect found while tracing the "Open" pipeline stage** (explicitly in scope per this milestone's brief). Tapping "Open" on a file already confirmed correctly published (after the first fix, live) failed every time with `Calling startActivity() from outside of an Activity context requires the FLAG_ACTIVITY_NEW_TASK flag` (captured via temporary instrumentation in `FilesScreen.tsx`'s `handleOpen`, removed after use). Traced to `ReactNativeBlobUtilImpl.java`'s `actionViewIntent`: it sets `FLAG_ACTIVITY_NEW_TASK` on the original `Intent`, then reassigns `intent = Intent.createChooser(intent, chooserTitle)` — `createChooser` returns a *new* wrapper `Intent` that does not inherit that flag, and `RCTContext` (an application context, not an `Activity`) requires the flag on whatever `Intent` is actually passed to `startActivity()`. `downloadActions.ts` always passed a non-null chooser title (`'Open with'`), so this fired on every single call, deterministically.
-
-## Root Cause
-
-Three separate, independently verified defects:
-
-1. **`DownloadDir` vs. `LegacyDownloadDir` path confusion** (`blobUtil.ts`, `downloadExistence.ts`) — unconditional, affects every file type identically, and is what makes even a *successful* download appear unavailable in the UI. **Fixed.**
-2. **Real, live, non-deterministic connection loss on multi-TCP-segment downloads** over this device's own hotspot, whose true cause is hidden by a swallowed exception inside `react-native-blob-util`'s native response-draining loop. This is what produces genuinely short, corrupt files for larger downloads — not a false completion check, not a UI staleness issue. **Not fixed** — see Remaining Limitations.
-3. **`Intent.createChooser` dropping `FLAG_ACTIVITY_NEW_TASK`** (`ReactNativeBlobUtilImpl.java`, triggered by `downloadActions.ts` passing a non-null chooser title) — made "Open" fail on every completed download, independent of defects 1 and 2. **Fixed.**
-
-## Solution
-
-- `android/src/streaming/blobUtil.ts`: `isPublishedAt()` and `resolveAvailableMediaStoreName()` now stat `ReactNativeBlobUtil.fs.dirs.LegacyDownloadDir` (which — despite the name — is the one that actually resolves to `Environment.getExternalStoragePublicDirectory(DIRECTORY_DOWNLOADS)`, the real public folder `copyToMediaStore` publishes into on every API level) instead of `DownloadDir`.
-- `android/src/files/downloadExistence.ts`: `downloadedFilePath()`'s API 29+ branch gets the same fix, for the same reason — it deliberately mirrors `blobUtil.ts`'s destination logic per Milestone P2's own note to keep the two in sync.
-- `android/src/files/downloadActions.ts`: `openDownloadedFile()` no longer passes a chooser title to `actionViewIntent` (`undefined` instead of `'Open with'`), which skips the buggy `createChooser` wrapping entirely. Android still shows its own disambiguation picker when more than one app matches (confirmed live); it just doesn't carry a custom title. This is a third-party (`node_modules/react-native-blob-util`) bug, avoided from this call site rather than patched in place — matching this codebase's own existing `isActuallyComplete()` precedent (P7) for working around a library defect without touching `node_modules`.
-- Defect 2 (the real connection loss) was **not** code-fixed in this milestone — the developer was presented with three options (report only; add a bounded retry in Relay's own code; patch `react-native-blob-util` directly) and chose to report only, consistent with this notebook's established precedent (P7) against patching `node_modules`, and with V1's repeatedly-documented "no retry" design decision throughout this notebook. Adding retry behavior would be a genuine feature change requiring its own milestone, not a "smallest correct fix."
-
-## Verification
-
-- `npx tsc --noEmit`: clean.
-- Full Android suite: `npx jest` — 25 suites / 157 tests passing (mock's `fs.dirs` gained `LegacyDownloadDir`; `downloadActions.test.ts` updated for the dropped chooser title).
-- Live device (RMX3997), this session, not deferred:
-  - `test.pdf` re-downloaded fresh; `adb shell ls /storage/emulated/0/Download/Relay/` confirmed the byte-for-byte-correct published file; Files screen correctly showed "Open"/"Saved to Downloads/Relay" instead of reverting to "Download".
-  - Tapping "Open" launched Android's real disambiguation picker ("Browser PDF viewer", "Adobe Acrobat"); selecting Adobe Acrobat opened the file without error.
-  - `test.jpg`, `test.txt`, `test.png` (twice) all reproduced genuine short-file rejection with hard byte-count evidence, confirming Defect 2 as a real, live, unfixed condition rather than a hypothesis.
-
-## Remaining Limitations
-
-- **Defect 2 (real connection loss on larger downloads) is unresolved.** A transfer whose bytes are genuinely cut short by the network will still correctly fail (this is accurate, not a bug) — but the underlying *why* (why this specific device/hotspot pairing loses the connection after roughly one TCP segment, non-deterministically) cannot be diagnosed further from React Native/JS: the only diagnostic signal (the real `IOException`) is discarded inside `react-native-blob-util`'s native code before it ever reaches JS. A future investigation would need either a packet capture on the Android side or a patched/forked build of the library to see the real exception.
-- The two-fix live verification above used `test.pdf` (a single-segment file) as the good-path regression check; it was not re-run against every extension in the original report, since Defect 2's non-determinism means any individual re-run is not a reliable pass/fail signal for defects 1/3 either way.
-- Files downloaded before this fix (during earlier sessions, including P8.1's) are left as-is: a duplicate copy sits in private staging (never cleaned up by the pre-fix `publishDownload()`), while a correct copy already exists at the real public path. No migration/cleanup of pre-existing installs was in scope for this milestone.
+**Defect 3 — `Intent.createChooser` dropped `FLAG_ACTIVITY_NEW_TASK`
+(fixed).** Tapping "Open" on a correctly-published file failed every time
+with `startActivity() from outside of an Activity context requires
+FLAG_ACTIVITY_NEW_TASK`. `actionViewIntent` sets the flag on the original
+`Intent`, then wraps it in `Intent.createChooser(...)`, which returns a
+**new** `Intent` that doesn't inherit the flag. Fixed by no longer passing
+a chooser title to `actionViewIntent` (skips the `createChooser` wrapping
+entirely — Android still shows its own disambiguation picker when more
+than one app matches).
 
 ---
 
-# Milestone P13 — Folder Transfer Support: Three Live-Verified Defects Found and Fixed
+# Milestone P10 — Root Cause of P7/P8/P9/P9.1's Download Truncations
 
-## Problem
+**Problem:** Defect 2 above (real, non-deterministic connection loss on
+larger downloads) was still unexplained — the native exception causing it
+was being silently swallowed.
 
-P13 added whole-folder sharing/download/upload on top of the existing
-single-file pipeline (see `docs/14_Testing_Plan.md`'s P13 entry for the
-full feature description and protocol design). The milestone's own
-instructions required every part of it verified live on the connected
-physical device (RMX3997, USB-connected, backend reached over the phone's
-own hotspot) before being considered done, not just covered by the
-(all-green) `pytest`/`jest` suites. That live pass surfaced three real
-defects the automated suites — which never happen to exercise a non-ASCII
-filename, an Android 16/ColorOS device, or an actual `react-native-saf-x`
-tree-child URI — had no way to catch.
+**Investigation:** Traced the full native read path (OkHttp →
+`ReactNativeBlobUtilFileResp` → `ProgressReportingSource.read()` → file
+output stream → MediaStore) with instrumentation. Confirmed: the backend
+always sent the complete file, the socket stayed healthy, and no
+Java/JS/OkHttp exception was ever thrown — yet downloads stopped after
+exactly one physical socket read, and whether that read happened to
+contain the whole file determined success or failure (explaining why
+failures tracked file *size*, not type, and why the type correlation
+flipped between P7 and P9's reports).
 
-## Investigation
+**Root cause:** `ProgressReportingSource.read(Buffer sink, long byteCount)`
+violates Okio's `Source` contract. It read bytes from OkHttp and wrote them
+directly to the destination file, then returned the byte count read — but
+**never copied those bytes into the `sink` buffer** Okio's own contract
+requires. Okio's buffered layer therefore saw `sink` still empty after the
+call returned, and treated that as end-of-stream on the very first
+physical socket read. This single native bug is the actual explanation for
+every "Download interrupted"/truncation symptom across Milestones P7, P8,
+and P9.1's Defect 2.
 
-Backend (`uvicorn app.main:app --host 0.0.0.0 --port 8000`), the Electron
-desktop app (auto-detecting the already-running backend in dev mode), and
-Metro were started locally; `adb reverse tcp:8081 tcp:8081` tunneled Metro
-to the USB-connected RMX3997. The full protocol (share, pair, list, propose,
-download, upload) was first exercised directly over HTTP — from the PC
-against its own loopback for desktop-perspective calls, and against its own
-LAN-facing hotspot IP (`10.169.164.233`) for Android-perspective calls,
-since `get_requesting_device`'s loopback trust check treats *any* loopback
-caller as the desktop regardless of bearer token, a real gotcha hit while
-building the verification script itself. Real nested folders (unicode
-names, hidden files, zero-byte files, empty subfolders) were shared from
-real temp directories; a real device was paired through the actual
-`/pairing/*` handshake. Once the backend side was fully proven, the actual
-installed app was driven via `adb shell input tap` against
-`adb exec-out screencap` screenshots, and a PowerShell `System.Drawing`
-screen capture drove the Electron desktop window the same way.
+**Fix:** A `patch-package` patch,
+`android/patches/react-native-blob-util+0.24.10.patch`, adding the missing
+`sink.write(bytes, 0, (int) read);` call immediately after the existing
+output-stream write. Applied automatically after every `npm install`.
+Verified on RMX3997 across `.txt`/`.pdf`/`.docx`/`.pptx`/`.jpg`/`.png`/`.mp3`/`.zip`
+and synthetic files from 64 KB to 32 MB, with byte-for-byte confirmation
+across multiple consecutive transfers. Full writeup:
+`docs/upstream/react-native-blob-util-okio-read-contract.md`.
 
-- **Defect 1 — unicode filenames crashed every download, not just folder
-  children.** The first folder-download pass included a file named
-  `日本語ファイル.txt` (an explicit P13 edge case). Its `GET
-  /transfers/{id}/download` call returned nothing; `backend/logs`
-  (`uvicorn` stdout) showed `UnicodeEncodeError: 'latin-1' codec can't
-  encode characters in position 22-28` inside Starlette's
-  `Response.init_headers`, raised while constructing
-  `_WriteTimeoutStreamingResponse` — before a single byte was ever sent.
-  Traced to `app/api/v1/transfers.py`'s `download_transfer`, which built
-  `Content-Disposition: attachment; filename="<raw name>"` with the file's
-  real name interpolated verbatim; HTTP header values are Latin-1 only.
-  This line predates P13 (Milestone 12) — any *standalone* shared file with
-  a non-Latin-1 name would have hit the exact same crash; P13 is what
-  finally exercised it, since none of the existing standalone-file tests or
-  manual passes had ever used a non-ASCII file name.
-- **Defect 2 — `react-native-saf-x`'s `listFiles()` rejected its own
-  `openDocumentTree()` root URI.** Tapping "Upload a Folder", picking a
-  real folder, and granting the system permission dialog reliably produced
-  "Could not open the folder picker." on this device. Temporary
-  `console.error` instrumentation in `TransferListScreen.handleUploadFolder`
-  (added, used, then removed) captured the real rejection via `adb logcat`:
-  `Error: Unsupported Uri content://com.android.externalstorage.documents/
-  tree/primary%3ADownload%2FTripPhotos`, thrown from
-  `EfficientDocumentHelper.getDocumentUri` inside the `react-native-saf-x`
-  native module (`node_modules/react-native-saf-x/android/.../
-  EfficientDocumentHelper.java:107`). Reading that method's branching logic
-  did not conclusively explain why the tree-root URI it had just returned
-  itself was rejected — it plausibly depends on how ColorOS resolves
-  `DocumentsContract.isTreeUri`/persisted-permission lookups differently
-  from stock Android, which cannot be confirmed without native-side
-  debugging. Empirically: calling `openDocumentTree(true)` (persisting the
-  grant) instead of `openDocumentTree(false)` made the exact same
-  `listFiles()` call succeed immediately, reproduced twice.
-- **Defect 3 — `react-native-blob-util`'s `wrap()` silently read zero bytes
-  from a `react-native-saf-x` URI.** With Defect 2 fixed, folder
-  enumeration worked and all 4 proposed uploads reached the backend, but
-  every one failed with the backend's own `"Upload ended before the
-  declared file size was reached."` (`0 B / <size> B` on every row) — no
-  client-side error at all, meaning the HTTP request body was simply
-  empty. This is the exact risk flagged in the P13 design doc before
-  implementation: `uploadFile()`'s `ReactNativeBlobUtil.wrap(fileUri)` had
-  only ever been proven against `@react-native-documents/picker`'s
-  single-file `content://` URIs, not `react-native-saf-x`'s tree-child
-  ones — the two libraries construct/hold their SAF URIs differently, and
-  RNBU's native reader does not handle the second shape.
-
-## Root Cause
-
-Three independent defects, none caused by the same code path:
-
-1. **`Content-Disposition` header built from a raw, unescaped filename**
-   (`app/api/v1/transfers.py`) — a pre-existing Milestone 12 defect,
-   latent until a non-Latin-1 filename was actually exercised. Affects
-   both standalone files and folder children identically. **Fixed.**
-2. **`react-native-saf-x`'s temporary (non-persisted) grant not resolving
-   correctly for its own `listFiles()` on this device/Android
-   version/OEM skin.** Root cause is inside third-party native code and
-   not further diagnosable from JS/React Native alone. **Worked around**
-   (persisting the grant, which is not otherwise a feature this app needs
-   — see Remaining Limitations).
-3. **`react-native-blob-util`'s `wrap()` cannot stream bytes from a
-   `react-native-saf-x`-issued URI.** Also third-party, also not
-   diagnosable further from JS alone. **Worked around** (materializing to
-   a local cache file via `react-native-saf-x`'s own `copyFile` before
-   handing the path to `wrap()`).
-
-## Solution
-
-- `backend/app/api/v1/transfers.py`: new `_content_disposition(file_name)`
-  helper builds an RFC 6266-compliant header — a Latin-1-safe ASCII
-  fallback in the legacy `filename` parameter, plus the real UTF-8 name
-  percent-encoded in `filename*=UTF-8''...` for any client that reads it.
-  `download_transfer` calls this instead of interpolating the raw name.
-  Neither value is actually load-bearing for this app's own correctness —
-  the Android client names its saved file from the transfer's own JSON
-  metadata, not this header — but it must not crash regardless, and a
-  standards-compliant value is the right default.
-- `android/src/streaming/folderPicker.ts`: `pickAndEnumerateFolder()` calls
-  `openDocumentTree(true)` instead of `openDocumentTree(false)`.
-- `android/src/streaming/folderPicker.ts`: new
-  `materializeToLocalCache(sourceUri, fileName)` copies a SAF-picked file
-  to `${CacheDir}/relay-upload-<timestamp>-<name>` via `react-native-saf-x`'s
-  own `copyFile` (a native SAF-to-plain-file copy, not a JS-bridged
-  base64 round-trip) and returns the resulting plain path.
-  `TransferListScreen.handleUploadFolder` calls it for each picked file
-  before `registerUploadSource`, so `uploadFile()`/`wrap()` always receives
-  the same URI shape it already works with.
-
-## Verification
-
-- `pytest` (backend): 339 passed, including a new regression test
-  (`test_download_transfer_with_unicode_file_name_streams_successfully`).
-- `npx tsc --noEmit` / `npx jest` (android): clean / 182 passed, including
-  new regression tests for `openDocumentTree(true)` and
-  `materializeToLocalCache`.
-- Live device (RMX3997), this session, not deferred:
-  - Shared a real nested "University Notes" folder (7 files: 2 levels
-    deep, one unicode name, one hidden dotfile, one zero-byte file) plus a
-    real empty folder, from the actual Electron desktop app's already-
-    running backend.
-  - Downloaded "University Notes" from the real installed app by tapping
-    its Download button: all 7 files streamed and completed, row label
-    correctly read "Downloaded (7)". `adb shell find` confirmed the exact
-    hierarchy landed under the public `Download/Relay/University Notes/`
-    via MediaStore's nested `RELATIVE_PATH`, including the unicode name
-    and the zero-byte file, byte-for-byte correct — the single highest
-    risk item flagged in the P13 design doc, confirmed working end to end
-    on real hardware.
-  - Downloaded the empty folder: confirmed created at the private staging
-    path (`run-as com.relay.mobile find files/Downloads`), per the
-    documented platform limitation that MediaStore cannot represent an
-    empty directory.
-  - Picked and uploaded a real nested folder ("TripPhotos": 4 files, 2
-    levels deep) from the real installed app via "Upload a Folder": all 4
-    completed after the Defect 2/3 fixes (all four failed identically
-    before them, confirming both defects were genuinely reproduced and
-    genuinely fixed, not coincidental). `find`/`cat` on the desktop side
-    confirmed the exact hierarchy and byte-for-byte content.
-  - A second folder upload using the same requested folder name
-    (`Vacation Photos`, proposed directly via the verified backend
-    protocol) landed at `Vacation Photos (1)/`, confirming
-    `UploadBatchRegistry`'s conflict resolution live.
-  - 250-file folder upload (proposed and streamed via the verified
-    protocol) completed in ~10.5s (~42ms/file), all 250 landing correctly.
-
-## Remaining Limitations
-
-- **Defect 2's true root cause (why the unpersisted grant fails
-  `listFiles()` on this device) was not found**, only worked around.
-  Persisting the grant is not otherwise needed by this app (V1 has no
-  resume support, so there is nothing to resume into) and is never
-  explicitly released, so one persisted grant accumulates per folder a
-  user picks — an accepted trade-off (Android's per-app persisted-grant
-  cap is in the hundreds).
-- **Defect 3's workaround (materialize-to-cache) is not a true stream** —
-  the whole file is copied to local storage before upload starts, and the
-  cache copy is never explicitly deleted afterward (same tolerance for
-  unswept temp files the backend's own upload path already documents).
-  For very large files this trades memory/IO efficiency for correctness;
-  acceptable for V1, worth revisiting if folder uploads of large media
-  files become a real workflow.
-- Regression checks for existing single-file download/upload, "Open", and
-  concurrent-download queueing were **not independently re-driven through
-  the live UI** in this session beyond what naturally happened along the
-  way (pairing, discovery, and the Transfers list all exercised
-  pre-existing, unmodified code paths throughout, and the full pre-existing
-  automated suites stayed green) — a quick manual spot-check of a plain
-  single-file download/upload and "Open" is recommended before considering
-  P13 fully closed out.
-- The device accumulated test artifacts from this session: a pushed
-  `/storage/emulated/0/Download/TripPhotos/` folder, and several
-  `Live Verify *`-named paired-device rows (created via direct pairing API
-  calls to drive backend verification without a QR scan) that were removed
-  via `DELETE /api/v1/devices/{id}` — the real device's own pairing (used
-  for the on-device UI testing above) was left intact.
-
----
-
-# Milestone P13.1 — Folder UX Polish: Duplicate Folder Names Share One Physical Directory
-
-## Problem
-
-P13.1 removed the folder row's progress counters ("(1)", "(0/1)", "(1/1)"),
-added an "Open" action for a completed folder download (opening
-`Downloads/Relay/<FolderName>` in the device's file manager via a
-`DocumentsContract` directory URI, `content://com.android.
-externalstorage.documents/document/...`), and made a completed folder
-download's notification open that same folder instead of behaving like a
-completed file's notification. The milestone's own instructions required
-verifying multiple folders, nested folders, and **duplicate folder names**
-live on the connected physical device (RMX3997, USB-connected, backend
-reached over the phone's own hotspot) before considering it done.
-
-## Investigation
-
-Two shared folders were deliberately created with the exact same display
-name ("Duplicate") but different source paths on the desktop
-(`...\parentA\Duplicate` and `...\parentB\Duplicate`, one file each,
-`a.txt` and `b.txt`), shared via the live backend
-(`POST /folders`), and both downloaded from the real installed app. Both
-rows correctly reached "Open" with no counters, and each produced its own,
-independent "✓ Duplicate downloaded successfully" notification (confirmed
-via `adb shell cmd notification list` — two distinct notification records,
-not deduplicated or dropped). Tapping either row's "Open" (or either
-notification) opened the file manager at `Download/Relay/Duplicate`.
-
-A raw `adb shell ls /sdcard/Download/Relay/Duplicate/` (`MSYS_NO_PATHCONV=1`
-needed under Git Bash to stop `/sdcard/...` from being mangled into a
-Windows path) showed **both** downloads' files sitting side by side in the
-same physical directory: `a.txt` and `b.txt` together, not two separate
-`Duplicate` / `Duplicate (1)` directories.
-
-## Root Cause
-
-Not a defect introduced by this milestone — a pre-existing P13 folder-
-download property, confirmed to predate P13.1 by reading (not modifying)
-`android/src/streaming/blobUtil.ts`. The backend always builds a folder
-child's `folder_relative_path` as `"<shared_folder.folder_name>/
-<relative_path>"` (`backend/app/services/transfer_service.py`), so the top-
-level directory segment on the Android side is always exactly the shared
-folder's own `folder_name` — this is also what P13.1's new Open action
-correctly targets. `blobUtil.ts`'s `resolveAvailableMediaStoreName()` only
-ever disambiguates a *file's own basename* on conflict (the well-tested
-"name (1).ext" pattern for two files landing at the identical path); it
-never renames the leading folder segment. So two shared folders that
-happen to carry the same `folder_name` — whether from genuinely different
-source directories, as reproduced here, or from re-sharing the same
-directory twice — download into one merged physical directory on Android,
-with only their individual files (not the folders themselves)
-disambiguated if a filename inside happens to collide too.
-
-This is a protocol/streaming-level gap (P13's own folder-conflict handling
-never accounted for the folder name itself), and both this milestone's
-instructions ("Do NOT redesign folder transfers. Do NOT change backend
-streaming.") and Rule 3 ("Never add features outside the current
-milestone") rule out fixing it here. P13.1's own new behavior (Open,
-notifications) is internally consistent with this reality: both rows
-correctly point at, and correctly open, whatever is actually on disk.
-
-## Solution
-
-None applied — documented as a known, pre-existing limitation rather than
-fixed, per this milestone's explicit scope boundaries. Flagging it here
-(rather than silently noting it in the milestone summary alone) so it
-isn't rediscovered from scratch if a future milestone is scoped to address
-folder-level naming conflicts.
-
-## Verification
-
-- Live device (RMX3997), this session: two identically-named shared
-  folders downloaded via the real installed app; confirmed via `adb shell
-  ls` that their contents merge into one on-device directory as described
-  above, and via `adb shell cmd notification list` that each still
-  produces its own correct, independent completion notification despite
-  the merge.
-- All other P13.1 physical-device checks passed on the same device/session
-  — see the milestone's own summary for the full list (single file,
-  downloaded-file Open, downloaded-folder Open, folder notification,
-  file notification, no counters, multiple folders, nested folders).
-
-## Remaining Limitations
-
-- Two shared folders with the same display name merge into one physical
-  Android directory on download, as described above — an accepted,
-  pre-existing P13 limitation, not introduced or fixed by P13.1.
-- The app's own `'[QR-DEBUG] ...'` debug instrumentation in
-  `src/api/client.ts` is still present (previously flagged in Milestone
-  P8.1's Known Limitations) and remained highly verbose in this session's
-  `logcat` output — out of scope here, noted again since it is still
-  unaddressed.
+**Standing note:** whenever `react-native-blob-util` is upgraded, check
+whether this upstream defect is fixed before removing the patch, and
+re-run the full physical transfer matrix before deleting it either way.
 
 ---
 
 # Milestone P11 — Concurrent Download Freeze Investigation (Physical Device)
 
-## Problem
+**Problem:** Tapping Download on 3+ shared files in quick succession left
+all but one permanently stuck in "Downloading..." at 0 bytes — no error
+anywhere — until the user happened to open that specific transfer's own
+detail screen, which "unstuck" it almost instantly.
 
-Tapping Download on 3 or more shared files in quick succession put every one of them into "Downloading..."/`in_progress`, after which all but one appeared permanently frozen at 0 bytes — no transport error, no "Download interrupted", and the backend showed nothing wrong. Opening the Transfers tab and then a frozen transfer's own detail screen made it "unstick" and complete almost instantly. UI work was frozen for this milestone; only the underlying lifecycle could be touched, and the instruction was to prove the root cause live on the physical device (RMX3997, connected via USB/adb, backend reached over the phone's own hotspot) before changing anything.
+**Investigation:** Live instrumentation on RMX3997 confirmed the backend
+never even received the dropped transfers' `GET .../download` requests —
+this was never a networking/backend/`ActiveStreamRegistry` issue.
 
-## Investigation
+**Root cause:** `TransferStreamManager`'s one-active-stream-at-a-time
+design is correct and intentional (`docs/11_File_Transfer.md` §10). The
+bug: a `start()` call arriving while another was active was **silently
+dropped** with no path back to running it, rather than deferred.
+`FilesScreen` calls `start()` exactly once per download and never retries
+(the button disables itself once `in_progress`); the *only* other call
+site, the detail screen's opportunistic effect, only runs if the user
+happens to navigate there — exactly why doing so "unstuck" it.
 
-Backend (`uvicorn app.main:app --host 0.0.0.0`) and Metro were started locally; `adb reverse tcp:8081 tcp:8081` tunneled Metro to the USB-connected device, and the already-paired, already-installed app was relaunched to pick up temporary `[P11]`-tagged `console.log` instrumentation added to `TransferStreamManager.start()` (guard entry/exit) and `FilesScreen.handleDownload` (removed after use), captured via `adb logcat ReactNativeJS:V` and cross-referenced against `backend/logs/relay.log`. 16+ disposable 5 MB files were shared directly through `POST /api/v1/files` (backend reached over loopback) to get enough distinct, never-downloaded rows for repeatable 2/3/5-tap batches, driven via `adb shell input tap` against `adb exec-out screencap` screenshots.
+**Fix:** A `start()` call arriving while another is active now joins an
+in-memory FIFO `queue` instead of being dropped; both stream-exit paths
+drain and start the next queued entry. `enqueue()` dedupes against the
+active transfer and anything already queued. Verified live: 2/3/5-tap
+batches all streamed and completed automatically, in order, with no gaps
+in the backend log.
 
-- **2 concurrent taps**: both `proposeTransfer` calls succeeded (backend auto-accepted both, e.g. transfer 124 and 125). `TransferStreamManager.start()` ran for 124 (`PROCEEDING`), but the call for 125 hit `state?.status === 'streaming'` and logged `NO-OP (busy)` — a silent, unconditional return with no retry scheduled anywhere. `grep`ing `backend/logs/relay.log` for transfer 125 showed only the `Transfer auto-accepted` line — no `Download completed`, no error, no `ActiveStreamRegistry` conflict — proving the backend never received the `GET /transfers/125/download` request at all. This is the first point of divergence: the drop happens entirely client-side, before any network I/O.
-- **3 and 4/5 concurrent taps**: identical pattern, scaled — exactly one transfer streamed per batch, the rest (2 of 3, 3 of 4) logged `NO-OP (busy)` and sat at `0 B` indefinitely. One case (`transferId=133`) was dropped by the `starting` re-entrancy flag rather than `state.status`, confirming that guard also works as designed — it just has the same fate (silent drop, no queue) as the main guard.
-- **Reproduced the reported "Transfers tab unsticks it" behavior directly**: opening `TransferListScreen` alone did *not* start the stuck transfer (it has no code path that calls `TransferStreamManager.start()` for an existing row). Navigating into that specific transfer's `TransferProgressDetail` did — its own `useEffect` opportunistically calls `start()` for any `in_progress` transfer it observes, which is the *only* other call site in the codebase. Since the manager was idle again by then, the call succeeded and the transfer (already fully available on the backend) completed in about a second, exactly matching "completes almost instantly."
+---
 
-## Root Cause
+# Milestone P13 — Folder Transfer Support: Three Live-Verified Defects
 
-`TransferStreamManager` (`android/src/streaming/TransferStreamManager.ts`) is a strict app-wide singleton — by design, only one transfer's bytes move at a time (documented at the top of the file, matching `docs/11_File_Transfer.md` §10's sequential-processing model). The bug was never the one-at-a-time constraint itself; it was that a `start()` call arriving while another transfer was active was **silently dropped** with no path back to running it, rather than deferred. `FilesScreen.handleDownload` calls `start()` once per proposed download and never again — the Download button disables itself once the transfer is `in_progress`, so nothing on that screen retries. The only code that ever called `start()` a second time for the same transfer was `TransferProgressDetail`'s own opportunistic effect, which only runs if the user happens to navigate to that exact transfer's detail screen. A transfer proposed anywhere else — the ordinary case of a second or third rapid tap on FilesScreen — had no way back to streaming and stayed at 0 bytes forever. Not a networking, backend, or `ActiveStreamRegistry` issue: the backend logs and the absence of any HTTP request for the dropped transfer IDs confirm the client never even tried.
+**Feature summary:** whole-folder sharing/download/upload, layered on the
+existing single-file pipeline with no new streaming concept — a folder
+"transfer" is N ordinary single-file transfers serialized by P11's own FIFO
+queue. New `shared_folders` table, `SharedFolderService`, `/folders` API
+(mirrors `/files`), `UploadBatchRegistry` for upload-side name conflicts.
+Full protocol/schema changes: `docs/11_File_Transfer.md` §6/§18,
+`docs/13_Database_Design.md` §6a/§7a/§12.
 
-## Solution
+The milestone's required live-device pass (not just the green automated
+suites) found three real defects the suites had no way to reach:
 
-`android/src/streaming/TransferStreamManager.ts`: a `start()` call that arrives while another transfer is streaming (or mid-`starting`) now joins a small in-memory FIFO `queue` instead of returning silently. The active stream's `finally` block (and the pre-`try` early-return path for a missing session, which also bypasses that `finally`) both drain one entry off `queue` and call `start()` on it once the current transfer is fully done — success, failure, or cancellation. `enqueue()` dedupes against the currently-active transfer and anything already queued, so redundant calls from both existing call sites (FilesScreen and TransferProgressDetail's opportunistic effect) stay harmless, as the module's own doc comment already required. The one-active-stream-at-a-time invariant is unchanged; only the "then what happens to the rest" behavior changed, from silently stuck to automatically continued. No UI/screen files were changed, per this milestone's UI freeze — the fix is entirely inside the streaming manager's own module-level state machine.
+**Defect 1 — non-Latin-1 filenames crashed every download, not just
+folder children.** A file named `日本語ファイル.txt` triggered
+`UnicodeEncodeError` inside Starlette's `Response.init_headers`, because
+`app/api/v1/transfers.py` built `Content-Disposition:
+attachment; filename="<raw name>"` with the real name interpolated
+verbatim — HTTP header values are Latin-1 only. **Pre-existing since
+Milestone 12** (affects standalone files identically; P13 is just what
+finally exercised a non-ASCII name). **Fixed:** a new
+`_content_disposition()` helper builds an RFC 6266-compliant header (a
+Latin-1-safe ASCII fallback plus `filename*=UTF-8''...`). Not actually
+load-bearing for Relay's own correctness (Android names its saved file
+from the transfer's own JSON metadata, not this header) but must not crash.
 
-## Verification
+**Defect 2 — `react-native-saf-x`'s `listFiles()` rejected its own
+unpersisted `openDocumentTree()` grant** on this device — reproducibly.
+Root cause is inside third-party native code, not further diagnosable from
+JS. **Worked around:** persisting the grant (`openDocumentTree(true)`)
+made the same call succeed immediately.
 
-- `npx tsc --noEmit`: clean.
-- Live device (RMX3997), this session, not deferred — repeated after the fix, using fresh never-downloaded shared files each time:
-  - 2 concurrent taps: both transfers streamed sequentially and reached "Open" with no manual intervention.
-  - 3 concurrent taps: all three streamed sequentially and completed.
-  - 5-tap batches (4 of 5 taps landed as genuinely concurrent proposals each round, `adb`'s synthetic taps occasionally missing a shifting row — not a product defect): every proposed transfer streamed and completed automatically, confirmed both in `backend/logs/relay.log` (`Download completed: transfer_id=...` for every id, in order, with no gaps) and in the Files screen (`Downloading...` → `Open` for every row, no visit to the Transfers tab required).
-  - `adb logcat` across the full final regression run contained no errors, warnings, or crashes; `backend/logs/relay.log` contained no error/warning entries for any transfer created during this session.
-- Test shared files (`p11_*.bin`, ids created via direct `POST /api/v1/files` calls against the loopback backend for repeatable testing) were unshared via `DELETE /api/v1/files/{id}` after verification; none are part of the repository.
+**Defect 3 — `react-native-blob-util`'s `wrap()` silently read zero bytes
+from a `react-native-saf-x` URI** — every proposed folder upload reached
+the backend with an empty body (`0 B / <size> B`), no client-side error at
+all. The two libraries construct/hold SAF URIs differently and RNBU's
+native reader doesn't handle `saf-x`'s shape. **Worked around:** each
+picked file is materialized to local cache (via `saf-x`'s own native
+`copyFile`) before `wrap()` ever sees it — not a true zero-copy stream, and
+the cache copy is never explicitly deleted (an accepted trade-off, same
+tolerance the backend's own upload path already has for unswept temp
+files).
 
-## Remaining Limitations
+**Live verification highlights:** a real 7-file nested unicode-named
+folder downloaded byte-for-byte correct (landing under the public
+`Download/Relay/` tree via MediaStore's nested `RELATIVE_PATH` — the
+single highest-risk item flagged at design time); an empty shared folder
+correctly staged privately only (MediaStore cannot represent an empty
+public directory — a platform limitation, not a defect); a 250-file
+folder-upload batch completed in ~10.5s.
 
-- Queued transfers are still processed strictly one at a time (by design — this milestone fixed the silent drop, not the single-stream architecture itself). A transfer waiting in `queue` shows "Downloading..." on FilesScreen from the moment it's proposed, even though its bytes haven't started moving yet; this was already true of the transfer actually streaming and is unchanged here.
-- If a queued transfer is cancelled server-side (e.g. via its detail screen) before its turn comes up, `TransferStreamManager.start()` does not special-case that: it will still attempt to stream it when dequeued and get the backend's existing 409 (`This transfer is not currently active.`), surfaced the same way any other stream failure already is. No new guard was added for this pre-existing class of race, consistent with keeping this fix to the smallest change that resolves the reported freeze.
-- UI work remained frozen for this milestone; nothing surfaces queue position/depth to the user. If a future milestone lifts that freeze, showing "queued" distinctly from "downloading" would be a natural follow-up.
+---
+
+# Milestone P13.1 — Folder UX Polish: Duplicate Folder Names Share One Physical Directory
+
+**Change:** Removed folder-row progress counters; added Open (opens
+`Downloads/Relay/<FolderName>` in the file manager) and a
+folder-specific completion notification.
+
+**Found, documented, not fixed here (deferred to P13.2):** two shared
+folders with the *same display name* but different source paths download
+into **one merged physical directory** — `resolveAvailableMediaStoreName`
+(P3) only ever disambiguates a *file's own basename* on conflict, never
+the leading folder segment, since the backend always builds a folder
+child's path as `"<folder_name>/<relative_path>"` verbatim. Confirmed live
+(two `Duplicate` folders' files landed side by side in one directory) and
+ruled out of this milestone's scope by its own "do not change backend
+streaming" instruction.
 
 ---
 
 # Milestone P13.2 — Folder Identity & Change Detection
 
-## Problem
+**Problem:** Two defects left open by P13.1: (1) duplicate folder names
+still merge on download; (2) folder content changes on the desktop
+(add/remove/rename) were never detected — a row stayed "Open" even after
+its shared folder changed.
 
-Two correctness bugs discovered after P13.1, both documented as accepted-but-unfixed limitations in that milestone's own entry:
+**Architecture decision (Issue 1):** Added `folderIdentity.ts` — a new,
+client-only, `shared_folder_id`-keyed local registry
+(`relay-folder-registry.json`, via `react-native-blob-util`, the same
+JSON-file pattern used throughout this app rather than adding
+AsyncStorage/MMKV) resolving a free on-device root name once ("name (1)"
+convention) and remembering it permanently, serialized behind a mutex.
 
-1. **Duplicate folder names merge.** Desktop shares `test/` (33 files), Android downloads it, desktop later shares a *different* `test/` (1 file) — both land in the same physical `Downloads/Relay/test/` directory instead of the second becoming `test (1)`.
-2. **Folder updates are not detected.** Desktop shares `Alpha/` (1 file), Android downloads it (row shows "Open"). Desktop adds a file — `GET /folders` correctly reports the new `file_count`/`total_size`, and the Files screen correctly displays it — but the row's action still says "Open" instead of falling back to "Download".
+**Architecture decision (Issue 2), first attempt superseded:** An initial
+design derived "still matches what's on disk" purely from Transfer
+history (avoiding any new persisted state). **Physical verification broke
+it:** a file *removed* from a folder leaves its completed Transfer row in
+history forever (never deleted, never superseded by anything, since
+nothing re-downloads a removed file) — permanently poisoning the check, so
+a folder with a removed file got stuck on "Download" even after a
+successful re-download. **Final design:** the registry gained a
+client-owned `reconciledChildren: Record<relative_path, file_size>` field,
+written wholesale (never merged, so a removal can actually disappear from
+it) at the exact moment a folder download genuinely finishes.
 
-## Investigation
+**Live verification:** two identically-named `test/` folders landed in
+separate `test/`/`test (1)/` directories; add/remove/rename/content-change
+scenarios against a live folder (via `POST /folders/{id}/refresh`) all
+correctly flipped Open↔Download and recovered on re-download.
 
-- **Folder identity.** `backend/app/services/transfer_service.py` always builds a folder child's `folder_relative_path` as `"<shared_folder.folder_name>/<relative_path>"` — the raw, undisambiguated display name, every time, for every shared folder with that name. `streaming/blobUtil.ts`'s `resolveAvailableMediaStoreName` only ever disambiguates a *file's* own basename on conflict; nothing anywhere disambiguates a folder's root segment. Android had no local concept of "which physical directory does shared_folder_id N actually live in" at all — every reference to a folder's on-device location (staging path, MediaStore publish path, the P13.1 "Open" action, the P13.1 completion notification) recomputed it fresh from the raw name.
-- **Change detection.** `files/folderDownloadStatus.ts`'s `deriveFolderDownloadStatus` derived a folder's aggregate status purely from each child's own `deriveDownloadStatus` (itself purely Transfer-existence-based) — it never asked whether a "completed" child's Transfer still matched the child's *current* metadata. Compounding this, `files/useFolderFilesMap.ts` fetched each folder's child manifest **once per id, forever** — the exact comment in that file said so directly ("Does not track live changes to an already-fetched folder's contents"). So even a corrected status derivation would have kept scoring every folder against the manifest from the moment it was first downloaded, regardless of how many times the backend's own `total_size`/`file_count` changed afterward.
-- The backend exposes exactly enough metadata to detect staleness without any backend change: `AvailableFolderFileResponse` already carries `relative_path` and `file_size` per child (`GET /folders/{id}/files`), and `Transfer.file_size`/`Transfer.folder_relative_path` are documented as "point-in-time snapshots taken at transfer start, not live joins" (`backend/app/models/transfer.py`). No backend fingerprint/version field needed to be added.
-
-## Architecture Decision
-
-**Issue 1 (folder identity):** a new client-only module, `android/src/files/folderIdentity.ts`, resolves a free on-device root name per `shared_folder_id` the same "name (1)" way `resolveAvailableMediaStoreName` already disambiguates individual files, and remembers the mapping permanently in a single private JSON file (`DocumentDir/relay-folder-registry.json`, read/written via `react-native-blob-util` — already a dependency, already used this way throughout `streaming/blobUtil.ts`). Considered and rejected: a new local-storage dependency (AsyncStorage/MMKV) for this one small mapping — a new technology this milestone's scope didn't call for (CLAUDE.md Rule 2); a backend-side disambiguation — would require the backend to track *per-device* naming state for something that's fundamentally an Android-local storage-layout concern. Resolution is serialized behind a single in-module mutex, since it isn't otherwise guaranteed serial (`TransferStreamManager`'s one-active-stream invariant covers folder *children*, but not FilesScreen's empty-folder staging path, which calls in directly).
-
-**Issue 2 (change detection), first attempt (superseded — see below):** derive a folder's "still matches what's on disk" fact from Transfer history alone — the (relative_path, file_size) pairs of each folder's completed SEND transfers, since those are already point-in-time snapshots the backend already maintains, avoiding a second, locally-tracked copy of the same fact. This passed unit tests and *looked* like the smallest possible change (zero new persisted state beyond Issue 1's registry).
-
-**Why it was replaced.** Physical verification caught what unit tests couldn't: a file **removed** from a shared folder leaves its completed Transfer row in history forever (the backend never deletes transfer history, and nothing ever re-downloads a removed file to produce a newer Transfer that would supersede that entry). That orphaned entry permanently poisoned the "does the downloaded set have any extra members" check — a folder that had a file removed got stuck showing "Download" **even after a successful re-download**, because re-downloading a folder whose remaining children were already current legitimately proposed nothing, so nothing ever produced a fresh Transfer to invalidate the stale entry. This directly failed the milestone's own requirement ("Re-download. Open returns.").
-
-**Final design:** `folderIdentity.ts`'s registry gained a second, client-owned field per folder — `reconciledChildren: Record<relative_path, file_size>` — written wholesale (never merged) at the exact moment a folder download actually finishes: either `TransferStreamManager.notifyIfFolderComplete` observing every child's Transfer complete, or `FilesScreen.handleFolderDownload` finding nothing left pending in the first place (the removal-only case — nothing to stream, but the stale, too-large previous record still needs overwriting). Because this app itself owns and fully overwrites this record, a removal's entry can actually disappear, unlike a Transfer history row. `deriveFolderDownloadStatus` compares a folder's *current* children (`useFolderFilesMap`, now re-fetched on every existing poll tick instead of cached forever) against this record for its `'completed'` gate; a separate, Transfer-history-based `areAllFolderChildrenDownloaded` (deliberately *not* gated on the reconciliation record it's about to write — that would never fire) tells `TransferStreamManager` the exact moment to write it.
-
-## Files Modified
-
-- `android/src/files/folderIdentity.ts` (new) — local folder-root registry (Issue 1) and reconciliation record (Issue 2).
-- `android/src/files/useFolderReconciliation.ts` (new) — loads every folder's reconciliation record into React state for `deriveFolderDownloadStatus` (a pure, synchronous function) to read.
-- `android/src/files/folderDownloadStatus.ts` — `deriveFolderDownloadStatus` now takes a `reconciledChildren` parameter and gates `'completed'` on it; added `isFolderChildReconciled` and `areAllFolderChildrenDownloaded`.
-- `android/src/files/useFolderFilesMap.ts` — removed the "fetch once per id, forever" cache; refetches every shared folder's children on the existing poll tick.
-- `android/src/screens/files/FilesScreen.tsx` — `handleFolderDownload` resolves the local root, deletes a stale child's old on-device copy before re-proposing it, and writes the reconciliation record when nothing ends up pending; `handleOpenFolder` opens the resolved local root, not the raw shared name.
-- `android/src/streaming/TransferStreamManager.ts` — folder-child downloads stage/publish under the resolved local root instead of the raw shared name; `notifyIfFolderComplete` writes the reconciliation record before firing its notification.
-- `android/__mocks__/react-native-blob-util.js` — added `readFile`/`writeFile` mocks.
-- Tests: `__tests__/files/folderIdentity.test.ts` (new), `__tests__/files/folderDownloadStatus.test.ts` (rewritten for the new signature/behavior), `__tests__/streaming/TransferStreamManager.test.ts` (added a duplicate-folder-name regression test; fixed pre-existing fixtures that hadn't set `shared_folder_id`/`folder_relative_path` consistently).
-
-## Verification
-
-- `npx tsc --noEmit`: clean. `npx jest`: 218/218 passing. `npx eslint`: 0 errors (2 pre-existing, unrelated `no-void` warnings in `TransferStreamManager.ts`).
-- Live device (RMX3997, USB-connected, backend reached over the phone's own hotspot pairing), this session:
-  - Shared two different folders both named `test` (`parentA/test`: `a.txt`, `notes.txt`; `parentB/test`: `b.txt`) plus a nested `Alpha/` (`notes.txt`, `images/cat.jpg`) and a standalone file, all via direct `POST /api/v1/folders` / `POST /api/v1/files` calls against the loopback backend.
-  - Downloaded both `test` folders: confirmed via `adb shell find` that they landed in **separate** directories — `Downloads/Relay/test/b.txt` and `Downloads/Relay/test (1)/{a.txt,notes.txt}` — not merged. Tapped "Open" on each row independently (with an explicit return to the Relay app between taps, after an initial run where `adb`'s synthetic BACK press was found to navigate *within* the file manager's own back-stack rather than back to Relay, briefly producing a misleading result) and confirmed each opened its own correct folder.
-  - Nested folder: `Alpha/images/cat.jpg` confirmed intact after every download and re-download in this session.
-  - Update scenarios against `Alpha`, each via `POST /api/v1/folders/{id}/refresh` after editing the shared source directory directly, followed by the app's existing poll:
-    - **Added** a file → row flipped Open → Download; re-downloaded → Open returned.
-    - **Removed** a file (added two new files, downloaded, then removed one — the scenario that failed under the first, Transfer-history-based design) → row flipped Open → Download; tapped Download (nothing was actually pending to re-fetch) → row correctly returned to Open, confirming the self-healing fix.
-    - **Renamed** a file (identical size, so undetectable by a size/count-only check) → row flipped Open → Download; re-downloaded → Open returned; confirmed via `adb shell find` that the new name was fetched fresh (the old name's file is not cleaned up — see Remaining Limitations).
-    - **Changed file contents** (with a size change) → row flipped Open → Download; re-downloaded → confirmed via `adb shell cat` that `notes.txt` was overwritten in place with the new content, with **no** `notes (1).txt` conflict-renamed duplicate created.
-  - Duplicate-folder behavior re-confirmed intact after all of the above: `test/` and `test (1)/` still held exactly their own original contents, unaffected by `Alpha`'s changes.
-  - Standalone single-file download (`standalone.txt`) reached "Open" normally throughout and was never affected by any folder-specific change.
-  - A stale on-device registry from an earlier run of this same session (written by an intermediate version of `folderIdentity.ts`, before `reconciledChildren` existed, in the bare-string `{ "1": "test (1)" }` shape) was found live on the device and initially caused `resolveLocalFolderRoot` to silently resolve `undefined`; fixed with a normalization step (a bare string is treated as a legacy `localRoot`) and re-verified.
-  - Test shares were unshared via `DELETE /api/v1/folders/{id}` / `DELETE /api/v1/files/{id}` after verification; the physically-downloaded test files/folders were left on the device's public `Downloads/Relay/` (removing arbitrary content from the paired physical device's public storage was judged out of scope for this cleanup). The device's own pre-existing, unrelated `Downloads/Relay/CA1/` content was not touched.
-
-## Remaining Limitations
-
-- **Byte-identical-size content changes are undetectable.** A file edited without changing its length (same relative_path, same file_size) produces no signal anywhere in the metadata this fix relies on — genuine checksum verification is an explicitly deferred V1 feature (CLAUDE.md's "Not Yet Implemented" list), and adding one was out of this milestone's scope. In practice this only matters for a contrived same-length edit; the milestone's own "changing file contents" verification (a real content edit) was caught correctly because it also changed size.
-- **Orphaned local files are not cleaned up.** A file removed or renamed away from a shared folder leaves its old on-device bytes in place after a re-download reconciles the folder's status — only the *changed* member (added, resized) gets its old copy actively deleted before re-fetching (needed to avoid a spurious "(1)" conflict-rename); a purely-vanished path is simply dropped from the reconciliation record, not deleted from disk. Verified live: `bonus.txt`, `remove_me.txt`, and the pre-rename `keep.txt` all remained in `Downloads/Relay/Alpha/` after their respective updates were fully reconciled.
-- **The local registry does not survive a reinstall**, and does not retroactively cover folders downloaded before this milestone's build. Either case makes a folder's next touch behave as if seen for the first time — for Issue 1, this can mint a `(1)`-suffixed sibling next to an orphaned original directory; for Issue 2, the row simply starts back at "Download" until re-confirmed. Observed live in this session (a folder downloaded before the `reconciledChildren` field existed correctly showed "Download" once, with no data loss, until re-downloaded).
+**Remaining limitations:** byte-identical-size content edits are
+undetectable (no checksum — an explicitly deferred V1 feature); orphaned
+local files from a rename/removal are not cleaned up (only a changed
+file's old copy is actively deleted, to avoid a spurious "(1)" rename); the
+registry doesn't survive a reinstall and has no entry for a folder
+downloaded before this milestone (self-heals on next download).
 
 ---
 
 # Milestone P13.3 — Folder State Machine Audit & Correctness
 
-## Objective
+**Objective:** Not a symptom fix — a full-lifecycle audit prompted by four
+reports (a deleted folder still showing "Open"; duplicate names still
+occasionally colliding despite P13.2; a Download→Downloading→Download→Open
+flicker; an unverified claim that the download queue lets two transfers
+stream concurrently).
 
-Not a symptom fix. Four reported problems (a deleted folder still showing
-"Open"; duplicate-named folders occasionally colliding despite P13.2's own
-fix; a transient Download → Downloading → Download → Open flicker during a
-single download; and an unverified claim that the P11 download queue lets
-two transfers stream concurrently) were treated as evidence that folder
-state was assembled from too many independently-refreshed, non-communicating
-sources rather than four unrelated bugs. This entry audits the complete
-lifecycle — Discovery → Proposed → Queued → Downloading → Published → Open →
-Modified → Deleted → Re-downloaded → Restart → Poll → Notification → Open —
-before changing any code, per this milestone's own instructions.
+**Audit finding:** the Files screen's label was recomputed from **five**
+independently-polled/cached sources on three different cadences, with no
+cross-notification between them — and none of them ever asked the live
+filesystem.
 
-## Audit Findings — Sources of Truth
+**Root causes and fixes, one per reported problem:**
+1. **Deleted folder still "Open"** — no existence check existed for
+   folders at all (unlike files). Fixed: `deriveFolderDownloadStatus`
+   gained a `folderExists` parameter, verified the same way the file path
+   already does.
+2. **Duplicate names still occasionally collided** — a real race: naming
+   was resolved and *committed to the registry* synchronously at tap time,
+   well before any bytes/directory existed on disk, so two same-named
+   folders downloaded within the same second could both see
+   `fs.exists() === false` and claim the same name. Fixed:
+   `findAvailableRootName` now also checks the in-flight registry itself
+   for reservations already claimed, not just the filesystem.
+3. **Flicker back to "Download"** — the reconciliation record was written
+   before the local stream state flipped to `'completed'`, but nothing told
+   the screen to re-read it; the fast 2s transfer poll could observe
+   "all children complete" before the slower 5s folder poll caught up.
+   Fixed: `FilesScreen` now subscribes directly to
+   `TransferStreamManager` and refreshes reconciliation the instant a
+   stream completes.
+4. **Queue label wrong** — `active` was resolved via `isActive(fileId)`
+   when it needed `isActive(transferId)` (`shared_file_id` and
+   `transfer_id` are different id spaces that never collide, so the wrong
+   one silently always returned `false`). Fixed via a new
+   `latestSendTransferId()` helper; also added a fifth fix found only
+   through re-testing fix #1: a completely-deleted folder root needs every
+   child treated as pending again, not just the ones whose individual
+   metadata disagrees.
 
-`FilesScreen`'s `Download / Downloading / Open` label was never a stored
-enum; it is recomputed at every render from **five** independently-polled or
--cached inputs, on three different cadences, none of which notify each
-other:
-
-1. `GET /transfers/requests` — 2000ms poll. Always empty for a download in
-   practice (both directions auto-accept).
-2. `GET /transfers` — 2000ms poll. `Transfer.status` is set to `in_progress`
-   the instant a download is *proposed* (`transfer_service._create_transfer`),
-   not when its bytes actually start moving — the root cause behind the
-   queue finding below.
-3. `GET /folders` — 5000ms poll. `file_count`/`total_size` only.
-4. `GET /folders/{id}/files` — re-fetched every 5000ms tick (as of P13.2).
-5. The on-device `relay-folder-registry.json` (`folderIdentity.ts`) —
-   `localRoot` (P13.2 Issue 1) and `reconciledChildren` (P13.2 Issue 2),
-   loaded into React state by `useFolderReconciliation`, refreshed on the
-   same 5000ms cadence as #4, plus an explicit `refresh()` call from one of
-   `handleFolderDownload`'s two branches (not the other — see Problem 3).
-
-**Missing from that list, until this milestone: live filesystem state.**
-Every one of the four problems traces back to the same gap — nothing in the
-polling/render path ever asked the actual filesystem whether a folder it
-was about to call "downloaded" was still there, or already there.
-
-## Root Causes
-
-**Problem 1 — deleted folder still shows "Open".** Not a broken check; no
-check existed. `folderDownloadStatus.ts` said so in its own doc comment:
-folder existence was an explicitly accepted V1 gap, unlike the file path
-(`useDownloadExistence`), which already re-verifies a "completed" file
-against `RNFS`-equivalent `fs.exists()` on every poll. `handleOpenFolder`'s
-failed-`ACTION_VIEW` catch block also discarded the failure as an inline
-error string instead of re-verifying and downgrading the row, unlike its
-file counterpart (`handleOpen` → `verify(fileName)`).
-
-**Problem 2 — duplicate folder names still collided after P13.2.** A real
-race P13.2's own regression test didn't catch, because that test's mock
-conflated "registry written" with "directory materialized on disk" — not
-true in production. `folderIdentity.ts`'s `findAvailableRootName` picked a
-free name by checking `fs.exists()` alone. But `resolveLocalFolderRoot`
-resolves and *commits* a name to the registry synchronously, at the moment
-of the download tap — well before any bytes land (streaming may be queued
-behind another transfer, or simply hasn't reached its first
-`.config({path})` write yet). Two different shared folders sharing a
-display name, downloaded in quick succession, could both resolve before
-either's directory existed on disk, both see `fs.exists() === false`, and
-both claim the same name. Confirmed live (see Verification): on a clean
-registry, tapping Download on three same-named folders within the same
-second, before the fix, is exactly the "test / test(1) / test" inconsistency
-described in the milestone's own bug report.
-
-**Problem 3 — Download → Downloading → Download → Open flicker.**
-`TransferStreamManager.notifyIfFolderComplete` writes the folder's
-reconciliation record *synchronously before* it flips that stream's local
-`state.status` to `'completed'` — but it has no reference into `FilesScreen`
-and never told `refreshReconciliation()` to re-read it. The fast 2000ms
-transfers poll could observe "every child completed" well before the slower
-5000ms folder poll's next tick happened to re-read the now-stale-in-memory
-registry, and in between, `deriveFolderDownloadStatus` fell through to
-`'idle'` (`completedCount === children.length` true, `isFolderContentReconciled`
-still false) — reappearing as "Download". Structurally enabled by
-`handleFolderDownload`'s empty-pending branch calling `refreshReconciliation()`
-immediately, while its normal (something-actually-streamed) branch never did.
-
-**Queue investigation — confirmed correct, UI was misleading.** `TransferStreamManager`'s
-FIFO queue (P11) is genuinely one-stream-at-a-time; confirmed again this
-session via backend access logs (`GET .../download` for a queued transfer
-does not start until the active one's finishes — see Verification). The
-*label* was the defect: `FilesScreen` derived `Downloading...` from
-`Transfer.status === 'in_progress'` alone, true for every proposed transfer
-in a batch regardless of whether `TransferStreamManager.isActive()` agreed —
-so a 51 MB active download and a 6 B one still waiting in `queue` both
-showed "Downloading...".
-
-## Architecture Decision
-
-Rather than add a sixth independent source of truth, each fix makes the
-filesystem the tie-breaker exactly where the audit found it missing,
-without changing who owns what:
-
-1. **Registry-checked reservation, not just filesystem-checked.**
-   `findAvailableRootName` now treats a name as taken if *either* the
-   filesystem has it *or* some other registry entry has already reserved it
-   — the registry (already fully serialized by `withRegistryLock`) is
-   authoritative for "has anyone already claimed this," the filesystem
-   remains authoritative for "does something un-registered already occupy
-   this."
-2. **`deriveFolderDownloadStatus` gains an optional `folderExists`
-   parameter**, mirroring `deriveDownloadStatus`'s existing `fileExists` —
-   three-valued (`undefined` = not checked yet, optimistic; `false` =
-   downgrade to `'idle'`), fed by a new `FilesScreen` effect that re-verifies
-   a `'completed'` folder's resolved root directory the same way the
-   existing file effect already does. `useFolderReconciliation` was extended
-   to also expose each folder's `localRoot` (a new `readAllLocalRoots`
-   alongside the existing `readAllReconciledChildren`) since the existence
-   check needs a physical path, not just a shared_folder_id.
-3. **`FilesScreen` subscribes to `TransferStreamManager`** (its existing
-   `subscribe`/`notify` pub-sub, previously used by nothing outside the
-   detail screen) and calls `refreshReconciliation()` the instant a stream
-   transitions to `'completed'` — which is always after
-   `notifyIfFolderComplete`'s registry write in `start()`'s own call order,
-   closing the race instead of just narrowing the poll interval. The same
-   subscription (keyed off a `transferId:status` string so it doesn't fire
-   on every in-flight progress tick) drives a re-render for the queue fix
-   below.
-4. **`active` = `TransferStreamManager.isActive(transferId)`, resolved via a
-   new `latestSendTransferId(fileId, transfers)` helper** — not
-   `isActive(fileId)`. A real bug was caught here during physical
-   verification (see below) before landing: `shared_file_id` and
-   `transfer_id` are different id spaces that don't collide by construction,
-   so passing one where the other was expected silently always returns
-   `false`. `downloadButtonLabel`/`folderDownloadButtonLabel` now show
-   `'Queued'` instead of `'Downloading...'` when `status.kind === 'in_progress'`
-   but this row isn't the one actually streaming.
-5. **A fifth, second-order gap found only through physical re-testing of
-   fix #2 above:** `handleFolderDownload`'s per-child "already reconciled,
-   skip" logic only ever compared backend metadata (Transfer status +
-   `reconciledChildren`) — it had no way to know the *entire folder root*
-   had been deleted out from under it. A row correctly downgraded to
-   "Download" by fix #2, then tapped, found every child still
-   metadata-reconciled and skipped all of them — silently proposing nothing,
-   forever. Fixed by checking the resolved root's existence once, up front;
-   if missing, every child is treated as pending regardless of its
-   individual reconciliation match, the same as a never-before-seen folder.
-
-## Files Modified
-
-- `android/src/files/folderIdentity.ts` — `findAvailableRootName` now takes
-  the in-flight `registry` and checks reserved names, not just `fs.exists()`
-  (Problem 2); added `readAllLocalRoots`.
-- `android/src/files/folderDownloadStatus.ts` — `deriveFolderDownloadStatus`
-  gained the `folderExists` parameter (Problem 1).
-- `android/src/files/useFolderReconciliation.ts` — also loads and exposes
-  `localRootByFolderId`.
-- `android/src/files/downloadStatus.ts` — added `latestSendTransferId`
-  (queue fix).
-- `android/src/screens/files/FilesScreen.tsx` — folder-existence
-  verification effect (Problem 1); `TransferStreamManager` subscription
-  driving both `refreshReconciliation()` on completion (Problem 3) and an
-  `active`-aware re-render (queue fix); `downloadButtonLabel`/
-  `folderDownloadButtonLabel` accept `active` and show `'Queued'`;
-  `handleFolderDownload` checks the resolved root's existence once and
-  forces every child pending if it's missing (Problem 1, second-order);
-  `handleOpenFolder`'s catch now re-verifies existence, matching `handleOpen`.
-- Tests: `__tests__/files/folderIdentity.test.ts` (a regression test that
-  keeps the on-device filesystem genuinely empty throughout — the P13.2 test
-  it sits next to didn't, which is why the race survived that milestone),
-  `__tests__/files/folderDownloadStatus.test.ts`, `__tests__/files/downloadStatus.test.ts`
-  (`latestSendTransferId`), `__tests__/files/useFolderReconciliation.test.tsx` (new).
-
-## Verification
-
-- `npx tsc --noEmit`: clean. `npx jest`: 232/232 passing.
-- Live device (RMX3997, USB-connected; backend rebound to `0.0.0.0` and
-  reached over the phone's own hotspot at `10.169.164.233`; desktop restarted
-  and confirmed it detects and reuses the externally-running backend rather
-  than spawning its own loopback-only instance — the dev-mode path this
-  session discovered is required for any LAN-reachable physical-device test
-  at all), this session:
-  - **Problem 2:** on a registry wiped to a clean baseline, three shared
-    folders all named `test` were tapped Download within about one second of
-    each other. Result: `Relay/test/`, `Relay/test (1)/`, `Relay/test (2)/`,
-    each holding its own distinct, unmerged content (`adb shell cat` on each
-    `note.txt` confirmed three different bodies). Re-ran once *without* the
-    fix's registry-check (filesystem-only) to confirm the collision actually
-    reproduces first — it did, all three tapped downloads on a cross-session-
-    contaminated device state briefly showed the same pre-existing stale
-    reservation before a clean-registry re-run isolated a true first-time
-    collision and the fix.
-  - **Problem 1:** downloaded a single-file folder to "Open", deleted its
-    directory via `adb shell rm -rf` (simulating the user clearing it from a
-    file manager), and — with no app restart or manual navigation — the row
-    downgraded to "Download" on its own within one poll tick. Re-tapping
-    Download initially did **nothing** (the second-order gap above,
-    caught live); after the fix, re-tapping correctly re-streamed the file
-    and the row reached "Open" again.
-  - **Problem 3:** a 3-file folder's download was burst-captured at ~350ms
-    intervals across the whole run (16 frames). Sequence observed:
-    `Downloading...` → intermittently `Queued` (correctly reflecting the
-    real gaps between each child's own stream, not a bug) → `Open`. Zero
-    frames showed `Download` reappearing between the in-progress states and
-    `Open`.
-  - **Queue investigation:** tapped a 60 MB folder then, ~300ms later, a 6 B
-    folder. Before the `isActive` id-space fix: both rows showed
-    `Downloading...`/`Queued` inconsistently with actual backend activity
-    (traced to the bug itself, not real concurrent streaming). After the
-    fix: the 60 MB row showed `Downloading...` and the 6 B row `Queued`,
-    matching backend access logs exactly — `GET /transfers/435/download`
-    (60 MB) ran for the full ~10s duration, and `GET /transfers/436/download`
-    (6 B) did not start until immediately after 435's completion log line.
-    Confirmed again with three concurrent same-named-folder taps (Problem 2's
-    own test): exactly one `Downloading...`/two `Queued` at any sampled
-    instant, never zero or more than one `Downloading...`.
-  - **Full restart cycle:** backend process killed and restarted (rebound to
-    `0.0.0.0`), desktop (Electron) killed and restarted (confirmed reusing
-    the already-running backend), `adb` server cycled, app force-stopped and
-    relaunched. All five previously-downloaded folders' states (`Open`/
-    `Download`) were byte-for-byte consistent with their pre-restart values;
-    the local registry survives all of the above by construction (it's
-    private app storage, untouched by any of these restarts).
-  - **Update scenarios re-confirmed** (add/remove/rename against `UpdateMe`,
-    each via `POST /folders/{id}/refresh`): identical behavior to P13.2's own
-    verification — no regression from this milestone's changes.
-  - Backend access log scanned for the full session: zero `500`s, zero
-    unhandled exceptions. `adb logcat` scanned for `ReactNativeJS` `WARN`/
-    `console.warn`/exceptions across the full session buffer: none found.
-  - Test shares unshared via `DELETE /api/v1/folders/{id}` after
-    verification; physically-downloaded test content left on-device,
-    matching P13.2's own precedent.
-
-## Remaining Limitations
-
-- **Mixed file+folder concurrent queueing was not separately verified.**
-  The fix touches `FileRow` and `FolderRow` identically (same
-  `latestSendTransferId`/`isActive` logic, same underlying
-  `TransferStreamManager` queue with no file/folder distinction at that
-  layer), and folder-vs-folder and multi-child-within-a-folder queueing were
-  both directly verified — but a standalone file queued behind/ahead of a
-  folder specifically was not exercised live this session.
-- **Problem 2's fix narrows, but does not eliminate, every naming race.** A
-  name is now checked against the registry (reserved, even before
-  materialized) and the filesystem (occupied by something the registry
-  doesn't know about) — but a third source, a directory created by
-  something *other than this app* between those two checks and the
-  registry write, remains a (pre-existing, far narrower) TOCTOU window; not
-  addressed, consistent with this being an audit of the app's own state
-  machine, not a general filesystem-race hardening pass.
-- **All P13.2 "Remaining Limitations" still apply unchanged** — orphaned
-  local files on rename/removal are not cleaned up, byte-identical-size
-  content edits remain undetectable, and the registry does not survive a
-  reinstall.
+**Verification:** all four scenarios reproduced live pre-fix and confirmed
+fixed post-fix, including a full backend+desktop+app restart cycle
+(registry survives, since it's private app storage).
 
 ---
 
 # Milestone P13.3 Correction — Single-Transfer "Queued" Regression
 
-## Objective
+**Problem:** P13.3's own queue-label fix (`active = isActive(transferId)`)
+shipped a regression: downloading a single file or folder — nothing else
+queued — now briefly flashed "Queued" before settling into
+"Downloading...".
 
-The queue-label fix landed by P13.3 above (`active` = `TransferStreamManager.isActive(transferId)`,
-`'Queued'` shown whenever `status.kind === 'in_progress'` and a row wasn't the
-one `isActive` reported streaming) shipped a regression that P13.3's own
-verification did not catch: downloading a single file or a single folder —
-with nothing else queued behind it — now briefly showed `Queued` instead of
-going straight from `Downloading...` to `Open`. This entry re-investigates
-from the physical device first, per this correction's own instructions, and
-does not assume the prior report's root cause or fix were correct going in.
+**Root cause:** The backend flips `Transfer.status` to `in_progress` the
+instant a download is *proposed*, well before local streaming starts, and
+`TransferStreamManager.start()` itself doesn't commit `state.status =
+'streaming'` until *after* an unavoidable `await
+PermissionsAndroid.request(...)` gap. P13.3's fix treated "not yet
+observed as `isActive`" as equivalent to "genuinely waiting in the FIFO
+queue" — but a lone, never-queued transfer looks identical to a queued one
+for that entire startup window.
 
-## What Was Initially Observed
+**Fix:** Added a real `isQueued(transferId)` reading FIFO membership
+directly (`queue.some(...)`) — no async gap, since `enqueue()` is only ever
+reached synchronously from `start()`'s own guard check. Labels now key off
+`queued`, not `active`; anything `in_progress` that isn't genuinely queued
+defaults to "Downloading...". Verified live across 5 scenarios (single
+file, single folder, 2/3 concurrent files, mixed file+folder) with
+frame-by-frame screenshot capture confirming zero false "Queued" states and
+correct FIFO ordering throughout.
 
-User report: a lone download (one file or one folder, nothing else in
-flight) displayed `Download → Downloading... → Queued → Open`. A visible
-`Queued` state should never occur for a transfer that is not genuinely
-waiting behind another one in `TransferStreamManager`'s FIFO queue
-(Milestone P11).
-
-## Live Device Reproduction (before any code change)
-
-Device: physical RMX3997 (realme C65 5G), USB-connected, ADB serial
-`69DADENFONAIOZS4`, backend/Android communicating over the phone's own
-hotspot (`10.169.164.233:8000`), matching P13.3's own verification setup.
-Backend and Electron desktop were already running; Metro (`8081`) was
-already running.
-
-**Test A (single file, 32 MB `single_big.bin`):** rapid `adb exec-out
-screencap` burst (~500 ms cadence) across the whole download. Confirmed
-live: frame at t≈0 ms showed `Downloading...` (the `requesting` window),
-frame at t≈1054 ms showed **`Queued`**, frame at t≈2006 ms was back to
-`Downloading...`, and the transfer finished normally at `Open`. Cross-checked
-against `GET /transfers`: exactly one Transfer row (id 453) existed for this
-download the entire time — no second transfer was ever proposed, so nothing
-could have been genuinely sitting in `TransferStreamManager`'s FIFO queue.
-
-**Test B (single folder, 2-file `folderA`):** same capture method. Frame at
-t≈1941 ms showed the whole folder row as **`Queued`**, despite only its own
-two children being involved and no other item downloading.
-
-Both reproductions confirm the bug is real and occurs for both files and
-folders, exactly as reported — not something introduced only by the report's
-retelling.
-
-## Root Cause
-
-Traced from `TransferStreamManager.start()` (`android/src/streaming/TransferStreamManager.ts`)
-and `FilesScreen`'s label functions (`android/src/screens/files/FilesScreen.tsx`):
-
-- The backend flips `Transfer.status` to `in_progress` the instant a download
-  is *proposed* (`TransferService._create_transfer`) — well before this
-  app's own stream has moved a single byte.
-- `TransferStreamManager.start()` does not commit `state.status = 'streaming'`
-  synchronously either: it sets an internal `starting` flag first, then
-  `await`s `PermissionsAndroid.request(POST_NOTIFICATIONS)` (an unavoidable
-  async gap — the very race the *original* P13 hardening pass, "start()
-  calls fired back-to-back do not both begin streaming," was built around),
-  and only commits `state` after that resolves.
-- The P13.3 label logic used `active = TransferStreamManager.isActive(transferId)`
-  and rendered `'Queued'` for **anything** `in_progress` that wasn't
-  `isActive` yet — treating "not yet observed as active" as equivalent to
-  "genuinely waiting in the FIFO queue." Those are not the same thing:
-  `isActive()` only starts returning `true` once `start()` gets past its own
-  `await`, so a lone, never-queued transfer looks *identical* to a queued one
-  for that entire window, the moment `FilesScreen`'s 2000ms poll observes
-  `status.kind === 'in_progress'` ahead of it.
-- For the folder case (Test B), the same gap applies per-child: the folder's
-  `active` aggregate (`some(child => isActive(...))`) is also false during
-  that window, with the same result at the folder-row level. A second,
-  narrower version of the same gap also appears immediately after a child
-  finishes and the FIFO queue hands the next child off (`queue.shift()` in
-  `start()`'s `finally` block) — the newly-dequeued child is no longer in
-  `queue` (so it doesn't read as queued) but also isn't `isActive` yet until
-  its own `start()` call gets past the same `await` — another brief false
-  `Queued`.
-
-In short: `isActive()` has a real gap between "this call has started" and
-"this call is now the observed active stream," and the P13.3 fix used the
-*inverse* of that gap as its definition of `Queued`, which is wrong — a
-missing/not-yet-true `isActive` was being misread as `Queued` rather than
-as "not yet known, default to Downloading."
-
-## The State Invariant
-
-A transfer is visibly `Queued` only when it has been requested, has not yet
-become the active stream, another transfer currently occupies the
-single-stream slot, and it is actually waiting in `TransferStreamManager`'s
-FIFO queue. Anything else that is `in_progress` — including the startup
-window described above — must default to `Downloading...`, never `Queued`.
-
-## Fix
-
-`android/src/streaming/TransferStreamManager.ts`: added
-`isQueued(transferId): boolean`, reading FIFO membership
-(`queue.some(...)`) directly. Unlike `isActive()`, this has no async gap —
-`queue` is only ever populated by `enqueue()`, itself only ever reached
-synchronously from `start()`'s own guard check, so there is no window where
-a transfer is genuinely queued without `isQueued()` already reporting it.
-
-`android/src/screens/files/FilesScreen.tsx`: `downloadButtonLabel`/
-`folderDownloadButtonLabel` now take a `queued` boolean (not `active`) and
-render `'Queued'` only when it's true — anything else `in_progress` now
-defaults to `'Downloading...'`, restoring the pre-P13.3 behavior for the
-common case while still distinguishing a genuinely queued row. The file-row
-call site computes `queued` directly from `isQueued(transferId)`; the
-folder-row call site computes it as "no child is `isActive`, and at least
-one child `isQueued`" — so a folder with one child actively streaming and
-a sibling genuinely waiting still correctly reads `Downloading...`, not
-`Queued`.
-
-## Files Modified
-
-- `android/src/streaming/TransferStreamManager.ts` — added `isQueued()`.
-- `android/src/screens/files/FilesScreen.tsx` — `active` → `queued`
-  throughout (call sites, both label functions' signatures and switch
-  branches, `FileRow`/`FolderRow` prop types), doc comments updated;
-  `downloadButtonLabel`/`folderDownloadButtonLabel` exported for direct unit
-  testing (previously module-private).
-- `android/__tests__/streaming/TransferStreamManager.test.ts` — added an
-  `isQueued()` describe block: false for a never-started transfer, false for
-  a lone streaming transfer, true the instant a second transfer arrives
-  behind an active one (before it ever runs), and correct FIFO handoff
-  across three chained transfers.
-- `android/__tests__/screens/files/downloadButtonLabel.test.ts` (new) —
-  direct unit tests for both exported label functions: a lone in-progress
-  download/folder reads `Downloading...`, never `Queued`; a genuinely queued
-  one reads `Queued`; the `requesting` window and idle/failed/pending
-  statuses are unaffected by `queued`.
-
-## Automated Test Results
-
-`npx tsc --noEmit`: clean. `npx jest`: 244/244 passing (up from 232 at the
-close of P13.3 — 12 new regression tests: 4 in `TransferStreamManager.test.ts`,
-8 in the new `downloadButtonLabel.test.ts`).
-
-## Physical-Device Verification (after the fix)
-
-App reloaded from the fixed bundle (force-stop + relaunch, `adb reverse
-tcp:8081 tcp:8081` re-established after a mid-session USB drop, RN dev-menu
-`Reload` to recover from a stale "Unable to load script" state after the
-force-stop). All tests re-run live against the same physical device/hotspot
-setup as the reproduction above, with fresh shared content each time (prior
-test files reused from the reproduction pass were already `Open`).
-
-- **Test A (single file, fresh 2 MB `small_a.bin`):** 30-frame burst
-  (~700 ms cadence, 22.5 s total). `Downloading...` continuously from t≈44 ms
-  through t≈2282 ms (spanning and past the exact window that previously
-  flashed `Queued`) to `Open` by t≈3747 ms. Zero `Queued` frames.
-- **Test B (single folder, fresh 2-file `folderB`):** 20-frame burst
-  (~750 ms cadence). `Downloading...` at t≈787 ms and t≈2244 ms, `Open` by
-  t≈14780 ms (folder resolved and both children streamed and published
-  before the row settled). Zero `Queued` frames.
-- **Test C (two 40+ MB files tapped ~100 ms apart):** first row
-  `Downloading...`, second row correctly `Queued` (captured at t≈1549 ms);
-  both reached `Open`, second only after the first's stream actually
-  finished — matches `TransferStreamManager`'s FIFO order.
-- **Test D (three ~35-40 MB files tapped with a 0.5s stagger):** at
-  t≈2346 ms, item 1 `Downloading...`, items 2 and 3 both `Queued`; at
-  t≈8857 ms item 1 `Open`, item 2 `Downloading...`, item 3 still `Queued`;
-  at t≈23120 ms (final frame) item 2 `Open`, item 3 `Downloading...`. Order
-  matched the actual FIFO queue throughout.
-- **Test E (file + folder tapped ~400 ms apart):** the folder (tapped first)
-  read `Downloading...`, the file `Queued` (captured at t≈1725 ms); both
-  reached `Open` — confirms files and folders share identical queue
-  semantics through the same `TransferStreamManager` instance.
-- Backend cross-check: `GET /transfers` after each burst showed each row's
-  UI label backed by the real state — no failed transfers across the whole
-  session (all persisted Transfers ended `completed`).
-- `adb logcat` scanned across the full session for
-  `ReactNativeJS`+error/exception/fatal/reject: none found.
-
-## Regression Verification
-
-- **Folder Open:** tapped `Open` on the freshly-downloaded `folderE`;
-  Android's file manager opened directly into
-  `Download/Relay/folderE` showing both real, correctly-sized children —
-  MediaStore publishing and folder-Open intent both intact.
-- **File Open / on-device content:** navigating up from that same folder
-  view showed every test download (`big2.bin`…`big8.bin`, `d1.bin`…`d3.bin`,
-  etc.) present under `Download/Relay/` with correct sizes — confirms actual
-  bytes landed, not just a UI label change.
-- **Folder duplicate naming, folder freshness/external-deletion detection,
-  notification behavior:** untouched by this fix (no changes to
-  `folderIdentity.ts`, `folderDownloadStatus.ts`, `downloadNotification.ts`,
-  or `useFolderReconciliation.ts`); not re-exercised live this session since
-  the change has no code path into them — see P13.3's own verification above
-  for their last live confirmation.
-- Full automated suite (244 tests, including every pre-existing P13/P13.1/
-  P13.2/P13.3 regression test) still passes unmodified.
-
-## Documentation Changes
-
-This entry (`docs/15_QA_NOTEBOOK.md`). No architectural or invariant change
-to `docs/11_File_Transfer.md` — Milestone P11's single-active-stream + FIFO
-queue design is unchanged; only the UI's classification of that design's
-state was wrong. `docs/14_Testing_Plan.md` unchanged — no material change to
-the testing procedure itself.
-
-## CLAUDE.md
-
-No change. This correction is a milestone-specific implementation detail
-(a UI-state classification bug and its fix), not a new architectural
-decision, workflow rule, or durable project invariant — consistent with
-P13.3 above, which also made no CLAUDE.md change for a comparably detailed
-audit.
-
-## Remaining Limitations
-
-- Same as P13.3's own "Remaining Limitations" above — unchanged by this
-  correction, which touched only the queue-vs-active label classification.
-- The three-way (Test D) and mixed (Test E) live reproductions each required
-  a couple of retries to get reliable `adb shell input tap` delivery for a
-  third rapid tap in immediate succession — an artifact of synthetic input
-  injection timing on this device, not of the app; spacing taps by ~0.3-0.5s
-  resolved it. Not a product limitation, but worth noting for anyone
-  repeating this style of live multi-tap verification.
+---
 
 # Milestone P14.1 — Long-Press Context Menu: Core UX
 
-## Physical Baseline (before any code change)
+**Change:** Added `FileActionMenu.tsx`, a small bottom-sheet built on React
+Native's own `Modal` (no new dependency) offering Open/Details on a Files
+row's long-press. Details uses the built-in `Alert.alert`. Extracted
+`computeFileRowState`/`computeFolderRowState` so the row and the menu share
+one status derivation instead of duplicating it.
 
-Device: physical RMX3997 (realme C65 5G), USB-connected, ADB serial
-`69DADENFONAIOZS4`. Confirmed the Relay app (`com.relay.mobile`) installed,
-in the foreground (`MainActivity`), and its process running before touching
-any source file.
+**Verified live:** menu content recomputes correctly if the underlying
+transfer/existence state changes while the menu is still open (e.g. a
+download completing, or its file being externally deleted); Open is
+correctly omitted for a not-locally-available item; a long-press directly
+on the existing Open button still triggers the button, not the menu
+(nested `Pressable`s isolate correctly with no manual propagation
+handling).
 
-Shared Files screen at baseline showed one folder (`test_folder`, 2 items)
-and two files (`large_test_file.bin`, `remote_test_file.txt`), all already
-downloaded (`Open`). Confirmed via code inspection
-(`android/src/screens/files/FilesScreen.tsx`) that `FileRow`/`FolderRow`'s
-outer container was a plain `View`, not `Pressable` — no long-press handler
-existed anywhere in the row. Confirmed live: a synthetic long-press
-(`adb shell input swipe <x> <y> <x> <y> 800`) on the downloaded file row
-produced no visible change (before/after screenshots pixel-identical) and no
-new `ReactNativeJS` log output — long-press was a genuine no-op, matching
-P14.0's finding, independent of row state (the mechanism is the same `View`
-regardless of what the row displays, so this wasn't re-verified separately
-per state). Confirmed the existing Open action still worked: tapping `Open`
-on `remote_test_file.txt` produced Android's native "Open with" chooser.
-
-## Implementation
-
-Added a small, generic bottom-sheet component,
-`android/src/components/FileActionMenu.tsx` (the repo's `components/`
-directory previously held only `PlaceholderScreen.tsx`, confirming P14.0's
-finding that no Modal/ActionSheet primitive existed yet). Built on React
-Native's own `Modal` (`transparent`, `animationType="fade"`), not a
-third-party library — nothing in `package.json` changed. It takes a title,
-optional subtitle, and a list of `{ key, label, onPress }` actions; a
-backdrop `Pressable` dismisses on outside tap, `onRequestClose` dismisses on
-Android back, and an inner no-op `Pressable` around the sheet stops a tap
-inside it from falling through to the backdrop.
-
-`FilesScreen.tsx` changes:
-
-- `FileRow`/`FolderRow`'s outer `View` became a `Pressable` with
-  `onLongPress`; the existing `Open`/`Download` buttons stayed nested
-  `Pressable`s exactly as before. React Native's responder system gives an
-  inner (deeper, smaller) `Pressable` the touch before the outer one gets a
-  chance, so this needed no manual event-propagation handling.
-- Added `menuTarget` state (`{ kind, id } | null`) identifying which row's
-  menu is open, not a snapshot of its data — the menu's title/subtitle/
-  actions are recomputed on every render from the current `files`/`folders`/
-  `requests`/`transfers` state by the row's `id`, so a state change while the
-  menu is open (a queued download starting, a completed download's file
-  being deleted externally) is reflected automatically, the same way the row
-  itself already updates from polling. If the targeted item is no longer in
-  either list, the menu closes itself instead of showing stale content.
-- Extracted `computeFileRowState`/`computeFolderRowState` — the status/
-  queued derivation that previously lived inline in each row's `renderItem`
-  call — so `FileRow`/`FolderRow` and the menu's own computation share one
-  implementation instead of duplicating it (CLAUDE.md Rule 5).
-- Added `describeStatus` (exported for its own test, matching
-  `downloadButtonLabel`'s existing precedent) for the Details action's
-  state text — deliberately separate from `downloadButtonLabel`/
-  `folderDownloadButtonLabel`, which phrase the same states as a button's
-  call-to-action ("Download", "Retry") rather than a description
-  ("Not downloaded", "Downloading").
-- Added `handleFileDetails`/`handleFolderDetails`, using the built-in
-  `Alert.alert` (no new UI dependency) to show name, size, type (file) or
-  item count/total size (folder), shared date (formatted with
-  `Date.toLocaleString()`, no new date library), and current status — all
-  values Relay already had; no new backend/API call.
-- Open is only offered in the menu when the row's own `canOpen` condition
-  (`status.kind === 'completed'`) is true — mirrors the existing button
-  exactly, reusing `handleOpen`/`handleOpenFolder`/`openDownloadedFile`/
-  `openDownloadedFolder` unchanged, per the milestone's explicit instruction
-  not to duplicate or rewrite that logic.
-
-## Files Changed
-
-**Source:**
-- `android/src/components/FileActionMenu.tsx` (new)
-- `android/src/screens/files/FilesScreen.tsx`
-
-**Tests:**
-- `android/__tests__/screens/files/describeStatus.test.ts` (new)
-
-**Documentation:**
-- `docs/15_QA_NOTEBOOK.md` (this entry)
-
-**Project configuration:** none — no new dependency, no `package.json` or
-`.gitignore` change (the feature needed nothing beyond RN's built-in
-`Modal`/`Pressable`/`Alert`).
-
-## Automated Test Results
-
-- `npx tsc --noEmit`: clean, no errors.
-- `npx eslint .`: 0 errors, 2 pre-existing warnings in
-  `TransferStreamManager.ts` (`no-void`), unrelated to this milestone and
-  unmodified by it.
-- `npx jest`: 33/33 suites, 249/249 tests passing (up from 32/244 before this
-  milestone — 5 new tests in `describeStatus.test.ts`; every pre-existing
-  test, including P13.x's folder/queue regression suite, unchanged and still
-  green).
-
-## Physical-Device Verification
-
-App updated via Metro's live-reload (`curl -X POST http://localhost:8081/reload`,
-confirmed by the RN dev bundle reloading in place — no native code changed,
-so no fresh `.apk` install was needed). All of the following exercised live
-on RMX3997 against the same shared content as the baseline:
-
-- **File row, downloaded (`large_test_file.bin`):** long-press opened the
-  menu with title/subtitle matching the row (name, size, MIME type), showing
-  both **Open** and **Details**. **Details** showed size, type, shared
-  timestamp, and `Status: Downloaded` via a native `Alert`, then closed the
-  menu cleanly (no duplicate/lingering overlay).
-- **Folder row, downloaded (`test_folder`):** long-press opened the menu
-  with the same folder emoji + name shown in the row, subtitle "2 items ·
-  26 B", **Open** and **Details** both present; **Details** showed item
-  count, total size, shared timestamp, `Status: Downloaded`.
-- **File row, not locally available:** after deleting the on-device copy via
-  `adb shell rm` and letting the existing filesystem-detection effect
-  downgrade the row to `Download` (confirmed by screenshot: button flipped
-  from `Open` to `Download` on its own, no interaction), long-press showed
-  **only Details** — no Open action offered, matching the instruction not to
-  invent a new Open mechanism for an unavailable item.
-- **Active + Queued pair:** triggered downloads on two remote files in quick
-  succession; row 1 read `Downloading...`, row 2 read `Queued`, confirming
-  `computeFileRowState`'s reuse of `TransferStreamManager.isQueued` renders
-  identically to the pre-existing button logic.
-- **Live state transition while menu open (queued/active → completed):**
-  long-pressed a row mid-download (menu showed **Details only**, no Open);
-  left the menu open across the transfer's completion; the same menu
-  instance updated in place to add the **Open** action the moment the
-  transfer finished, with no close/reopen and no stale content.
-- **Live state transition while menu open (downloaded → deleted
-  externally):** long-pressed a downloaded file's row (menu showed Open +
-  Details); deleted its on-device copy via `adb shell rm` while the menu
-  stayed open; the row behind it reverted to `Download` and the open menu
-  dropped its Open action down to Details-only, live, confirming the menu
-  has no second source of truth independent of the row's own derivation.
-- **Interaction safety:** a plain (non-long) tap on a row produced no menu
-  and no other change (before/after screenshots identical). The existing
-  `Open` button still worked with a normal tap post-change (native "Open
-  with" chooser, matching the baseline exactly). A **long-press directly on
-  the `Open` button** triggered the button's own action (the "Open with"
-  chooser), not the row's menu — confirms nested `Pressable`s isolate
-  correctly with no extra propagation handling needed.
-- **Dismissal:** confirmed both outside-tap (tap on blank screen area below
-  the list) and Android back button close the menu without navigating away
-  from the Files screen or otherwise disturbing app state; reopening
-  afterward worked normally; no duplicate menus were ever observed.
-- **Regression / cleanup:** re-downloaded both externally-deleted files to
-  restore the screen to its original baseline state (all three items
-  `Open`) before finishing.
-- `adb logcat`, filtered to the app's own PID, scanned across the full
-  session for `FATAL`/`Exception`/`ReactNativeJS.*Error`: none found. Two
-  benign OEM (`OplusScrollToTopManager`) log lines appeared around the
-  Metro reload (an unregistered-receiver `IllegalArgumentException` logged
-  by the device's ColorOS/RealmeUI shell on Activity lifecycle transitions,
-  not a Relay/JS error) — pre-existing device behavior, unrelated to this
-  change.
-
-## Problems Discovered
-
-- A one-time yellow "Open debugger to view warnings" LogBox banner appeared
-  during the active+queued burst test. Investigated: no matching
-  `console.warn` output for the app's PID in the logcat window covering that
-  moment, and the codebase's existing `console.warn` call sites are all in
-  `streaming/` (foreground-service start, MediaStore publish,
-  download-complete notification) and `session/secureStorage.ts` /
-  `discovery/DiscoveryService.ts` — none touched by this milestone's diff.
-  Most likely one of the pre-existing best-effort streaming/notification
-  warnings (e.g. a notification-permission edge case on this OS build) firing
-  during the real download triggered for that test, not a regression from
-  this change. Did not block or alter any of the verification above and was
-  not investigated further, per the instruction to fix only issues actually
-  blocking this milestone.
-- No implementation-side defects were found during physical verification —
-  the menu, live-state behavior, and dismissal all worked as designed on the
-  first build.
-
-## Documentation Synchronization
-
-- **README.md:** unchanged. It documents the Files resource and API routes
-  at a project level and does not describe row-level button/interaction
-  behavior anywhere (no existing mention of the `Open`/`Download` buttons
-  either), so there was nothing at that level of detail to update.
-- **CLAUDE.md:** unchanged. CLAUDE.md's own "Documentation Ownership"
-  section states Claude Code must never automatically modify it, even though
-  this milestone's instructions granted permission to do so — the file's own
-  standing rule takes precedence. Recommend the developer consider a CLAUDE.md
-  pass covering both this milestone and the still-open P13 folder-transfer
-  documentation gap P14.0 already flagged, together, rather than two
-  piecemeal edits.
-- **.gitignore:** unchanged — no new build artifact or tool introduced.
-- **docs/14_Testing_Plan.md:** unchanged. Reviewed its structure: major
-  milestones (P1–P13) each have their own `## P<n>` section, but sub-
-  milestones (P13.1, P13.2, P13.3, P13.3-correction, P9.1) do not — those are
-  tracked only in this QA notebook. P14.1 follows that established pattern
-  as a sub-milestone of P14, so no new Testing Plan section was added; the
-  existing manual-verification-plus-Jest/tsc/eslint procedure it already
-  describes fully covers what this milestone needed.
-
-## Remaining Limitations
-
-- Details is presented via the platform's native `Alert.alert`, not a
-  themed in-sheet view — deliberate, to avoid building a second custom modal
-  for one milestone (CLAUDE.md Rule 6); acceptable for this first version
-  per the milestone's "smallest reusable component" guidance, but a future
-  pass could fold it into `FileActionMenu` itself if a richer presentation is
-  wanted.
-- No accessibility screen-reader pass was performed beyond adding
-  `accessibilityRole`/`accessibilityLabel` props to the interactive
-  elements — TalkBack itself was not exercised live on-device.
-- Queued/active live-transition testing exercised the file case in depth
-  (queued → active → completed); the folder case's aggregate state was
-  covered functionally (folder Details/Open reflect
-  `computeFolderRowState` exactly as designed, and that helper is unchanged
-  in shape from the pre-existing inline logic it replaced) but was not
-  separately re-run through the same live mid-transfer menu-open sequence,
-  since it shares the identical `deriveFolderDownloadStatus` code path
-  already covered by the file case plus the existing P13.3 folder test
-  suite.
+---
 
 # Milestone P14.2 — Device Discovery & QR Pairing UX
 
-## Architecture Investigation (before any code change)
+**Change:** A tapped row in the Discovery list (previously a dead `View`)
+now navigates straight into the existing QR scanner, optionally carrying
+the tapped device so a best-effort `(desktop_ip, port)` match check can run
+against the scanned QR before submitting (the pairing protocol carries no
+stronger device-identity field — a heuristic, not a guarantee). Added an
+instructional overlay, an explicit Close button, and a three-way camera
+permission state (`granted`/`denied`/`blocked`, the last offering "Open
+Settings"). Removed leftover `[QR-DEBUG]` logging from the specific
+functions this milestone was already rewriting (the same logging in
+`api/client.ts` was left — see the open-items list in the Testing Plan).
 
-Discovery: `android/src/discovery/DiscoveryService.ts` listens for
-`DiscoveryAnnouncePayload` UDP broadcasts (`docs/09_Networking.md` §4) and
-exposes a de-duped, staleness-evicted list of `DiscoveredDesktop` (name, IP,
-port, `instance_id`) via `useDiscovery()`. `DiscoveryScreen.tsx` rendered
-each entry as a plain `View` (name + raw IP) — no `Pressable`, no
-`onPress`, confirmed by reading the file before touching it.
-
-Pairing: `QrScanScreen.tsx` already implements the one and only scanner
-(`react-native-camera-kit`), reached from `DiscoveryScreen`'s
-always-available "Scan QR to Pair" button. `qrPayload.ts`'s
-`PairingQrPayload` carries `desktop_ip`, `port`, `pairing_token`,
-`protocol_version`, `relay_version` — **no device/instance identity field**.
-`DiscoveryAnnouncePayload` (discovery) and `PairingQrPayload` (QR) are
-otherwise unrelated wire formats that happen to share `desktop_ip`/`port`.
-
-Identity/persistence: `session/secureStorage.ts`'s own doc comment states
-"there is only ever one paired desktop per device in V1" — confirmed by
-`RootNavigator.tsx`, which switches the entire app between `PairingStack`
-(no session) and `MainTabs` (session present) the instant pairing succeeds.
-Consequently `DiscoveryScreen` only ever renders while unpaired; there is no
-in-app concept of an "already paired" row to distinguish, and no multi-
-device list on the Android side (that exists only on the desktop, in
-`desktop/src/renderer/views/devices.js`'s "Paired Devices" table, out of
-scope for this Android-focused milestone).
-
-## Physical Baseline (before any code change)
-
-Device: physical RMX3997, ADB serial `69DADENFONAIOZS4`, backend + Electron
-desktop ("Thomas") + Metro all already running on the same host.
-
-**Test A (discovered device tap):** unpaired the phone (`DELETE /devices/{id}`
-so the app's next request 401s and self-clears its session — no in-app
-"forget" action exists yet, and this device's OEM shell blocks both
-`pm clear` and `pm revoke`, see Remaining Limitations), relaunched, and
-confirmed the Discovery screen showed the desktop ("Thomas", `10.169.164.233`)
-as a plain row. `adb shell input tap` directly on the row: **no navigation,
-no visual feedback, no scanner opened** — screenshots before/after the tap
-were pixel-identical apart from the clock. Confirmed this matches the code:
-the row was a bare `View`.
-
-**Test B (dedicated QR button):** tapping "Scan QR to Pair" opened
-`QrScanScreen` normally (camera live, header "Scan QR Code", default
-back arrow). Android back returned cleanly to Discovery. No partial-pairing
-state was created (nothing pending server- or client-side before a QR is
-actually read).
-
-## Root Cause
-
-`DiscoveryScreen.tsx`'s row was informational-only by original design (its
-own doc comment: "Purely informational... pairing itself never depends on
-this list"), which was correct about pairing not *depending* on discovery
-but left tapping a row with no effect at all — not a regression, a UX gap
-in the original implementation.
-
-## Architecture Decision
-
-Reuse the existing scanner/pairing flow unconditionally — no second
-scanner, no new pairing protocol, no new persisted state. A tapped row
-navigates to the same `QrScanScreen` the "Scan QR to Pair" button already
-uses, optionally carrying the tapped `DiscoveredDesktop` as a route param.
-Because the QR payload has no device-identity field, the strongest
-same-desktop check available without changing the protocol is comparing the
-QR's `(desktop_ip, port)` against the tapped device's own `(desktopIp,
-port)` — implemented as a pure, unit-tested function
-(`matchesSelectedDesktop`) rather than inline in the screen, so the
-mismatch logic is testable independent of the camera/RN rendering. Tapping
-the generic button (no device selected) skips this check entirely,
-preserving the original "pairing never depends on discovery" guarantee.
-
-"Already-paired" row states (§11/§12 of the requirements) were **not**
-implemented on `DiscoveryScreen` — per the architecture investigation above,
-this screen structurally cannot render while paired, so there is nothing
-for it to distinguish. Documented here rather than invented.
-
-## Implementation
-
-- `android/src/navigation/types.ts`: `QrScan` route now accepts an optional
-  `{ device?: DiscoveredDesktop }` param.
-- `android/src/pairing/qrPayload.ts`: added `matchesSelectedDesktop(payload,
-  desktop)`, comparing `(desktop_ip, port)`.
-- `android/src/screens/discovery/DiscoveryScreen.tsx`: row is now a
-  `Pressable` (`accessibilityRole="button"`) navigating to
-  `QrScan` with `{ device: item }`; shows "Discovered • Tap to pair" plus a
-  trailing chevron in place of the raw IP address. Empty state gained a
-  second line ("Make sure this phone and the desktop are on the same Wi-Fi
-  network or mobile hotspot") — the local-network/hotspot language matches
-  `docs/09_Networking.md` §1, not an invented requirement. "Scan QR to Pair"
-  is unchanged (still always visible, now passes `{}`).
-- `android/src/screens/pairing/QrScanScreen.tsx`: added an instructional
-  overlay ("Point your camera at the QR code shown on the device you want
-  to pair with."), an explicit **Close** button (in addition to the header's
-  existing back arrow) wired to the same `navigation.goBack()` as a new
-  explicit `BackHandler` listener for the hardware back key, a
-  `matchesSelectedDesktop` check before submitting a pairing request when a
-  device was selected (mismatch shows an error and leaves the scanner live,
-  submitting nothing), and a three-way camera-permission state
-  (`granted`/`denied`/`blocked`) — `blocked` (Android's "never ask again")
-  now offers an **Open Settings** button via `Linking.openSettings()`,
-  still Android's own permission system, no custom one. Also removed the
-  file's `[QR-DEBUG]` `console.log`/`console.error` calls — temporary
-  instrumentation left over from an earlier diagnostic session, in the
-  exact functions this milestone was already rewriting for the new overlay/
-  Close/mismatch logic.
-
-## Files Changed
-
-**Source:**
-- `android/src/navigation/types.ts`
-- `android/src/pairing/qrPayload.ts`
-- `android/src/screens/discovery/DiscoveryScreen.tsx`
-- `android/src/screens/pairing/QrScanScreen.tsx`
-
-**Tests:**
-- `android/__tests__/pairing/qrPayload.test.ts` (extended with
-  `matchesSelectedDesktop` cases)
-
-**Documentation:**
-- `docs/15_QA_NOTEBOOK.md` (this entry)
-
-**Project configuration:** none — no new dependency, no `package.json`,
-`.gitignore`, or native-project change.
-
-## Automated Test Results
-
-- `npx tsc --noEmit`: clean, no errors.
-- `npx eslint <changed files>`: 0 errors, 0 warnings.
-- `npx jest`: 33/33 suites, 252/252 tests passing (up from 249 before this
-  milestone — 3 new `matchesSelectedDesktop` cases; every pre-existing test
-  unchanged and still green).
-
-## Physical-Device Verification
-
-All exercised live on RMX3997 via `adb shell input tap`/`keyevent` plus
-screenshots, against the same running backend/desktop/Metro as the
-baseline. App updated via Metro's live JS reload (force-stop + relaunch;
-no native code changed, so no fresh `.apk` install was needed).
-
-- **Test 1 (discovered device → tap → scanner):** row now reads "Thomas /
-  Discovered • Tap to pair ›"; tapping it opened `QrScanScreen` with the
-  instructional overlay and Close button visible over the live camera feed.
-- **Test 2 (dedicated QR button → same scanner):** unchanged path, still
-  opens the identical screen.
-- **Test 3 (correct QR → pairing succeeds):** user scanned the desktop's
-  real pairing QR from the row-tap-opened scanner; `GET /devices` on the
-  backend showed a newly-registered device immediately after, and the app
-  landed on the Files/MainTabs screen — full pairing succeeded end to end.
-- **Test 4 (invalid QR → error → scanner remains usable):** user scanned an
-  unrelated QR first; got the "not a Relay pairing code" error banner with
-  the camera still live underneath, then successfully scanned the real QR
-  immediately after in the same session (feeding directly into Test 3) —
-  confirming the scanner was never left in a dead state by the invalid scan.
-- **Test 5 (Close → returns correctly):** tapping Close from the
-  row-opened scanner returned to Discovery, list/empty-state rendering
-  intact.
-- **Test 6 (Android back → returns correctly):** hardware back from the
-  scanner returned to Discovery cleanly (confirmed via
-  `dumpsys activity activities` showing `MainActivity` still foregrounded,
-  not the launcher, and a matching screenshot).
-- **Test 7 (already-paired device):** not applicable — see Architecture
-  Decision above; verified structurally instead (RootNavigator swaps to
-  MainTabs on pairing, unmounting Discovery).
-- **Regression:** post-pairing, Files screen rendered its three shared items
-  normally; P14.1's long-press context menu still opened correctly on a
-  folder row; Transfers tab loaded ("No transfers yet.", upload buttons
-  present) with no crash. None of this milestone's diff touches
-  `FilesScreen.tsx`, `TransferListScreen.tsx`, or `FileActionMenu.tsx`.
-
-## Problems Discovered
-
-- A `pm clear com.relay.mobile` / `pm revoke ... CAMERA` were both rejected
-  by this device's OEM shell with `SecurityException` (missing
-  `CLEAR_APP_USER_DATA`/`REVOKE_RUNTIME_PERMISSIONS` even for the `shell`
-  UID) — not a Relay issue, a locked-down ADB shell on this particular
-  ColorOS/RealmeUI build. Worked around for the "reach unpaired state"
-  need via `DELETE /devices/{id}` on the desktop (the app's existing 401 →
-  `SessionManager.clearSession()` path already handles a revoked session
-  gracefully — this is exactly what "device removed from the desktop while
-  the phone still thinks it's paired" looks like in production, not a
-  test-only shortcut).
-- An unrelated, pre-existing `[QR-DEBUG]` temporary logging block was also
-  found in `android/src/api/client.ts` (not part of this milestone's file
-  set) — left untouched per the instruction not to make unrelated cleanup
-  changes.
-- One flaky synthetic tap on "Scan QR to Pair" during verification produced
-  no visible effect on the first attempt; an identical retry immediately
-  after worked normally, with no code change in between. Treated as
-  synthetic-input timing noise (the same category of finding as P13.3's own
-  "Problems Discovered" note about spacing rapid taps), not a product defect
-  — not reproducible on a second pass.
-
-## Documentation Synchronization
-
-- **README.md:** unchanged — no user-facing/project-level description of
-  the pairing UX exists there to update.
-- **CLAUDE.md:** unchanged — this milestone is a UX fix within the existing,
-  unchanged architecture (no new durable rule, workflow, or invariant).
-- **.gitignore:** unchanged — no new generated/local artifact introduced.
-- `docs/11_File_Transfer.md`: reviewed — does not document Android-side
-  pairing/discovery UI, only the transfer protocol; unaffected.
-- `docs/14_Testing_Plan.md`: unchanged, following the same P14.1 precedent
-  (sub-milestones are tracked in this QA notebook, not given their own
-  Testing Plan section).
-
-## Remaining Limitations
-
-- **Device mismatch is a heuristic, not a guarantee**: the current pairing
-  protocol carries no device/instance identity in the QR payload, so
-  "wrong device" detection can only compare `(desktop_ip, port)` against
-  the discovery announcement — the closest available signal, not a true
-  identity check. A protocol change (e.g. echoing `instance_id` in the QR)
-  would be needed for a stronger guarantee; out of scope for this UX-only
-  milestone per its own architectural constraint.
-- **Device-mismatch and camera-permission-denied/blocked paths were not
-  exercised live with a second real desktop or a revoked permission** —
-  this environment has exactly one desktop to pair with, and this device's
-  OEM shell blocks the ADB commands (`pm revoke`, and a
-  `android.settings.APPLICATION_DETAILS_SETTINGS` deep link that landed on
-  an unrelated settings sub-page instead of the app's permissions page)
-  that would otherwise force those states. Both paths are covered by
-  `matchesSelectedDesktop`'s unit tests and by `tsc`/`eslint` against
-  React Native's own documented `PermissionsAndroid.RESULTS` values, but not
-  by a live camera-denied or two-desktop physical run.
-- **Discovery-disappears-during-pairing (§14) and pairing-timeout scenarios**
-  were not independently re-triggered live in this pass — the code paths
-  involved (`submitPairingRequest`'s catch block, `PairingWaitingScreen`'s
-  existing 5-minute give-up) are unmodified by this milestone and were not
-  exercised beyond what Test 3/4 already covered.
+**Note:** "Already paired" row states were investigated and deliberately
+**not** built — `RootNavigator` swaps the entire app to `MainTabs` the
+instant pairing succeeds, so Discovery structurally never renders while
+paired; there is nothing for it to distinguish.
 
 ---
 
 # Milestone P14.3 — Android Settings & Download Location
 
-## Architecture Investigation (before any code change)
+**Feature:** A Settings screen to switch the download destination between
+the default `Downloads/Relay` (MediaStore) and a user-picked SAF folder.
+Persisted via the same `react-native-blob-util` JSON-file pattern as
+`folderIdentity.ts` (`DownloadLocationManager.ts` mirrors
+`SessionManager.ts`'s in-memory-cache + boot-time-restore shape).
+`downloadExistence.ts` became the pipeline's one mode-aware abstraction
+boundary; default-mode behavior is byte-for-byte unchanged (every
+pre-existing test in that area passed unmodified).
 
-`screens/settings/SettingsScreen.tsx` was an unimplemented `PlaceholderScreen`
-— no way to view or change the download destination existed at all.
+**Defect found and fixed during live verification — "Invalid root Uri"
+opening a custom-location folder.** For a nested child document,
+`react-native-saf-x`'s `stat()` deliberately returns a **tree**-shaped URI
+rather than one scoped to the originally-granted tree; that shape works
+fine for the library's own re-resolution but Android's DocumentsUI only
+accepts a tree URI as a browsable root if it's the *exact* one it
+originally granted. Fixed: build the correct
+`content://<authority>/tree/<treeDocId>/document/<childDocId>` shape
+directly from the granted tree's own document id.
 
-The download pipeline's destination was hard-coded in three places, none of
-them sharing a single source of truth:
-- `streaming/blobUtil.ts`'s `publishDownload` — copies a fully-streamed file
-  from its private staging path into MediaStore `Downloads/Relay` (API 29+)
-  via `copyToMediaStore`, with its own `resolveAvailableMediaStoreName`
-  conflict-check reading `LegacyDownloadDir/Relay` directly.
-- `files/downloadExistence.ts`'s `downloadedFilePath`/`downloadedFileExists`/
-  `downloadedFolderContentUri` — the pipeline's actual abstraction boundary:
-  every other consumer (`downloadActions.ts`, `TransferStreamManager.ts`,
-  `folderIdentity.ts`, `FilesScreen.tsx`) already went through these three
-  functions rather than building paths itself.
-- `TransferStreamManager.ts`'s own `downloadStagingPath` — always private
-  app storage, never the final destination; unaffected by this milestone.
+**Gotcha confirmed live:** an SAF permission grant survives the granted
+folder's own deletion (`hasPermission()` is a pure OS-level permission
+record, independent of whether the target still exists) — so a
+grant-revocation warning can't be triggered this way. A download attempt
+against a deleted custom destination does fail gracefully
+(`SafX.copyFile` rejects with `ENOENT`, caught by the existing best-effort
+`catch`, row stays re-downloadable).
 
-The backend's `AppSettings.download_directory`
-(`docs/13_Database_Design.md` §6) is an unrelated, desktop-only setting for
-uploads the desktop *receives* — confirmed by reading
-`backend/app/services/app_settings_service.py` and the DB design doc; no
-backend change was needed or made.
-
-`react-native-saf-x` (already a dependency, already used for the P13 upload
-folder picker in `streaming/folderPicker.ts`) was read in full, including
-its native Android source
-(`node_modules/react-native-saf-x/android/.../EfficientDocumentHelper.java`),
-to confirm two load-bearing facts before designing around it: `copyFile`
-auto-creates missing intermediate directories at its destination (falls
-back to `createFile`, which resolves its parent via
-`getDocumentUri(..., createIfDirectoryNotExist=true, ...)`), and `stat`'s
-returned `uri` is **not** safe to hand to `ACTION_VIEW` for browsing a
-directory — see Root Cause below.
-
-## Physical Baseline (before any code change)
-
-Device: physical RMX3997, ADB serial `69DADENFONAIOZS4`, backend (port
-8000) + Electron desktop + Metro (port 8081) all already running, phone
-connected via USB with the backend reachable over the phone's hotspot
-(`10.169.164.233`).
-
-Shared a file (`baseline_file.txt`) and a folder with a nested subfolder
-(`share_test/Nested/fileB.txt`) via the backend's loopback API, downloaded
-both from the Android app. Confirmed via `adb shell`:
-- Both landed at `/storage/emulated/0/Download/Relay/`, nested structure
-  preserved.
-- Open on the file launched `ACTION_VIEW` on a
-  `content://com.relay.mobile.provider/...` FileProvider URI (chooser with
-  matching apps appeared).
-- Open on the folder launched DocumentsUI browsed directly to
-  `Download > Relay > share_test`, showing `Nested` and its file.
-- Deleting the downloaded file externally (`adb shell rm`) correctly
-  reverted its row from "Open" back to "Download" on the next poll.
-- Confirmed there was no way to change the destination — Settings was a
-  placeholder.
-
-## Root Cause / Design Gap
-
-Not a defect — a genuinely unimplemented feature. The gap was architectural:
-nothing in the pipeline had a concept of "the current download location" as
-a first-class, persisted, runtime value; `Relay`/`LegacyDownloadDir` were
-compile-time constants.
-
-## Architecture Decision
-
-Added a `mode: 'default' | 'custom'` setting
-(`settings/types.ts`), persisted as a small private JSON file via
-`react-native-blob-util`'s `readFile`/`writeFile`
-(`settings/downloadLocationStore.ts`) — the exact pattern
-`files/folderIdentity.ts` already established for local app state with no
-backend equivalent, avoiding a new dependency (AsyncStorage/MMKV) per
-CLAUDE.md Rule 2. `settings/DownloadLocationManager.ts` mirrors
-`session/SessionManager.ts`'s exact shape (in-memory cache + boot-time
-`restore()`, called from `App.tsx` alongside `SessionManager.restore()`),
-which resolves a real sync/async tension: several path-building call sites
-were previously synchronous, but a custom SAF location's path resolution is
-inherently async. Making the setting's *read* synchronous (an
-already-loaded in-memory cache) while making the *path-building functions*
-themselves `async` (all call sites already sat inside async functions —
-mechanical, not a redesign) kept every call site's diff small.
-
-`files/downloadExistence.ts` (the pipeline's existing sole abstraction
-boundary) became mode-aware: default-mode behavior is byte-for-byte
-unchanged (confirmed — see Automated Tests below, every pre-existing test
-passed unmodified except one intentional error-message change);
-custom-mode resolves the same relative path against the user-picked SAF
-tree. `streaming/blobUtil.ts`'s `publishDownload` dispatches to
-`publishToDefaultLocation` (the original code, renamed) or
-`publishToCustomLocation` (new — `SafX.copyFile` from the staging path into
-`<treeUri>/<relativePath>`, relying on the auto-mkdir behavior confirmed
-above). Conflict-name resolution
-(`resolveAvailableMediaStoreName` → generalized to
-`resolveAvailableDownloadName`) now routes its existence check through
-`downloadedFileExists` instead of hard-coding `LegacyDownloadDir`, so
-unique-naming works under either destination. `files/folderIdentity.ts`'s
-own name-collision check was switched to the same `downloadedFileExists`
-call for the same reason — its persisted registry schema
-(`localRoot`/`reconciledChildren`) needed **no change**, since it was
-already keyed by `shared_folder_id`, not by location.
-
-**Why switching locations needs no migration/reconciliation logic**:
-on-device existence was already re-derived live on every poll (that's how
-external-deletion detection has always worked — P13.3). Switching away from
-a location where a folder was downloaded makes that folder's row correctly
-report "Download" again (nothing at the *new* root); switching back makes
-it report "Completed" again automatically, because the reconciliation
-record was never mode-specific and the files were never touched. This was
-verified live (see below) rather than assumed.
-
-Settings UI (`screens/settings/SettingsScreen.tsx`) is a single card: current
-location, "Change Location" (opens `react-native-saf-x`'s
-`openDocumentTree(true)`, same call already used in P13's folder picker),
-"Reset to Default" (only shown in custom mode), and a `hasPermission`
-recheck on every focus to surface a revoked grant.
-
-## Defect Found and Fixed During Physical Verification
-
-**"Invalid root Uri" opening a custom-location folder.** Live on RMX3997:
-tapping "Open" on a folder downloaded to a custom SAF location launched
-DocumentsUI, but it landed on the device's generic "Download" root instead
-of the actual folder, logging `W Metrics: Invalid root Uri
-content://com.android.externalstorage.documents/...`.
-
-Root cause (confirmed by reading `react-native-saf-x`'s
-`DocumentStat.getWritableMap()`): for a child document whose id contains
-the tree's own document id as a substring — true for any ordinary nested
-child — `stat()` deliberately returns a **tree**-shaped URI
-(`DocumentsContract.buildTreeDocumentUri`), not a document URI scoped to
-the originally-granted tree. That shape round-trips fine through the
-library's own calls (they re-resolve it via persisted-permission prefix
-matching), but Android's `DocumentsUI` only accepts a tree URI as a
-browsable root if it's the *exact* URI it originally granted — a
-synthesized one fails. (File-open, by contrast, worked fine with the same
-URI shape — reading raw bytes via `ContentResolver` doesn't go through
-`DocumentsUI`'s root-validation path at all.)
-
-Fix: `files/downloadExistence.ts`'s `buildCustomTreeDocumentUri` builds the
-correct `content://<authority>/tree/<treeDocId>/document/<childDocId>`
-shape directly from the *granted* tree URI's own document id (parsed out of
-`location.treeUri`) plus the child's name — matching what
-`DocumentsContract.buildDocumentUriUsingTree` produces natively, the same
-approach the pre-existing default-mode `downloadedFolderContentUri` branch
-already used successfully. Re-verified live after the fix: Open on a
-custom-location folder now navigates directly to
-`RelayCustom > share_test`, and the folder-download-complete notification's
-tap-through was independently re-verified too (see below).
-
-## Files Changed
-
-New: `settings/types.ts`, `settings/downloadLocationStore.ts`,
-`settings/DownloadLocationManager.ts`, `settings/useDownloadLocation.ts`,
-plus matching tests and `__mocks__/react-native-saf-x.js`.
-
-Modified: `App.tsx` (boot-time restore), `files/downloadExistence.ts`
-(mode-aware path/existence/folder-URI resolution + new
-`deleteDownloadedPath`), `streaming/blobUtil.ts` (mode-aware
-`publishDownload`), `files/folderIdentity.ts` (existence check delegation),
-`files/downloadActions.ts` (await the now-async path functions; folder-open
-error message generalized), `streaming/TransferStreamManager.ts` (folder
-notification URI resolution simplified — the duplicated
-`Platform.Version >= MEDIASTORE_MIN_SDK` gate at this call site was removed
-in favor of `downloadedFolderContentUri` owning that decision once),
-`screens/files/FilesScreen.tsx` (stale-child delete routed through the new
-helper instead of a raw, default-mode-only `fs.unlink`),
-`screens/settings/SettingsScreen.tsx` (real UI, replacing the placeholder).
-
-## Automated Tests
-
-- `npx tsc --noEmit`: clean.
-- `npx eslint .`: 0 errors, 2 pre-existing warnings in
-  `TransferStreamManager.ts` (unrelated `no-void` lines, not touched by this
-  milestone).
-- `npx jest`: 35 suites / 280 tests passed. Every pre-existing test in
-  `downloadExistence.test.ts`, `blobUtil.test.ts`, `folderIdentity.test.ts`
-  passed **unmodified**, confirming default-mode behavior is unchanged;
-  only one pre-existing assertion was deliberately updated
-  (`downloadActions.test.ts`'s folder-open error message, generalized since
-  it's no longer specifically an "OS version" failure). New tests added for
-  every new state/branch: `settings/downloadLocationStore.test.ts`,
-  `settings/DownloadLocationManager.test.ts`, and custom-location
-  `describe` blocks added to `downloadExistence.test.ts`,
-  `blobUtil.test.ts`, `downloadActions.test.ts`, `folderIdentity.test.ts`
-  (including a regression test pinning the tree-scoped document URI shape
-  from the defect above).
-
-## Physical-Device Verification
-
-All exercised live on RMX3997 (`69DADENFONAIOZS4`), reloaded via Metro
-(JS-only change, no new native dependency — `react-native-saf-x` was
-already linked).
-
-**Default location (regression):** re-downloaded the baseline file after
-reload — landed at `Download/Relay/`, correct content; Open launched the
-same FileProvider chooser as the pre-change baseline; behavior pixel- and
-log-identical to the recorded baseline above.
-
-**Custom location:** picked a real folder (`RelayCustom`, created via the
-system picker's own "Create new folder") from the new Settings screen.
-- Switching to it immediately downgraded the already-downloaded default
-  items back to "Download" (existence re-derived against the new root) —
-  confirmed via `adb shell find` that neither `Download/Relay/`'s contents
-  nor their bytes were touched.
-- File and folder (with nested subfolder) downloads landed at
-  `/storage/emulated/0/RelayCustom/...`, correct content and structure,
-  confirmed via `adb shell cat`/`find`.
-- Open (file and, after the fix above, folder) both resolved correctly.
-- Folder-download-complete notification fired and, tapped, opened
-  DocumentsUI directly at `RelayCustom > notif_test` — a second, distinct
-  folder shared and downloaded specifically to exercise this path.
-- External deletion (`adb shell rm`) of a custom-location file correctly
-  reverted its row to "Download".
-- Duplicate-name suffixing: sharing a second, different file also named
-  `baseline_file.txt` and downloading it produced
-  `baseline_file (1).txt` at the custom root with the correct (second
-  file's) content — the same conflict algorithm as default mode, now
-  proven under a custom root too.
-- App restart (full `am force-stop` + relaunch, not just a Metro reload):
-  Settings still showed `RelayCustom`; a download made after restart still
-  landed there.
-- Reset to Default: Settings reverted to "Default (Downloads/Relay)";
-  default-location rows correctly reported "Open" again (untouched, still
-  physically present); custom-location-only rows correctly reported
-  "Download" (not present at the now-active default root). Nothing was
-  moved or deleted on either side.
-
-**Failure/revocation path:** `pm revoke`/a settings-UI toggle for a
-per-folder SAF grant is not exposed on this OEM (ColorOS/RealmeUI) shell —
-consistent with the `pm revoke`/`pm clear` `SecurityException`s already
-documented in this notebook's P14.2 entry. Instead, deleted the
-granted folder itself (`adb shell rm -rf`) to exercise the closest
-available failure mode. Finding: **the SAF permission grant survives
-folder deletion** — `hasPermission(treeUri)` kept returning `true` (a
-grant is an OS-level permission record independent of whether the target
-document still exists), so Settings showed no revoked-grant warning for
-this specific scenario — expected, not a bug, and worth recording since it
-means `hasPermission` alone cannot detect "the folder is gone." What *is*
-exercised and confirmed safe: attempting a download to the now-nonexistent
-destination failed gracefully — `SafX.copyFile` rejected
-(`ENOENT: Missing file for primary:RelayCustom at
-/storage/emulated/0/RelayCustom`), caught by `publishToCustomLocation`'s
-existing best-effort `catch`, logged via `console.warn`, and the transfer's
-row correctly stayed "Download" (re-downloadable) rather than falsely
-reporting success or crashing the app.
-
-## Problems Discovered
-
-- The "Invalid root Uri" folder-open defect above — found and fixed within
-  this milestone (required for P14.3 correctness, not a pre-existing
-  issue).
-- **Pre-existing, unrelated to this milestone**: `useDownloadExistence`'s
-  on-device existence check is keyed by a shared file's declared
-  `file_name`, not by whatever unique on-device name conflict-resolution
-  actually assigned it. Observed live: after downloading two different
-  shared files that both happen to be named `baseline_file.txt` (the
-  second correctly saved as `baseline_file (1).txt` on disk), the second
-  file's row still shows "Open" the moment *any* file named
-  `baseline_file.txt` exists at the current destination — even one
-  belonging to the *first*, unrelated shared file. Tapping "Open" on that
-  row would open the wrong file's content. This bug is identical in
-  default mode and predates P14.3 entirely (confirmed by inspection —
-  `downloadStatus.ts`/`useDownloadExistence.ts` were not touched by this
-  milestone); switching download locations only made it easier to notice
-  because it surfaces sooner with fewer files. **Not fixed** — out of this
-  milestone's scope per its own instructions ("only fix a discovered
-  prerequisite bug if required for P14.3 correctness"); documented here for
-  a future milestone.
-
-## Documentation Synchronization
-
-- **README.md:** added a Features bullet for the configurable download
-  location — this is exactly the kind of user-facing capability that
-  section already documents (discovery, pairing, streaming, notifications).
-- **CLAUDE.md:** unchanged — this milestone adds a contained feature within
-  the existing Android domain structure and layered architecture; it
-  introduces no new technology (Rule 2), no new layer-boundary rule, and no
-  backend change. Matches the P14.1/P14.2 precedent of leaving this file
-  alone for feature work that doesn't change a durable project-wide rule.
-- **docs/11_File_Transfer.md:** reviewed — its §6 download-side-state
-  description ("resolved on-device directory", `folderIdentity.ts`) was
-  already written abstractly enough to remain accurate; it never hard-coded
-  `Downloads/Relay` as a protocol statement. Unchanged.
-- **docs/14_Testing_Plan.md:** unchanged, following the same P14.1/P14.2
-  precedent — sub-milestones are tracked in this QA notebook.
-- **.gitignore:** unchanged — the new persisted setting lives in the app's
-  own private on-device storage (`DocumentDir`), not in the repository; no
-  new repo-tracked generated artifact was introduced.
-
-## Remaining Limitations
-
-- **True SAF grant revocation was not exercised live** — this OEM shell
-  exposes no command or settings UI to revoke a single persisted
-  per-folder grant (see Failure/revocation path above); the closest safe
-  substitute (deleting the underlying folder while the grant remains
-  valid) was tested instead and confirmed to fail gracefully.
-- **The pre-existing same-basename existence-status collision** documented
-  above under Problems Discovered remains unfixed, by design (out of
-  scope).
-- **`downloadedFilePath`'s custom-mode branch still returns
-  `react-native-saf-x`'s own `stat().uri`** (a tree-shaped URI) rather than
-  the tree-scoped document URI `buildCustomTreeDocumentUri` now builds for
-  folders. This was deliberately left as-is: it was verified live to work
-  correctly for file-open (`ContentResolver` reads don't go through
-  DocumentsUI's root-validation path), and changing a call site with no
-  observed defect would be scope creep beyond what P14.3 requires — noted
-  here in case a future file-open edge case ever surfaces the same class of
-  issue the folder case did.
+**Pre-existing defect noticed, not fixed (out of scope):** existence
+checks are keyed by a shared file's raw `file_name`, not by whichever
+disambiguated on-device name it actually got — two different files sharing
+a basename can show each other's status. (This is the same defect P16
+later fixed for standalone files.)
 
 ---
 
 # Milestone P14.4 — Transfer History Reset
 
-## Architecture Investigation (before any code change)
+**Feature:** "Clear History" on the Transfers list. **Architecture
+decision: Android-local filter only, never a backend delete** —
+`TransferRepository` has no delete method by design, `transfers` rows are
+explicitly permanent per `docs/13_Database_Design.md` §10, and the
+desktop's own `GET /transfers` is unscoped across every device, so a
+backend delete triggered from Android would silently erase state other
+paired parties still rely on. A transfer is "historical" once its status
+leaves `in_progress` (covers both a transfer streaming right now and one
+merely sitting in the local FIFO queue, since queueing has no backend
+status of its own). Persisted as a small `{ clearedAt }` JSON marker, same
+pattern as `folderIdentity.ts`.
 
-Traced the full transfer lifecycle before touching anything:
+**Defect found and fixed during live verification.** Backend timestamps
+are naive (no UTC designator) but represent UTC; JavaScript's `Date`
+constructor parses a timezone-less ISO string as **local** time. On this
+device (UTC+5:30), a transfer that finished a full minute *after* a reset
+was incorrectly hidden, since its parsed time landed 5.5 hours before the
+true UTC cutoff. Fixed with a `parseTimestamp()` helper that forces UTC
+interpretation regardless of device timezone.
 
-- `backend/app/models/transfer.py`: one `Transfer` row per transfer, "doubles
-  as transfer history"; `status` is `in_progress | completed | failed |
-  cancelled` (`app/models/enums.py`). No "queued" backend status exists.
-- `backend/app/repositories/transfer_repository.py`: **"No delete method: per
-  the schema design, transfer rows are never removed by normal operation —
-  they are the transfer history."** `docs/13_Database_Design.md` §10 states
-  the same invariant independently, and further: `GET /transfers` for the
-  desktop (`requesting_device is None`) returns `list_history()` — every
-  device's rows, unscoped. Android's own view (`RequestingDeviceDep`) is
-  scoped to `list_by_device`.
-- `backend/app/services/transfer_service.py`: both directions auto-accept on
-  propose; a `Transfer` row is created immediately as `IN_PROGRESS`. No
-  accept/reject step remains. `cancel_transfer` is the only other status
-  transition the service performs (`IN_PROGRESS -> CANCELLED`);
-  `COMPLETED`/`FAILED` are set only by `transfer_stream_service.py`'s
-  `_finalize` (on successful completion, an `OSError` mid-read/write, a
-  dropped connection, or a stalled-write timeout) or by
-  `reconcile_interrupted_transfers` (startup sweep: any row still
-  `IN_PROGRESS` after an unclean shutdown becomes `FAILED`).
-- `android/src/streaming/TransferStreamManager.ts`: "Queued" is a purely
-  client-side, in-memory FIFO (`queue`) for a transfer whose `start()` call
-  arrived while another was already streaming — the backend row is already
-  `IN_PROGRESS` the instant it's proposed, indistinguishable server-side from
-  one actually streaming. `isQueued()`/`isActive()` are local-only.
-- `android/src/screens/transfers/TransferListScreen.tsx`: renders
-  `GET /transfers` (already device-scoped) flat, newest-first, no existing
-  history/filter/reset control anywhere. Confirmed via
-  `grep -r "delete\|purge\|reset\|clear"` across `backend/app` and
-  `android/src` that no transfer-history deletion/reset operation existed
-  anywhere in the codebase prior to this milestone.
-- `android/src/files/folderIdentity.ts`: a *separate* local-only JSON
-  registry (shared_folder_id → resolved on-device root name +
-  reconciled-children snapshot), deliberately not derived from Transfer
-  history (its own doc comment explains why — an orphaned completed
-  Transfer row for a since-removed file would otherwise permanently poison
-  folder-completion checks). Confirmed this registry is untouched by
-  anything this milestone adds.
-- `android/src/screens/settings/SettingsScreen.tsx` /
-  `settings/DownloadLocationManager.ts` (P14.3): the download destination is
-  independent, local, persisted state; confirmed no coupling to Transfer
-  history exists in either direction.
-- No `AsyncStorage`/MMKV dependency exists in this app (confirmed via
-  `package.json` and `folderIdentity.ts`'s own doc comment, which explains
-  why one wasn't added for P13.2 either) — any new local-only persistence
-  needed to follow the existing `react-native-blob-util` JSON-file pattern
-  (`folderIdentity.ts`, `settings/downloadLocationStore.ts`) rather than
-  introduce a new technology (CLAUDE.md Rule 2).
-- Read `docs/11_File_Transfer.md`, `docs/13_Database_Design.md` §6-11,
-  `docs/14_Testing_Plan.md`, `docs/15_QA_NOTEBOOK.md`, `README.md`,
-  `CLAUDE.md`. No conflicts found between them on this topic — all
-  consistent with "transfer rows are never deleted by normal operation."
-
-## Physical Baseline (before any code change)
-
-Device: physical RMX3997, ADB serial `69DADENFONAIOZS4`. Backend (port
-8000, PID confirmed a child of the running Electron desktop process) and
-Metro (port 8081) already running from a prior live session; Relay already
-paired and running in the foreground, reachable over the phone's hotspot.
-The backend's `relay.db` already held ~500 transfers from prior milestones'
-live verification — used as-is rather than reset, confirming the feature
-works against real accumulated history, not a clean slate.
-
-Shared a fresh, dedicated `p144/` set of test files/folders via the
-backend's loopback API (`POST /files`, `POST /folders` — legitimate,
-since the desktop's own unauthenticated routes are loopback-trusted, and
-driving them this way is equivalent to using the desktop UI without needing
-to script Electron itself) and drove every scenario from the **real**
-Android app via `adb shell input tap`, screenshots, and direct SQLite/API
-inspection:
-
-- **Completed file** (`p144_file.txt`): downloaded, confirmed `completed` in
-  the backend, "Open" launched Android's real "Open with" chooser.
-- **Completed folder** (`folderX`, one nested file): downloaded, confirmed
-  both children `completed`, "Open" launched DocumentsUI on the real
-  on-device content (byte sizes cross-checked against the source files).
-  Incidentally surfaced a **pre-existing, unrelated** defect — see Problems
-  Discovered.
-- **Active + queued (race)**: shared two large (60 MB, then 400 MB) files,
-  tapped Download on both back-to-back — confirmed via screenshot and
-  `SELECT` on `transfers` that one was genuinely `in_progress` with
-  advancing `bytes_transferred` while the other sat at `in_progress`/`0`
-  bytes with the Android UI correctly showing "Queued" (`TransferStreamManager.isQueued`).
-- **Stuck/zombie `in_progress` row**: shared a file, deleted its source
-  file on disk, then tapped Download. Found and confirmed a **pre-existing,
-  unrelated** defect — see Problems Discovered — where the row is
-  permanently stuck `in_progress` server-side despite the Android UI
-  locally rendering "Failed". Kept deliberately as a hostile test case for
-  the reset feature (see Physical-Device Verification below).
-- **Cancelled**: started a 1.6 GB download, cancelled it mid-stream via the
-  real Cancel button on `TransferProgressDetail`; confirmed `cancelled` in
-  the backend with a genuine partial `bytes_transferred`.
-- **Custom download location (P14.3)**: created a real folder via the
-  system SAF picker (`RelayP144Custom`), granted access, downloaded a file
-  into it — confirmed via `adb shell find`/`ls` it landed under
-  `/storage/emulated/0/RelayP144Custom/`, not `Downloads/Relay`.
-- **Desktop view**: confirmed via `GET /transfers` with no device token
-  (the desktop's own unauthenticated, unscoped call) that it returns every
-  device's full history, unscoped — establishing that a backend-side delete
-  triggered from Android would reach into state the desktop treats as its
-  own permanent, shared record.
-- A genuine backend `FAILED` row could not be safely reproduced live within
-  this milestone's time budget — see Remaining Limitations.
-
-## Root Cause / Design Gap
-
-Not a defect — a genuinely unimplemented feature, same shape as P14.3. The
-gap: `TransferListScreen` had no way to distinguish "history I no longer
-want to see" from "the underlying `Transfer` rows," and no local state of
-any kind existed to make that distinction.
-
-## Architecture Decision
-
-**Android-local history reset — never a backend delete.** Three
-independent facts, all confirmed above, rule out a backend-side delete:
-
-1. `TransferRepository` has no delete method by design, and
-   `docs/13_Database_Design.md` §10 states `transfers` rows are "never
-   deleted by normal operation" — a backend delete would contradict an
-   explicit, current architectural invariant (CLAUDE.md Rule 1: never
-   redesign the architecture unless explicitly instructed).
-2. The desktop's `GET /transfers` returns every device's history, unscoped.
-   A backend delete triggered from Android would silently remove state the
-   desktop — and any other paired device — still shows as its own
-   permanent record, with no architectural basis for Android to own that
-   action unilaterally.
-3. The milestone's own instructions require exactly this reasoning before
-   choosing scope A (Android-local) vs. B (backend) vs. C (combined) —
-   given (1) and (2), only (A) is safe.
-
-**Eligibility ("what is history"):** a transfer is historical the instant
-its backend `status` leaves `in_progress` (`completed`/`failed`/
-`cancelled`) — not a hand-picked subset. `in_progress` alone is the correct
-boundary because it covers *both* a transfer genuinely streaming right now
-*and* one merely sitting in `TransferStreamManager`'s local FIFO queue
-behind it (queueing has no backend status of its own — confirmed above), so
-filtering on backend status can never hide a transfer that is still
-operational, and never needs a second, Android-only "is this queued" check
-layered on top. `failed` and `cancelled` are included in history — the
-codebase's own vocabulary (`transfer_service.py`,
-`TransferStreamManager.ts`) repeatedly groups `completed`/`failed`/
-`cancelled` together as "terminal," in contrast to the sole non-terminal
-`in_progress`.
-
-**Persistence:** a small JSON marker (`{ clearedAt: <ISO timestamp> }`)
-under this app's private storage, read/written via `react-native-blob-util`
-— the exact pattern `files/folderIdentity.ts` and
-`settings/downloadLocationStore.ts` already established for local-only
-state with no backend equivalent, rather than adding AsyncStorage/MMKV as a
-new dependency (CLAUDE.md Rule 2; confirmed neither is already a
-dependency). `applyHistoryReset(transfers, clearedAt)` filters the already
-device-scoped `GET /transfers` list: any `in_progress` transfer is always
-kept; a terminal transfer is hidden only if it finished
-(`completed_at` ?? `started_at`) at or before `clearedAt`. A transfer that
-finishes *after* the reset stays visible, so "Clear History" then propose a
-new transfer works exactly like an ordinary empty-to-populated list.
-
-**UI:** a "Clear History" text control on `TransferListScreen` (below the
-existing upload-row header, in the existing red/destructive text style
-already used for errors elsewhere in this screen), disabled whenever there
-is nothing currently eligible to clear. Confirms via `Alert.alert` (the
-existing confirmation primitive used throughout this app — `FilesScreen.tsx`,
-`SettingsScreen.tsx` — no new dependency), with a destructive-styled
-"Clear History" button and explicit text: *"Completed, failed, and
-cancelled transfers will be removed from this list. Downloaded files are
-not deleted, and active or queued transfers are not affected."*
-
-## Defect Found and Fixed During Physical Verification
-
-**Backend timestamps are naive (no `Z`/UTC-offset) but the value is UTC —
-`new Date(...)` on Android silently parsed them as local time,
-mis-ordering the reset cutoff.** `Transfer.completed_at`/`started_at` are
-generated by `backend/app/utils/time.py`'s `utc_now()` and serialized by
-Pydantic as plain ISO strings with no timezone designator (confirmed via
-`curl http://127.0.0.1:8000/api/v1/transfers/509` — e.g.
-`"completed_at": "2026-08-08T18:19:50.537433"`). JavaScript's `Date`
-constructor treats a timezone-less ISO string as **local** time. On RMX3997
-(IST, UTC+5:30), a transfer that finished a full minute *after* a reset was
-incorrectly hidden by the very first live race test: its `completed_at`
-parsed 5.5 hours earlier than its true UTC instant, landing it before the
-UTC `clearedAt` cutoff. Root-caused by comparing `backend/relay.db` and the
-raw `GET /transfers/{id}` JSON against the app's (incorrect) rendered list.
-Fixed in `historyReset.ts`'s new `parseTimestamp()` helper: appends `Z`
-before parsing whenever no timezone designator is already present, forcing
-correct UTC interpretation regardless of device timezone. Re-verified live
-after the fix (app reloaded, same scenario re-run) — the post-reset
-transfer now correctly reappeared. A regression test
-(`historyReset.test.ts`) pins this using an explicitly timezone-less
-`completed_at` string, independent of the test runner's own timezone.
-
-This is a defect in code written *by this milestone* (the only place in the
-diff that compares a backend timestamp against a computed cutoff), not a
-pre-existing issue — fixing it was required for P14.4 correctness, not
-scope creep. `FilesScreen.tsx`'s own `new Date(shared_at)` calls have the
-same underlying naive-timestamp characteristic but only feed a
-`toLocaleString()` display and a stable sort order, not a hidden/shown
-correctness boundary; left unmodified as pre-existing and out of scope.
-
-## Files Changed
-
-New: `android/src/transfers/historyReset.ts`,
-`android/__tests__/transfers/historyReset.test.ts`.
-
-Modified: `android/src/screens/transfers/TransferListScreen.tsx` (loads/
-applies the clear-history marker, renders the Clear History control and its
-confirmation, filters the rendered list). No backend files changed, no
-desktop files changed.
-
-## Automated Tests
-
-- `npx jest`: 36 suites / 293 tests passed (292 pre-existing + 1 net new
-  suite of 13). Every pre-existing test passed unmodified.
-- `npx tsc --noEmit`: clean.
-- `npx eslint .`: 0 errors; the same 2 pre-existing `no-void` warnings in
-  `TransferStreamManager.ts` as every prior milestone, untouched by this
-  change.
-- New coverage (`historyReset.test.ts`): marker read/write (including a
-  corrupted-file and never-written case), `isHistoricalTransfer` for every
-  status, `applyHistoryReset` for a pre-cutoff hide, a post-cutoff keep, an
-  `in_progress` transfer never hidden regardless of age, a `started_at`
-  fallback when `completed_at` is null, a mixed active/historical list, and
-  the naive-timestamp regression above.
-
-## Physical-Device Verification
-
-All exercised live on RMX3997 (`69DADENFONAIOZS4`), reloaded via Metro
-(JS-only change, no new native dependency).
-
-| Scenario | Result |
-|---|---|
-| Completed file → reset | History row hidden; `p144_file.txt` remained on disk, still opened correctly, both before and after reset |
-| Completed folder → reset | Both rows hidden; nested folder and file remained on disk (`adb shell find`), Open still resolved real content |
-| Nested folder → reset | Same as above — full structure (`share_test/root.txt`, `share_test/nested/inner.txt`) intact after reset |
-| Failed transfer → reset | Not live-reproduced as a genuine backend `FAILED` row (see Remaining Limitations); eligibility verified via unit tests and code (grouped with completed/cancelled as terminal) |
-| Active transfer → reset | Tapped Clear History while a 400 MB download was genuinely mid-stream (312/400 MB observed) — continued uninterrupted to completion, no cancellation, no duplicate stream |
-| Queued transfer → reset | The second, FIFO-queued 400 MB download stayed queued through the reset, then started automatically the moment the first finished — exactly as without the reset |
-| Active + queued → reset | Both preserved simultaneously in the same live test above; no backend errors, no duplicate transfer, no SQLite errors observed in backend logs |
-| Reset → new transfer | The queued transfer's completion (after the reset point) correctly reappeared in the list once the timezone defect above was fixed |
-| App restart after reset | `am force-stop` + relaunch (twice) — the clear-history marker persisted correctly both times; previously-cleared history stayed hidden, the still-`in_progress` zombie row stayed visible |
-| Custom download location → reset | Downloaded into a real custom SAF folder (`RelayP144Custom`), cleared history — file remained at the custom path (`adb shell ls`), Settings still showed the custom location unchanged, "Reset to Default" afterward worked normally |
-| FilesScreen after reset | Every already-downloaded item (file, folder, custom-location file) correctly kept showing "Open" after repeated resets — existence derivation is fully independent of Transfer history, confirmed unaffected |
-| Open after reset | Re-verified: file Open (Android's "Open with" chooser) and folder Open (DocumentsUI, correct nested content) both still worked after multiple resets |
-| Backend state | `GET /transfers` (desktop, unscoped) showed the full, untouched history (100 of the DB's ~500+ rows returned by the endpoint's own limit) after every Android-side clear — confirming zero backend calls were made |
-| Desktop behavior | Unaffected by design and confirmed live — Android's reset is a pure local list filter with no network call |
-
-Also confirmed a genuine cancelled-transfer round trip: started a 1.6 GB
-download, cancelled it mid-stream via the real Cancel button (partial
-`bytes_transferred` confirmed in the backend), then cleared history —
-the cancelled row was hidden and no partially-downloaded file existed in
-public storage to begin with (a cancelled transfer's bytes are never
-published — existing, pre-P14.4 behavior), so there was nothing for the
-reset to endanger.
-
-## Problems Discovered
-
-- **The naive-timestamp/local-time defect above** — found and fixed within
-  this milestone (required for P14.4 correctness).
-- **Pre-existing, unrelated to this milestone**: a shared file whose source
-  is deleted from disk *after* being shared but *before* the first download
-  byte is requested produces a permanently stuck `in_progress` `Transfer`
-  row. `TransferStreamService.resolve_download_source` raises
-  `ValidationError` (mapped to HTTP 400) *before* the streaming response —
-  and therefore `active_stream_registry`/`_finalize` — is ever reached, so
-  the row never transitions to `FAILED`. Android's own
-  `TransferStreamManager` catches the resulting `ApiError` and shows
-  "Failed" locally (`mergeLiveTransferState`'s local-terminal-wins rule),
-  masking that the backend row is still genuinely `in_progress` forever —
-  confirmed live (`p144_fail_source.txt`, transfer id 505, stayed
-  `in_progress` throughout this entire milestone). This transfer correctly
-  stayed visible through every "Clear History" tap in this milestone
-  (per this milestone's own `in_progress`-is-never-hidden rule), which is
-  the *safe* outcome, but the underlying zombie-row bug itself predates
-  P14.4, is unrelated to it, and was not fixed here (out of scope per this
-  milestone's own instructions — "do not fix unrelated issues unless
-  required for P14.4 correctness"). Worth a future milestone: either have
-  `resolve_download_source`'s failure also finalize the transfer as
-  `FAILED`, or have `reconcile_interrupted_transfers` run periodically, not
-  only at startup.
-- **Pre-existing, unrelated to this milestone**: `shared_folder_id` reuse
-  across a `shared_folders` table that was reset/repopulated (as this dev
-  environment's `relay.db` had been, across prior milestones) can collide
-  with `files/folderIdentity.ts`'s registry, which is keyed by the numeric
-  id alone. Observed live: downloading a freshly-shared folder that
-  happened to be assigned `shared_folder_id = 1` (reused from an unrelated
-  folder in a prior session, literally named `share_test`) resolved to the
-  *old* folder's `localRoot` ("share_test") instead of the new folder's own
-  name ("folderX") — confirmed the *content* was still correct (byte sizes
-  matched the new folder exactly), only the on-device directory name was
-  the stale one. `folderIdentity.ts`'s own doc comment documents a related
-  but distinct limitation (registry survives app reinstall); this is the
-  same class of problem from database-side id reuse instead. Not fixed —
-  out of scope for P14.4, and this milestone's own feature never reads or
-  writes that registry, so it cannot make this pre-existing issue worse.
-
-## Documentation Synchronization
-
-- **README.md:** added a Features bullet for the Android transfer-history
-  reset, matching the existing convention for user-facing capabilities
-  (discovery, streaming, download location, etc.).
-- **docs/13_Database_Design.md:** added one clarifying sentence next to the
-  existing "`transfers` rows are never deleted by normal operation" line,
-  noting that P14.4's Android reset is a client-local filter that keeps
-  this invariant intact — this durable fact belongs exactly where the
-  invariant it depends on already lives, so a future reader doesn't have to
-  rediscover it.
-- **CLAUDE.md:** unchanged. The relevant durable invariant ("`transfers`
-  rows are never deleted by normal operation") already existed in
-  `docs/13_Database_Design.md` before this milestone and needed no new
-  restatement; this milestone introduces no new technology (Rule 2), no
-  new layer-boundary rule, and no backend change — matching the
-  P14.1/P14.2/P14.3 precedent of leaving this file alone for contained
-  feature work. Per this milestone's own instructions, not modified merely
-  to record that P14.4 happened.
-- **docs/11_File_Transfer.md:** reviewed — its transfer-lifecycle
-  description does not claim anything about client-side history
-  presentation (only the backend lifecycle, which is unchanged); left
-  unmodified.
-- **docs/14_Testing_Plan.md:** unchanged, following the same
-  P14.1/P14.2/P14.3 precedent — sub-milestones are tracked in this QA
-  notebook.
-- **.gitignore:** unchanged — the new marker file lives in the app's own
-  private on-device storage, not in the repository; no new repo-tracked
-  generated artifact was introduced.
-
-## Remaining Limitations
-
-- **A genuine backend-side `FAILED` transfer was not reproduced live**
-  within this milestone's time budget. Two safe attempts were made: (1) a
-  source file deleted before download surfaces the *pre-existing zombie-row
-  bug* above instead of a clean `FAILED` transition; (2) disabling the
-  phone's Wi-Fi client radio had no effect on the transfer in progress,
-  because in this test setup the phone is the Wi-Fi **hotspot** (access
-  point) the desktop connects to, not a Wi-Fi client — `svc wifi disable`
-  only toggles client-mode radio state, not hotspot/tethering. Restarting
-  the shared backend process (which would reconcile any stuck `in_progress`
-  row to `FAILED` via `reconcile_interrupted_transfers`) was deliberately
-  avoided, since it is a child process of the live Electron desktop app
-  this session did not start and was not asked to restart. `FAILED`
-  eligibility for history reset is instead established by: the backend's
-  own status enum and terminal-status grouping (code-reviewed above), and
-  direct unit-test coverage in `historyReset.test.ts`. A genuinely cancelled
-  transfer *was* reproduced and verified live as a substitute terminal-state
-  test, exercising the same `applyHistoryReset` code path a `failed` row
-  would.
-- **The two pre-existing, unrelated defects** documented above (the
-  zombie-`in_progress` row on early source-file deletion, and
-  `shared_folder_id` reuse colliding with the local folder-identity
-  registry) remain unfixed, by design (out of this milestone's scope).
+**Two pre-existing, unrelated defects noticed during verification, not
+fixed (out of scope):** (1) a SEND transfer whose source file is deleted
+before its first download byte is requested gets stuck `in_progress`
+forever, since the validation failure happens before any code path that
+could finalize it — fixed later in Milestone P15. (2) `shared_folder_id`
+reuse (only reachable via a reset/repopulated database) can collide with
+`folderIdentity.ts`'s numeric-id-keyed registry — proposed as Milestone
+P17, still open.
 
 ---
 
-# Milestone P15 — Backend: A Download Whose Source File Disappears Before Streaming Starts Left the Transfer Stuck `in_progress` Forever
+# Milestone P15 — Backend: Zombie `in_progress` Transfer on a Disappearing Source File
 
-## Problem
+**Problem:** Flagged by P14.4: a SEND transfer whose source file is
+missing, unshared, or has changed size raises inside
+`resolve_download_source` — but that runs as a plain method call in the
+route handler, *before* the streaming response (and therefore `_finalize`)
+is ever constructed, so nothing on that path ever moves the `Transfer` row
+out of `IN_PROGRESS`.
 
-P14.4's own investigation flagged, but explicitly did not fix (out of that
-milestone's scope), a backend defect: `TransferStreamService
-.resolve_download_source` raises `ValidationError`/`NotFoundError` when a
-SEND transfer's source file is missing, unshared, or has changed size —
-but this check runs in the route handler *before* `stream_download` (and
-therefore `_finalize`) is ever reached, so nothing on that path ever moves
-the `Transfer` row out of `IN_PROGRESS`. The row stays stuck forever (or
-until the next backend restart's `reconcile_interrupted_transfers` sweep),
-misleading `GET /transfers/{id}` for any client still polling it, and — a
-consequence P14.4 itself surfaced live — a row in this state can never
-become eligible for P14.4's own "Clear History" filter, since that filter
-explicitly never hides a non-terminal transfer.
+**Fix:** `resolve_download_source` now wraps its existing validation in
+`try`/`except (ValidationError, NotFoundError)`: on any of its four raise
+conditions it calls the same `_finalize(transfer.id, FAILED, 0,
+failure_reason=str(exc))` every other terminal transition in this file
+already uses, then re-raises unchanged — the client-visible 400/404
+response is byte-for-byte identical to before; only the `Transfer` row's
+fate changes. `_finalize`'s existing already-terminal-wins guard means a
+transfer finalized by a race just before this runs is left untouched.
 
-## Requirements / Source of Truth
+**Why this fix over the alternative:** P14.4 floated running
+`reconcile_interrupted_transfers` periodically instead of only at startup
+— rejected as new scheduling infrastructure this codebase doesn't have
+anywhere else, for a defect class the chosen fix (fail fast, at the
+source) closes completely rather than just bounding.
 
-`docs/15_QA_NOTEBOOK.md`'s own Milestone P14.4 entry ("Problems
-Discovered"): *"Worth a future milestone: either have
-`resolve_download_source`'s failure also finalize the transfer as
-`FAILED`, or have `reconcile_interrupted_transfers` run periodically, not
-only at startup."* This is the only concretely-scoped, directly-flagged
-"next milestone" item in the codebase at the time P15 was scoped — see the
-requirements-review step of this milestone for the other candidates
-considered and why this one was chosen first.
-
-## Architecture Investigation (before any code change)
-
-- `backend/app/api/v1/transfers.py`'s `download_transfer` route: calls
-  `service.get_transfer_or_raise`, checks direction/status, then calls
-  `stream_service.resolve_download_source(transfer)` as a **plain method
-  call** (not inside the generator `stream_download` returns) — confirmed
-  this runs synchronously in the route, before `_WriteTimeoutStreamingResponse`
-  is ever constructed, so a raised exception here goes straight to the
-  centralized exception handlers (`ValidationError` → 400,
-  `NotFoundError` → 404) with no opportunity for anything downstream
-  (`stream_download`, `_generate_download`, `_finalize`) to run.
-- `backend/app/services/transfer_stream_service.py`'s
-  `resolve_download_source`: has four raise sites — `transfer.shared_file_id
-  is None` (unshared), `SharedFileService.get_shared_file_or_raise` (shared
-  file row deleted outright), missing/symlink/non-regular file on disk, and
-  a size mismatch since acceptance. None of them touch the `Transfer` row.
-  Confirmed `_finalize` (already used by every other terminal transition in
-  this same file — `_generate_download`'s `OSError`/`GeneratorExit`
-  handlers, `receive_upload`'s three failure branches) is idempotent and
-  transfer-id-based (re-fetches fresh via `_current`, only mutates when
-  still `IN_PROGRESS`), making it directly reusable here without
-  duplicating its already-terminal-wins guard.
-- `backend/app/services/transfer_service.py`'s
-  `reconcile_interrupted_transfers`: confirmed startup-only (called once
-  from `app/main.py`'s lifespan), matching the QA notebook's own prior
-  finding — the second option P14.4 floated (running it periodically) would
-  additionally require new scheduling infrastructure this codebase doesn't
-  have anywhere else, for a class of defect the first option (fail fast, at
-  the source) fully closes without it. Chose the first option as the
-  smaller, more targeted fix (CLAUDE.md: no unrelated
-  infrastructure/scope beyond what the task requires).
-- Confirmed via `backend/tests/services/test_transfer_stream_service.py`
-  that all four raise sites were already covered by
-  `pytest.raises(ValidationError)`-style tests, none of which asserted
-  anything about the `Transfer` row's resulting status — the tests actively
-  encoded the pre-fix (broken) behavior as acceptable, though never as a
-  positive assertion that it stayed `IN_PROGRESS`.
-- Read `docs/11_File_Transfer.md` §13 ("Missing source file" is listed as a
-  failure to handle, with no claim about *how*) and `docs/13_Database_Design.md`
-  §7 (the `transfers.status` enum and `completed_at` semantics) — neither
-  document asserts the pre-fix behavior as correct; nothing to reconcile.
-
-## Requirements Review: Other Candidates Considered
-
-Two other pre-existing, documented-but-unfixed defects were found in the
-QA notebook and considered for P15 before this one was chosen:
-
-1. **Same-basename existence-status collision** (Milestone P3): two
-   different shared files downloaded with the same basename can make
-   Android's Files screen show "Open" for the wrong file's content.
-   Android-only, `files/downloadStatus.ts`/`useDownloadExistence.ts`.
-2. **`shared_folder_id` reuse** (Milestone P14.4): a `shared_folders`
-   table whose auto-increment ids get reused (only reachable via a reset/
-   repopulated database, not normal operation) can collide with
-   `folderIdentity.ts`'s local registry.
-
-Both are real and worth fixing, but neither was as concretely scoped as
-the zombie-row defect (P14.4 gave two named implementation options for it
-specifically), and both are Android-side UI-correctness issues rather than
-a backend data-integrity issue that also blocks a just-shipped feature
-(P14.4's own history reset) from ever working against this class of row.
-Chosen order, per this milestone's own instructions (architectural
-dependency, risk of regression, ease of physical verification, minimizing
-unrelated changes): **P15 = this backend fix** (self-contained, one
-service file, directly and easily reproducible on the physical device
-without any UI ambiguity); the other two are candidates for **P16**
-(same-basename collision) and **P17** (`shared_folder_id` reuse), in that
-order, should they be taken up next — not started as part of this
-milestone.
-
-## Physical Baseline (before any code change)
-
-Device: physical RMX3997, ADB serial `69DADENFONAIOZS4`, already paired
-and in the foreground. Backend (port 8000) and Metro (port 8081) were
-already running from a prior live session — confirmed via `netstat` and
-`adb devices` — with the backend reachable over the phone's own hotspot
-(`10.169.164.233`), matching every prior milestone's setup in this
-notebook.
-
-Reproduced live, against the **pre-fix** code, via the real app:
-
-1. Shared a fresh, dedicated test file (`p15_zombie_test.txt`, 31 B) via
-   the desktop's own loopback `POST /files` (legitimate per P13/P14.4's own
-   precedent — equivalent to using the desktop UI).
-2. Deleted the file's source from disk.
-3. Tapped **Download** on it from the real Files screen (screenshot
-   confirmed the row, then the tap).
-4. `GET /api/v1/transfers/{id}` confirmed `status: "in_progress"`,
-   `bytes_transferred: 0`, indefinitely — the Android Transfers screen's
-   own row matched exactly: **"In progress · 0 B / 31 B"**, never settling,
-   with "Clear History" left disabled by the P14.4 filter (a non-terminal
-   transfer is never eligible). `backend/logs/relay.log` confirmed the
-   exact defect: `Validation error on GET
-   /api/v1/transfers/513/download: The source file is no longer
-   available.` with no subsequent "Download completed"/"Download failed"
-   log line ever following — the row was permanently orphaned.
-5. Independently cross-checked against transfer id 505
-   (`p144_fail_source.txt`), the exact zombie row P14.4's own live session
-   had already produced and left stuck — still `in_progress` in the
-   database at the start of this milestone, confirming the defect had
-   persisted, unfixed, since that session.
-
-## Root Cause
-
-`resolve_download_source` validates the download's source and raises on
-failure, but has no side effect on the `Transfer` row it's validating for
-— finalizing that row was implicitly assumed to happen elsewhere, but
-nothing downstream of this specific raise ever runs.
-
-## Solution
-
-`resolve_download_source` (`backend/app/services/transfer_stream_service.py`)
-now wraps its existing validation body in a `try`/`except
-(ValidationError, NotFoundError)`: on any of its four existing raise
-conditions, it calls the same `_finalize(transfer.id,
-TransferStatus.FAILED, 0, failure_reason=str(exc))` every other terminal
-transition in this file already uses, logs a `warning` (matching this
-file's existing log-then-finalize pattern in `_mark_connection_lost`), then
-re-raises the original exception unchanged — so the route's response to
-the client (400/404, same message) is byte-for-byte identical to before;
-only the `Transfer` row's fate changes. `_finalize`'s own
-already-terminal-wins guard means a transfer cancelled or otherwise
-finalized by a race just before this runs is left untouched, not
-overwritten.
-
-Considered and rejected: making `reconcile_interrupted_transfers` run
-periodically (P14.4's second suggested option) — a broader, new piece of
-scheduling infrastructure that would still leave a row stuck for up to a
-full sweep interval, versus finalizing it in the same request that
-discovers the problem. The chosen fix is strictly smaller and fully closes
-the defect rather than bounding it.
-
-## Files Changed
-
-Modified: `backend/app/services/transfer_stream_service.py`
-(`resolve_download_source`, `NotFoundError` import).
-
-Test: `backend/tests/services/test_transfer_stream_service.py` — the three
-existing raise-path tests
-(`test_resolve_download_source_raises_when_shared_file_unshared`,
-`_when_file_missing`, `_when_size_changed`) now additionally assert the
-`Transfer` row reaches `FAILED` with the matching `failure_reason`; one new
-test, `test_resolve_download_source_leaves_already_terminal_transfer_untouched`,
-pins the already-terminal-wins guard (a transfer cancelled just before its
-source is found missing keeps `CANCELLED`, not overwritten to `FAILED`).
-
-No Android or desktop files changed — this is a backend-only,
-service-layer fix.
-
-## Automated Tests
-
-- `python -m pytest` (backend): 340 passed, 2 skipped (339 + 1 net new).
-  Every pre-existing test passed with only the three assertions above
-  added, none of the pre-fix behavior needed relaxing.
-- `ruff check app tests`: clean.
-- Android, Desktop: untouched by this milestone; not re-run.
-
-## Physical-Device Verification
-
-Re-verified live on RMX3997 after the fix, restarting the dev backend
-process (confirmed via `Get-CimInstance`/process tree that it was a
-standalone `uvicorn` process started directly by a prior automated
-session's shell, **not** a child of the running Electron desktop app —
-unlike the child-process case P14.4 deliberately avoided restarting, this
-one was safe to restart) — the restart's own
-`reconcile_interrupted_transfers` sweep first retroactively cleared the
-pre-existing stuck row (505/513) to `FAILED` with `"Interrupted by backend
-restart."`, confirmed via `GET /transfers/513` and the Files screen's
-"Retry" button/red error text, replacing the indefinite "Downloading..."
-state.
-
-Then, against the **running, fixed** backend, with no further restart:
-
-| Step | Result |
-|---|---|
-| Shared a fresh file (`p15_zombie_test_v2.txt`, 30 B) via loopback `POST /files` | `id=2` |
-| Deleted its source from disk | confirmed via `ls` |
-| Tapped Download on the real Files screen | — |
-| Files screen, immediately | **"The source file is no longer available."** in red, with a **Retry** button — no longer "Downloading..." |
-| Transfers screen | Row shows **Failed** (not "In progress") |
-| `GET /api/v1/transfers/{id}` | `status: "failed"`, `failure_reason: "The source file is no longer available."`, `completed_at` set ~130ms after `started_at` |
-| `backend/logs/relay.log` | New line: `WARNING ... Download source unavailable, failing transfer: transfer_id=514 reason=The source file is no longer available.` |
-| P14.4 integration | Both the reconciled row and the freshly-failed row now show **Failed** on the Transfers screen with **Clear History enabled** (red, tappable) — confirming this fix makes a P14.4 "Clear History" pass actually reach this class of row for the first time, closing the exact gap P14.4's own physical verification flagged it could not reach |
-
-Cleanup: unshared both test files (`DELETE /api/v1/files/{id}`); the
-device's own pre-existing pairing and unrelated content were left
-untouched, matching this notebook's established cleanup convention.
-
-## Problems Discovered
-
-- None new. (A brief, ultimately benign puzzle during cleanup — two
-  `DELETE /files/{id}` calls appeared to 404 unexpectedly — was root-caused
-  to the first of two redundant delete attempts already having succeeded
-  silently on a 204 No Content response; not a defect.)
-
-## Defects Fixed vs. Intentionally Deferred
-
-**Fixed:** the zombie-`in_progress` row on a SEND transfer whose source
-becomes invalid before streaming starts (this milestone).
-
-**Intentionally deferred (not part of P15):** the same-basename
-existence-status collision (P3) and the `shared_folder_id` reuse defect
-(P14.4) — see Requirements Review above; proposed as P16 and P17
-respectively, not started.
-
-## Documentation Synchronization
-
-- **docs/15_QA_NOTEBOOK.md:** this entry.
-- **docs/11_File_Transfer.md, docs/13_Database_Design.md:** reviewed —
-  neither document asserted the pre-fix (broken) behavior, so neither
-  needed correcting; both already describe "missing source file" and the
-  `transfers.status` enum abstractly enough to remain accurate.
-- **CLAUDE.md:** unchanged — this is a contained bug fix within the
-  existing `TransferStreamService`, reusing its own existing `_finalize`
-  helper; it introduces no new technology (Rule 2), no new layer-boundary
-  rule, and no new durable invariant beyond what `_finalize`'s
-  already-established contract already covers. Matches the P14.1–P14.4
-  precedent of leaving this file alone for contained fixes.
-- **README.md:** unchanged — not a new user-facing feature; the visible
-  effect (a failed download now correctly shows "Failed"/"Retry" instead
-  of hanging on "Downloading...") is a correctness fix to already-documented
-  behavior, not a new capability to list.
-- **.gitignore:** unchanged — no new generated/local artifact.
-
-## Remaining Limitations
-
-- The two deferred defects (same-basename collision, `shared_folder_id`
-  reuse) remain unfixed, by design — proposed as P16/P17, not started.
-- This fix covers every raise path inside `resolve_download_source`
-  specifically (the only place P14.4 identified this gap). It does not
-  audit every other service method for the same "raises before any
-  terminal-state side effect" shape; none surfaced during this milestone's
-  investigation, but a systematic audit was outside this milestone's scope.
-
-## Verdict
-
-**P15 COMPLETE.**
+**Verified live:** restarting the dev backend first retroactively cleared
+a stuck row left over from the P14.4 session (via the existing startup
+sweep); a fresh repro against the running fixed backend showed the Files
+screen immediately reading "The source file is no longer available." with
+a Retry button, the Transfers screen showing "Failed," and — closing the
+exact gap P14.4 flagged — "Clear History" now able to reach this class of
+row for the first time.
 
 ---
 
 # Milestone P16 — Android: Same-Basename Existence/Identity Collision
 
-## Problem
+**Problem:** Milestone P3 fixed the *write* side of two same-named shared
+files colliding (`resolveAvailableMediaStoreName` gives them distinct
+on-device paths). Nothing fixed the *read* side: every existence check and
+the Open action still asked about the shared, undisambiguated
+`file.file_name`, so two different shared files with the same display name
+shared one on-device identity in the UI.
 
-Milestone P3 (this notebook, above) found and closed a *write-side* gap:
-`publishDownload` had no conflict handling, so two downloads landing on the
-same on-device name could silently collide. The fix
-(`resolveAvailableMediaStoreName`, later renamed
-`resolveAvailableDownloadName`) made the *physical* files land at distinct
-names ("report.txt" / "report (1).txt"). What P3 did not fix, and
-Milestone P15's Requirements Review explicitly deferred as this
-milestone's own starting point: nothing on the *read* side — existence
-checks, the Open action — ever learned about that disambiguation. Every
-read-side call kept asking about the shared file's own raw, undisambiguated
-`file_name`, so two different shared files sharing a basename read and
-wrote through what the UI believed was one shared identity.
+**Live reproduction confirmed this is worse than a stale label:** tapping
+Open on one file's row opened the **other** file's physical content —
+a genuine data-identity mix-up, not just a status glitch. Deleting one
+file's physical copy also flipped *both* rows back to "Download."
+(Confirmed folders do **not** share this defect — P13.2 already gave them
+a `shared_folder_id`-keyed identity.)
 
-## Requirements / Source of Truth
+**Identity decision:** key on `shared_file_id` (already stable, unique,
+and already threaded through every relevant API type) — not `transfer_id`
+(a file accumulates many transfers over its life; the identity that must
+stay stable is the file) and not a smarter display-name-based lookup
+(still a display-name-shaped identity, just obscured).
 
-`docs/15_QA_NOTEBOOK.md`'s own Milestone P15 entry ("Requirements Review:
-Other Candidates Considered"): *"Same-basename existence-status collision
-(Milestone P3): two different shared files downloaded with the same
-basename can make Android's Files screen show 'Open' for the wrong file's
-content."* Proposed there as P16, not started. Per this milestone's own
-instructions, the prior diagnosis was not assumed correct — Phase 1/2 below
-re-traced and re-reproduced it against the current (post-P15) codebase
-before any code change.
+**Fix:** Mirrored `folderIdentity.ts`'s already-proven shape exactly: a
+new, separate (not merged — a file has no reconciliation concept), disk-
+persisted `fileIdentity.ts` registry (`relay-file-registry.json`),
+resolved once before a standalone file's bytes start moving
+(`TransferStreamManager`'s `resolveDownloadRelativePath`) and reused by
+every later reference — the existence check, `computeFileRowState`,
+`handleOpen`, and the long-press menu's file-state derivation all now
+resolve through it instead of the raw `file_name`.
 
-## Phase 1 — Inspection (current implementation)
+**This is now a documented standing rule** — see `CLAUDE.md`'s "Android
+Download Identity (P16)" note: any new download-path code (existence
+checks, Open, notifications, reconciliation) must resolve identity through
+the appropriate id-keyed registry, never through `file_name`/`folder_name`
+directly.
 
-- `android/src/files/useDownloadExistence.ts`: an on-device existence cache
-  **keyed by a bare file-name string** (`Record<string, boolean>`), with no
-  concept of *which shared file* a name belongs to.
-- `android/src/screens/files/FilesScreen.tsx`: `computeFileRowState` read
-  `existence[file.file_name]` — the shared file's raw display name — and the
-  existence-verification effect called `verify(file.file_name)` for every
-  row whose latest Transfer was `completed`. `handleOpen` called
-  `openDownloadedFile(file.file_name, file.mime_type)`, and its re-verify
-  path (on a failed Open) called `verify(file.file_name)` too. All four call
-  sites used the same raw, undisambiguated name.
-- `android/src/streaming/TransferStreamManager.ts`'s
-  `resolveDownloadRelativePath`: for a standalone (non-folder) transfer,
-  simply `return transfer.file_name;` — no disambiguation at all upstream of
-  streaming. `blobUtil.ts`'s `resolveAvailableDownloadName` (P3) only ran
-  *after* the file finished downloading, inside `publishDownload`, and its
-  resolved `targetRelativePath` was discarded once used — never returned to
-  the caller, never persisted anywhere keyed by `shared_file_id`.
-- `android/src/files/folderIdentity.ts` (P13.2, Issue 1) had already solved
-  the structurally identical problem *for folders*: a `shared_folder_id`
-  -keyed, disk-persisted registry mapping to a disambiguated `localRoot`,
-  resolved once (before any bytes move) and reused for every later
-  reference (re-download, existence check, Open, notification). No
-  equivalent existed for standalone files — the gap was specifically
-  file-shaped, not a general architectural gap.
-- Backend (`backend/app/models/shared_file.py`,
-  `backend/app/schemas/shared_file.py`, `TransferResponse`): `shared_file_id`
-  is a stable, unique identifier already threaded through every relevant
-  Android API type (`TransferRequestResponse`, `TransferResponse`), already
-  used elsewhere in this exact file (`downloadStatus.ts`'s
-  `deriveDownloadStatus`/`latestSendTransferId`) to disambiguate rows.
-  Nothing new was needed from the backend — Phase 4/5's own conclusion.
+**Remaining limitation:** a `Transfer` that completed *before* this fix
+shipped has no registry entry until it's re-downloaded — until then it
+still falls back to the raw name and can transiently collide with a newly
+downloaded same-named file. A fresh download of either file immediately
+and permanently fixes that file's identity going forward; no retroactive
+backfill was attempted (fundamentally ambiguous after the fact).
 
-Grep for basename-based comparisons/registries confirmed the collision was
-confined to the standalone-file path: `folderDownloadStatus.ts`,
-`folderIdentity.ts`, and `useFolderReconciliation.ts` were already
-`shared_folder_id`-keyed throughout.
+**Also re-confirmed live, not fixed (Milestone P17 candidate):** the
+`shared_folder_id` reuse defect from P14.4 recurred during this
+milestone's own test setup (stale local registry entries from an earlier
+session collided with freshly-assigned ids) — worked around by clearing
+local test state, not fixed.
 
-## Phase 2 — Physical Reproduction (RMX3997, pre-fix)
+---
 
-Device: physical RMX3997, ADB serial `69DADENFONAIOZS4`, already paired,
-backend and Metro already running (matching every prior milestone's live
-setup), app in the foreground.
+# Cross-Cutting Lessons
 
-**Case A — same-named files.** Shared two distinct files via the desktop's
-own loopback `POST /files`, both named `report.txt` but with different
-content/size and different source paths (`shared_file_id=1`, 47 B, source
-A; `shared_file_id=2`, 65 B, source B). Downloaded both from the real Files
-screen. `adb shell ls`/`cat` on `/storage/emulated/0/Download/Relay/`
-confirmed P3's write-side fix still worked — two genuinely distinct
-physical files (`report.txt` = B's content, `report (1).txt` = A's
-content). Both rows showed **Open**.
+A few gotchas worth remembering independent of any single milestone above:
 
-Tapped **Open** on the 47 B row (file A). The chooser opened
-`report.txt` — **file B's physical content** ("P16 SOURCE B..."), not
-file A's own — confirmed on-screen via a text viewer. This is a genuine
-data-identity mix-up, not merely a stale status label.
-
-Deleted only `report.txt` (file B's physical copy) via `adb shell rm`, then
-returned to the Files screen. **Both** rows reverted to **Download** —
-including file A's row, whose own physical copy (`report (1).txt`) was
-never touched. Confirmed the documented collision: one file's disappearance
-flips the *other* same-named file's status too.
-
-**Case B — same-named folders.** Shared two distinct folders, both named
-`test`, with distinguishable single-file contents (`shared_folder_id=1`,
-16 B; `shared_folder_id=2`, 36 B). First attempt was contaminated by a
-live, separate instance of the deferred P17 defect (`shared_folder_id`
-reuse): the backend's fresh ids (1, 2) collided with stale
-`relay-folder-registry.json` entries from an earlier, unrelated milestone
-session, silently redirecting the new downloads into old, wrongly-named
-directories (`share_test`, `notif_test`) — documented, not fixed, per this
-milestone's explicit scope boundary (do not investigate P17 unless it
-blocks P16). Cleared the local registry/on-device leftovers (my own
-just-written test files only) and re-ran cleanly: the two `test` folders
-correctly disambiguated to on-device roots `test` / `test (1)`
-(`folderIdentity.ts`, P13.2), confirmed via `adb shell find`/`cat` showing
-two genuinely distinct directory trees. Deleting one folder's physical
-directory correctly flipped only that folder's row to **Download**, leaving
-the other's **Open** untouched — **folders do not reproduce this defect**;
-P13.2's existing `shared_folder_id`-keyed registry already isolates them
-correctly. This confirms the task's own caution not to assume the folder
-and file paths share an implementation shape — they don't.
-
-## Root Cause
-
-Two different shared files that happen to share a display name
-(`file_name`) have no on-device identity distinct from that name once P3's
-write-side renaming has occurred: nothing downstream of `publishDownload`
-ever recorded *which* `shared_file_id` actually claimed *which* resolved
-on-device name. Every read-side consumer (the existence cache, the Open
-action) therefore fell back to asking about the shared, undisambiguated
-`file_name` — a single cache key/physical-path lookup silently shared by
-both files' rows. Folders never had this gap because P13.2 already gives a
-folder a persistent, `shared_folder_id`-keyed identity
-(`folderIdentity.ts`); no equivalent existed for a standalone file.
-
-## Identity / Source-of-Truth Decision
-
-`shared_file_id` — already a stable, unique identifier flowing through
-every relevant type (`AvailableFileResponse.id`, `TransferResponse
-.shared_file_id`), already relied on elsewhere in this exact file
-(`downloadStatus.ts`) to disambiguate rows — is the correct identity to key
-on. Rejected alternatives:
-
-- **`transfer_id`**: a file can accumulate several transfers over its
-  lifetime (retries, re-downloads); the identity that must stay stable is
-  the *file*, not any one transfer attempt. `downloadStatus.ts` already
-  derives the *latest* transfer for a given `shared_file_id` for exactly
-  this reason.
-- **A new display-name-based lookup with extra fields (e.g. hashing
-  file_name + shared_at)**: would still be a display-name-shaped identity,
-  just obscured — explicitly ruled out by this milestone's own non-negotiable
-  rule 3 ("do not solve an identity problem with another display-name
-  lookup").
-- **Resolved physical path as the primary key**: the path is *derived from*
-  the identity (via disambiguation), not independent of it — using it as
-  the key would still need something else to decide, on first resolution,
-  which of two colliding files gets which path. `shared_file_id` is that
-  something else.
-
-## Architecture Decision
-
-Mirrored `folderIdentity.ts`'s already-proven shape (P13.2) exactly, rather
-than inventing a new pattern: a small, disk-persisted, `shared_file_id`
--keyed registry (`android/src/files/fileIdentity.ts`,
-`relay-file-registry.json`), resolved once — before a standalone file's
-bytes start moving — and permanently remembered, so every later reference
-(a re-download after external deletion, an existence check, the Open
-action) reads the same answer back instead of re-deriving it.
-
-Deliberately a **separate** registry file from `folderIdentity.ts`'s own,
-not a shared/merged one: a file's identity has no reconciliation concept (a
-leaf file either exists or it doesn't — there is no set of children to
-compare against), so folding the two together would blur two structurally
-distinct sources of truth and complicate the one that already works.
-Matches this codebase's existing file/folder module split
-(`downloadStatus.ts` vs `folderDownloadStatus.ts`).
-
-Where the fix lives, and why nowhere else:
-
-- **`fileIdentity.ts`** (new): the registry itself — resolve-and-remember,
-  exactly like `resolveLocalFolderRoot`.
-- **`TransferStreamManager.ts`'s `resolveDownloadRelativePath`**: the one
-  place that already resolves a folder child's local root before staging;
-  extended with a parallel, guarded (`direction === 'send' && shared_file_id
-  != null`) branch for a standalone file. Resolving here — before staging,
-  not just before publish — means the disambiguated name is already
-  reserved (registry-checked, not just disk-checked) the moment two
-  never-before-seen same-named files are downloaded back-to-back, closing
-  the same not-yet-materialized-on-disk race P13.3 already documented and
-  fixed for folders.
-- **`FilesScreen.tsx`**: every read-side call site (the existence-
-  verification effect, `computeFileRowState`, `handleOpen`'s own
-  Open/re-verify calls, the long-press menu's file-state derivation) now
-  resolves each file's actual on-device name via a new `localFileName`
-  helper (`localNameByFileId[file.id] ?? file.file_name`) before consulting
-  `existence`/calling `openDownloadedFile` — mirroring exactly how the same
-  screen already reads `localRootByFolderId` for folders.
-- **`useFileIdentity.ts`** (new): a thin hook loading the registry into
-  React state on the same poll tick `useFolderReconciliation` already
-  piggybacks on — the file-level mirror of that hook.
-- **Deliberately untouched**: `downloadExistence.ts` (its
-  `downloadedFileExists`/`downloadedFilePath` already operate on *any*
-  relative path — generic by construction, nothing file/folder-specific to
-  fix), `downloadActions.ts` (`openDownloadedFile`'s own signature is
-  unchanged; only the *name it's called with* changes, at the call site),
-  `blobUtil.ts` (`resolveAvailableDownloadName` still runs, now as a
-  harmless no-op safety net for a name already reserved upstream — still
-  load-bearing for folder children's own per-file disambiguation, untouched
-  by this milestone), `folderIdentity.ts`/`folderDownloadStatus.ts` (Case B
-  confirmed already correct).
-
-This affects **both** status detection (existence) and the **Open** action
-— not just one of them, per Phase 5's own question 5. Notifications and
-folder reconciliation are unaffected: `notifyDownloadComplete` already
-receives its `content://` URI straight from `publishDownload`'s own return
-value (never derived from `file_name`), and folder reconciliation has never
-touched standalone-file identity.
-
-## Files Changed
-
-- **New:** `android/src/files/fileIdentity.ts` — the `shared_file_id`
-  -keyed local-name registry (`resolveLocalFileName`,
-  `readAllLocalFileNames`).
-- **New:** `android/src/files/useFileIdentity.ts` — the React hook loading
-  that registry, mirroring `useFolderReconciliation.ts`.
-- **Modified:** `android/src/streaming/TransferStreamManager.ts` —
-  `resolveDownloadRelativePath` resolves a standalone SEND file's on-device
-  name via the new registry before staging.
-- **Modified:** `android/src/screens/files/FilesScreen.tsx` — new
-  `localFileName` helper; `computeFileRowState`, the existence-verification
-  effect, `handleOpen` (both the Open call and its re-verify path), and the
-  long-press menu's file-state derivation all resolve through it instead of
-  the raw `file.file_name`; the `TransferStreamManager` subscription now
-  also refreshes the file-identity map alongside folder reconciliation.
-
-Test: `android/__tests__/files/fileIdentity.test.ts` (new — mirrors
-`folderIdentity.test.ts`'s coverage: fresh resolution, collision → "(1)",
-extension-preserving disambiguation, incrementing past an already-taken
-"(1)", reuse of an existing mapping without touching the filesystem,
-re-download after external deletion resolving back to the *same* name,
-corrupted-registry tolerance, concurrent-resolution race safety, custom SAF
-location per P14.3). `android/__tests__/files/useFileIdentity.test.tsx`
-(new — mirrors `useFolderReconciliation.test.tsx`). Two new cases added to
-`android/__tests__/streaming/TransferStreamManager.test.ts`: two same-named
-files stage/publish to distinct on-device names (mirrors the existing
-P13.2 folder test), and a re-download of the same `shared_file_id` resolves
-back to its already-registered name rather than drifting.
-
-No backend or desktop files changed — Phase 1/3's own conclusion (the
-backend already exposes a sufficient stable identifier) held; nothing
-required a backend change.
-
-## Automated Tests
-
-- `npx jest` (Android): 38 suites / 310 tests passing (2 new suites, 3 new
-  cases in an existing suite; every pre-existing test passed unchanged —
-  confirmed the fix is additive, not a behavior change for the
-  no-collision case, since a resolved name equals the raw name whenever
-  nothing is actually taken).
-- `npx tsc --noEmit`: clean.
-- `npx eslint .`: clean (two pre-existing `no-void` warnings in
-  `TransferStreamManager.ts`, on lines this milestone did not touch,
-  predate this change).
-- Backend: untouched by this milestone; not re-run.
-
-## Physical-Device Verification (RMX3997, post-fix)
-
-Reloaded the app against the fixed JS bundle (Metro + `adb reverse
-tcp:8081 tcp:8081`; a stale reverse tunnel from an earlier device
-disconnect briefly showed RN's "Unable to load script" screen — re-running
-`adb reverse` and reloading resolved it, not a defect in this change).
-
-To avoid the confound of *pre-fix* completed Transfers (which predate the
-registry and therefore still fall back to the raw name — see Remaining
-Limitations), unshared the original Case A test files and re-shared two
-brand-new ones (`shared_file_id=5`, 40 B; `shared_file_id=6`, 58 B), both
-named `report.txt`, for a clean post-fix-only test:
-
-| Scenario | Result |
-|---|---|
-| Download B (58 B) | Registry: `{"6":"report.txt"}`; physical `report.txt` = 58 B |
-| Download A (40 B) | Registry: `{"5":"report (1).txt","6":"report.txt"}`; physical `report (1).txt` = 40 B, both distinct on disk |
-| Both rows | **Open** |
-| Tap Open on A (40 B) | Chooser title bar: **"report (1)"**; body text: **"P16 CLEAN A..."** — A's own content |
-| Tap Open on B (58 B) | Chooser title bar: **"report"**; body text: **"...BBBB..."** — B's own content |
-| Delete only physical `report.txt` (B) | B → **Download**; A → **Open**, unaffected |
-| Re-download B | Registry unchanged (`{"6":"report.txt"}`, same name); both rows → **Open** |
-| App restart (force-stop + relaunch) | Both rows still **Open**, registry/physical state intact |
-| Folder Case B re-check (post-fix) | Re-downloaded the previously-deleted folder; correctly resolved back to its already-registered root (`test (1)`); both folder rows **Open** |
-
-Deleting file A's physical copy and re-verifying the *other* direction was
-covered symmetrically by the pre-fix Case A reproduction already showing
-the opposite half of the same bug (deleting B affected both) — the post-fix
-matrix above demonstrates the fix from the other direction (deleting B, A
-unaffected; re-download recovers). Both directions rely on the same
-registry mechanism, so this is not treated as leaving a gap.
-
-## P13/P14/P15 Regression Checks
-
-- **P13/P13.2 (folder duplicate naming) and P13.3 (folder state machine):**
-  Case B's physical re-verification above (`test` / `test (1)`, correct
-  Open targets, correct independent existence tracking, correct
-  re-download-to-same-root recovery) — all untouched by this milestone's
-  code changes, confirmed still correct live.
-- **P14.1 (long-press menu):** `FilesScreen.tsx`'s menu file-state
-  derivation was one of the four call sites updated to resolve through
-  `localFileName` — exercised implicitly by every Open/Details action taken
-  during physical verification above; no separate regression found.
-- **P14.2 (discovery/QR pairing):** untouched code path; not re-exercised
-  beyond the pairing already in place for this device.
-- **P14.3 (custom download location):** not touched by physical
-  verification this session (would require reconfiguring the device's
-  download location mid-session), but covered by
-  `fileIdentity.test.ts`'s "checks name availability against the custom SAF
-  tree, not MediaStore" case — `resolveLocalFileName` delegates to the same
-  mode-aware `downloadedFileExists` every other P14.3-aware check already
-  uses, with no default-mode assumption hard-coded.
-- **P14.4 (transfer history reset):** Transfers tab spot-checked live
-  post-fix — all rows "Completed", "Clear History" enabled and red/tappable,
-  matching expected P14.4 behavior; this milestone touches no transfer-
-  history code.
-- **P15 (disappearing-source failure handling):** not re-exercised this
-  session (backend-only, untouched by this milestone); no interaction
-  between the two fixes' code paths.
-
-## Defects Discovered During Verification
-
-- **A live instance of the deferred P17 defect** (`shared_folder_id`
-  reuse) surfaced while setting up Case B's reproduction: two freshly
-  shared folders happened to receive ids matching stale
-  `relay-folder-registry.json` entries from an earlier, unrelated session,
-  silently redirecting new downloads into old, wrongly-named directories.
-  Documented here as encountered; not investigated or fixed, per this
-  milestone's explicit scope boundary ("do NOT investigate/fix
-  `shared_folder_id` reuse unless it blocks P16" — it was worked around by
-  clearing the contaminating local test state, not fixed).
-
-## Defects Fixed vs. Intentionally Deferred
-
-**Fixed:** the same-basename existence/identity collision for standalone
-shared files (this milestone) — both the existence-status collision (P3's
-own original finding) and the more severe Open-opens-wrong-content
-data-identity mix-up (found during this milestone's own Phase 2
-reproduction, not previously documented as its own defect).
-
-**Intentionally deferred (not part of P16):** `shared_folder_id` reuse
-(P17) — re-confirmed live during this milestone's own setup, per the
-Requirements Review above and this milestone's explicit scope boundary.
-
-## Documentation Synchronization
-
-- **docs/15_QA_NOTEBOOK.md:** this entry.
-- **docs/11_File_Transfer.md, docs/13_Database_Design.md:** reviewed — the
-  identity invariant this milestone establishes (download existence/status/
-  Open must never key on display basename alone) is an Android-local
-  implementation detail with no backend or database counterpart to
-  document; neither file asserted the pre-fix (broken) behavior, so
-  neither needed correcting.
-- **CLAUDE.md:** updated — this milestone establishes a durable
-  architectural rule (Android download-identity resolution must key on a
-  stable id, never on display basename alone) that is exactly the kind of
-  rule future milestones need to inherit without re-deriving it, per
-  CLAUDE.md's own "Documentation Ownership" section. Added under a new
-  short "Android Download Identity" note.
-- **README.md:** unchanged — this is a correctness fix to already-documented
-  behavior (a downloaded file's status/Open now correctly reflects its own
-  identity), not a new user-facing capability to list.
-- **.gitignore:** unchanged — no new local/generated artifact type (the new
-  registry file lives in the same app-private storage
-  `relay-folder-registry.json` already uses, already outside the repo).
-
-## Remaining Limitations
-
-- **Pre-fix completed downloads have no registry entry.** A `Transfer` that
-  reached `completed` *before* this fix shipped has no corresponding
-  `fileIdentity.ts` entry; until that specific file is re-downloaded (which
-  mints a fresh registry entry) or its row is otherwise re-verified, it
-  still falls back to the raw `file_name` for existence checks and Open —
-  meaning it can still transiently collide with a *newly*-downloaded
-  same-named file until it is itself refreshed. This mirrors
-  `folderIdentity.ts`'s own already-documented "reinstall" limitation
-  (a mapping lost or never created resolves as if seen for the first time)
-  and was not treated as a new defect to fix: retroactively resolving which
-  of two historical same-named files "really" held a given legacy path is
-  fundamentally ambiguous after the fact, and a full backfill/migration is
-  outside this milestone's scope (CLAUDE.md Rule 3). A **fresh** download of
-  either file (the normal recovery path this milestone's own required
-  invariants call for) immediately and permanently fixes that file's
-  identity going forward.
-- **The deferred P17 defect** (`shared_folder_id` reuse) remains unfixed,
-  re-confirmed live this session — see Defects Discovered above.
-- **P14.3 custom-location coverage this session was automated-only**, not
-  physically re-verified against a real custom SAF folder (would require
-  reconfiguring the live device's download location) — the underlying
-  mechanism (`downloadedFileExists`, already mode-aware) is unchanged by
-  this milestone and already physically verified under P14.3 itself.
-
-## Verdict
-
-**P16 COMPLETE.**
+- **Any new download-path code must resolve on-device identity through
+  the relevant id-keyed registry** (`fileIdentity.ts` for standalone
+  files, `folderIdentity.ts` for folders) — never through
+  `file_name`/`folder_name` alone. Established by P3/P13.2/P16 the hard
+  way.
+- **`TestClient`'s in-process ASGI transport cannot simulate a real
+  dropped TCP connection** — anything about client-disconnect handling
+  needs a real `uvicorn` process and a raw socket (see P8).
+- **Loopback does not reliably exercise real network backpressure** — a
+  stalled `send()` may never occur on loopback even against a dead peer.
+  Test timeout/backpressure logic over a real Wi-Fi link, not localhost.
+- **This project's one physical test device is OEM-locked down**
+  (ColorOS/RealmeUI blocks `pm clear`/`pm revoke` even from the `shell`
+  UID) — use `DELETE /devices/{id}` against the backend to force an
+  unpaired state instead of trying to clear app data via ADB.
+- **The desktop's own unauthenticated routes are loopback-trusted
+  regardless of bearer token** — a verification script must call them from
+  actual loopback for desktop-perspective requests and from the LAN IP for
+  Android-perspective ones, or it will silently test the wrong code path.
+- **Backend timestamps are naive (no UTC designator) but represent UTC.**
+  Any code that parses one with `new Date(...)` on Android must force UTC
+  interpretation (append `Z` if missing) or it will silently misbehave by
+  the device's own UTC offset. This bit both the Electron desktop (T3) and
+  Android (P14.4) independently.
+- **A patched third-party native dependency is tracked via
+  `patch-package`** (`android/patches/`) — check `docs/upstream/` for the
+  full writeup before assuming a library behaves per its own docs; the
+  Okio `Source` contract violation (P10) is the current example.

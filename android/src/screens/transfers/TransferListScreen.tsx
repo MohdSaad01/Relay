@@ -1,5 +1,5 @@
-import React, { useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { errorCodes, isErrorWithCode, pick } from '@react-native-documents/picker';
@@ -14,6 +14,12 @@ import { registerUploadSource } from '../../streaming/uploadSourceRegistry';
 import { TransferStreamManager } from '../../streaming/TransferStreamManager';
 import { materializeToLocalCache, pickAndEnumerateFolder } from '../../streaming/folderPicker';
 import { generateUuidV4 } from '../../utils/uuid';
+import {
+  applyHistoryReset,
+  clearTransferHistory,
+  getHistoryClearedAt,
+  isHistoricalTransfer,
+} from '../../transfers/historyReset';
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -43,6 +49,26 @@ export function TransferListScreen() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadingFolder, setUploadingFolder] = useState(false);
   const [folderUploadError, setFolderUploadError] = useState<string | null>(null);
+  // P14.4: null until the marker file has been read at least once — kept
+  // distinct from "never cleared" (also null, post-read) only in that this
+  // gates the Clear History button's enabled state so it can't fire against
+  // a not-yet-loaded cutoff; applyHistoryReset itself treats both the same.
+  const [clearedAt, setClearedAt] = useState<string | null>(null);
+  const [clearedAtLoaded, setClearedAtLoaded] = useState(false);
+  const [clearingHistory, setClearingHistory] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getHistoryClearedAt().then(value => {
+      if (!cancelled) {
+        setClearedAt(value);
+        setClearedAtLoaded(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // useTransfers() already fetches once on mount, and this screen's first
   // focus coincides with that same mount, so the immediate refresh below is
   // only needed from the second focus onward — otherwise every mount fired
@@ -176,6 +202,37 @@ export function TransferListScreen() {
     }
   }, [refreshTransfers]);
 
+  // P14.4: 'in_progress' transfers (streaming or locally queued — see
+  // historyReset.ts's own doc comment) are always kept regardless of
+  // clearedAt; only a terminal transfer that finished at or before the
+  // clear point is hidden.
+  const visibleTransfers = applyHistoryReset(transfers, clearedAt);
+  const hasHistoryToClear = visibleTransfers.some(isHistoricalTransfer);
+  const historyWasCleared = clearedAt != null && transfers.length > 0 && visibleTransfers.length === 0;
+
+  const handleClearHistory = useCallback(() => {
+    Alert.alert(
+      'Clear transfer history?',
+      'Completed, failed, and cancelled transfers will be removed from this list. Downloaded files are not deleted, and active or queued transfers are not affected.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear History',
+          style: 'destructive',
+          onPress: async () => {
+            setClearingHistory(true);
+            try {
+              const newClearedAt = await clearTransferHistory();
+              setClearedAt(newClearedAt);
+            } finally {
+              setClearingHistory(false);
+            }
+          },
+        },
+      ],
+    );
+  }, []);
+
   const error = transfersError ?? uploadError ?? folderUploadError;
 
   return (
@@ -186,6 +243,25 @@ export function TransferListScreen() {
         </Pressable>
         <Pressable style={styles.uploadButton} onPress={handleUploadFolder} disabled={uploadingFolder}>
           <Text style={styles.uploadButtonText}>{uploadingFolder ? 'Uploading...' : 'Upload a Folder'}</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.clearHistoryRow}>
+        <Pressable
+          style={styles.clearHistoryButton}
+          onPress={handleClearHistory}
+          disabled={!clearedAtLoaded || clearingHistory || !hasHistoryToClear}
+          accessibilityRole="button"
+          accessibilityLabel="Clear transfer history"
+        >
+          <Text
+            style={[
+              styles.clearHistoryText,
+              (!clearedAtLoaded || clearingHistory || !hasHistoryToClear) && styles.clearHistoryTextDisabled,
+            ]}
+          >
+            {clearingHistory ? 'Clearing...' : 'Clear History'}
+          </Text>
         </Pressable>
       </View>
 
@@ -201,7 +277,7 @@ export function TransferListScreen() {
         </View>
       ) : (
         <FlatList<TransferResponse>
-          data={transfers}
+          data={visibleTransfers}
           keyExtractor={item => String(item.id)}
           renderItem={({ item }) => (
             <TransferRow
@@ -211,10 +287,10 @@ export function TransferListScreen() {
           )}
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
-              <Text style={styles.empty}>No transfers yet.</Text>
+              <Text style={styles.empty}>{historyWasCleared ? 'Transfer history cleared.' : 'No transfers yet.'}</Text>
             </View>
           }
-          contentContainerStyle={transfers.length === 0 ? styles.emptyList : undefined}
+          contentContainerStyle={visibleTransfers.length === 0 ? styles.emptyList : undefined}
         />
       )}
     </View>
@@ -264,6 +340,23 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
+  },
+  clearHistoryRow: {
+    alignItems: 'flex-end',
+    marginHorizontal: 16,
+    marginTop: 10,
+  },
+  clearHistoryButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 4,
+  },
+  clearHistoryText: {
+    color: '#dc2626',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  clearHistoryTextDisabled: {
+    color: '#999',
   },
   errorBanner: {
     padding: 12,

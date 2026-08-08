@@ -44,6 +44,11 @@ build yet — plus the enhancements listed under
   `Downloads/Relay`; a Settings tab lets you pick any folder via the
   system folder picker instead. Changing it never moves or deletes files
   already saved at the previous location.
+* **Transfer history reset (Android)** — a "Clear History" action on the
+  Transfers screen hides completed, failed, and cancelled transfers from
+  the list. It never deletes downloaded files/folders, never disturbs an
+  active or queued transfer, and is local to the device — the desktop's own
+  transfer history and the backend's records are untouched.
 * **Desktop system tray integration** for background operation.
 
 ## Architecture

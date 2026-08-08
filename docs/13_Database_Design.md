@@ -237,7 +237,7 @@ shared_folders (1) ──< transfers (many)      ON DELETE SET NULL (P13)
 app_settings                                  standalone singleton
 ```
 
-No table is deleted as a matter of routine operation except `devices` (explicit user action) and `sessions` (expiry cleanup). `shared_files` rows are removed when the user un-shares a file (or, for a folder's child rows, cascade-deleted when the parent folder share is removed — P13). `transfers` rows are never deleted by normal operation — they are the history.
+No table is deleted as a matter of routine operation except `devices` (explicit user action) and `sessions` (expiry cleanup). `shared_files` rows are removed when the user un-shares a file (or, for a folder's child rows, cascade-deleted when the parent folder share is removed — P13). `transfers` rows are never deleted by normal operation — they are the history. (P14.4: Android's "Clear History" action hides completed/failed/cancelled transfers from that device's own list; it is a client-local filter — see `android/src/transfers/historyReset.ts` — and never deletes or otherwise touches a `transfers` row, keeping this invariant intact.)
 
 ---
 

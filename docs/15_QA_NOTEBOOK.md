@@ -3564,3 +3564,359 @@ reporting success or crashing the app.
   observed defect would be scope creep beyond what P14.3 requires — noted
   here in case a future file-open edge case ever surfaces the same class of
   issue the folder case did.
+
+---
+
+# Milestone P14.4 — Transfer History Reset
+
+## Architecture Investigation (before any code change)
+
+Traced the full transfer lifecycle before touching anything:
+
+- `backend/app/models/transfer.py`: one `Transfer` row per transfer, "doubles
+  as transfer history"; `status` is `in_progress | completed | failed |
+  cancelled` (`app/models/enums.py`). No "queued" backend status exists.
+- `backend/app/repositories/transfer_repository.py`: **"No delete method: per
+  the schema design, transfer rows are never removed by normal operation —
+  they are the transfer history."** `docs/13_Database_Design.md` §10 states
+  the same invariant independently, and further: `GET /transfers` for the
+  desktop (`requesting_device is None`) returns `list_history()` — every
+  device's rows, unscoped. Android's own view (`RequestingDeviceDep`) is
+  scoped to `list_by_device`.
+- `backend/app/services/transfer_service.py`: both directions auto-accept on
+  propose; a `Transfer` row is created immediately as `IN_PROGRESS`. No
+  accept/reject step remains. `cancel_transfer` is the only other status
+  transition the service performs (`IN_PROGRESS -> CANCELLED`);
+  `COMPLETED`/`FAILED` are set only by `transfer_stream_service.py`'s
+  `_finalize` (on successful completion, an `OSError` mid-read/write, a
+  dropped connection, or a stalled-write timeout) or by
+  `reconcile_interrupted_transfers` (startup sweep: any row still
+  `IN_PROGRESS` after an unclean shutdown becomes `FAILED`).
+- `android/src/streaming/TransferStreamManager.ts`: "Queued" is a purely
+  client-side, in-memory FIFO (`queue`) for a transfer whose `start()` call
+  arrived while another was already streaming — the backend row is already
+  `IN_PROGRESS` the instant it's proposed, indistinguishable server-side from
+  one actually streaming. `isQueued()`/`isActive()` are local-only.
+- `android/src/screens/transfers/TransferListScreen.tsx`: renders
+  `GET /transfers` (already device-scoped) flat, newest-first, no existing
+  history/filter/reset control anywhere. Confirmed via
+  `grep -r "delete\|purge\|reset\|clear"` across `backend/app` and
+  `android/src` that no transfer-history deletion/reset operation existed
+  anywhere in the codebase prior to this milestone.
+- `android/src/files/folderIdentity.ts`: a *separate* local-only JSON
+  registry (shared_folder_id → resolved on-device root name +
+  reconciled-children snapshot), deliberately not derived from Transfer
+  history (its own doc comment explains why — an orphaned completed
+  Transfer row for a since-removed file would otherwise permanently poison
+  folder-completion checks). Confirmed this registry is untouched by
+  anything this milestone adds.
+- `android/src/screens/settings/SettingsScreen.tsx` /
+  `settings/DownloadLocationManager.ts` (P14.3): the download destination is
+  independent, local, persisted state; confirmed no coupling to Transfer
+  history exists in either direction.
+- No `AsyncStorage`/MMKV dependency exists in this app (confirmed via
+  `package.json` and `folderIdentity.ts`'s own doc comment, which explains
+  why one wasn't added for P13.2 either) — any new local-only persistence
+  needed to follow the existing `react-native-blob-util` JSON-file pattern
+  (`folderIdentity.ts`, `settings/downloadLocationStore.ts`) rather than
+  introduce a new technology (CLAUDE.md Rule 2).
+- Read `docs/11_File_Transfer.md`, `docs/13_Database_Design.md` §6-11,
+  `docs/14_Testing_Plan.md`, `docs/15_QA_NOTEBOOK.md`, `README.md`,
+  `CLAUDE.md`. No conflicts found between them on this topic — all
+  consistent with "transfer rows are never deleted by normal operation."
+
+## Physical Baseline (before any code change)
+
+Device: physical RMX3997, ADB serial `69DADENFONAIOZS4`. Backend (port
+8000, PID confirmed a child of the running Electron desktop process) and
+Metro (port 8081) already running from a prior live session; Relay already
+paired and running in the foreground, reachable over the phone's hotspot.
+The backend's `relay.db` already held ~500 transfers from prior milestones'
+live verification — used as-is rather than reset, confirming the feature
+works against real accumulated history, not a clean slate.
+
+Shared a fresh, dedicated `p144/` set of test files/folders via the
+backend's loopback API (`POST /files`, `POST /folders` — legitimate,
+since the desktop's own unauthenticated routes are loopback-trusted, and
+driving them this way is equivalent to using the desktop UI without needing
+to script Electron itself) and drove every scenario from the **real**
+Android app via `adb shell input tap`, screenshots, and direct SQLite/API
+inspection:
+
+- **Completed file** (`p144_file.txt`): downloaded, confirmed `completed` in
+  the backend, "Open" launched Android's real "Open with" chooser.
+- **Completed folder** (`folderX`, one nested file): downloaded, confirmed
+  both children `completed`, "Open" launched DocumentsUI on the real
+  on-device content (byte sizes cross-checked against the source files).
+  Incidentally surfaced a **pre-existing, unrelated** defect — see Problems
+  Discovered.
+- **Active + queued (race)**: shared two large (60 MB, then 400 MB) files,
+  tapped Download on both back-to-back — confirmed via screenshot and
+  `SELECT` on `transfers` that one was genuinely `in_progress` with
+  advancing `bytes_transferred` while the other sat at `in_progress`/`0`
+  bytes with the Android UI correctly showing "Queued" (`TransferStreamManager.isQueued`).
+- **Stuck/zombie `in_progress` row**: shared a file, deleted its source
+  file on disk, then tapped Download. Found and confirmed a **pre-existing,
+  unrelated** defect — see Problems Discovered — where the row is
+  permanently stuck `in_progress` server-side despite the Android UI
+  locally rendering "Failed". Kept deliberately as a hostile test case for
+  the reset feature (see Physical-Device Verification below).
+- **Cancelled**: started a 1.6 GB download, cancelled it mid-stream via the
+  real Cancel button on `TransferProgressDetail`; confirmed `cancelled` in
+  the backend with a genuine partial `bytes_transferred`.
+- **Custom download location (P14.3)**: created a real folder via the
+  system SAF picker (`RelayP144Custom`), granted access, downloaded a file
+  into it — confirmed via `adb shell find`/`ls` it landed under
+  `/storage/emulated/0/RelayP144Custom/`, not `Downloads/Relay`.
+- **Desktop view**: confirmed via `GET /transfers` with no device token
+  (the desktop's own unauthenticated, unscoped call) that it returns every
+  device's full history, unscoped — establishing that a backend-side delete
+  triggered from Android would reach into state the desktop treats as its
+  own permanent, shared record.
+- A genuine backend `FAILED` row could not be safely reproduced live within
+  this milestone's time budget — see Remaining Limitations.
+
+## Root Cause / Design Gap
+
+Not a defect — a genuinely unimplemented feature, same shape as P14.3. The
+gap: `TransferListScreen` had no way to distinguish "history I no longer
+want to see" from "the underlying `Transfer` rows," and no local state of
+any kind existed to make that distinction.
+
+## Architecture Decision
+
+**Android-local history reset — never a backend delete.** Three
+independent facts, all confirmed above, rule out a backend-side delete:
+
+1. `TransferRepository` has no delete method by design, and
+   `docs/13_Database_Design.md` §10 states `transfers` rows are "never
+   deleted by normal operation" — a backend delete would contradict an
+   explicit, current architectural invariant (CLAUDE.md Rule 1: never
+   redesign the architecture unless explicitly instructed).
+2. The desktop's `GET /transfers` returns every device's history, unscoped.
+   A backend delete triggered from Android would silently remove state the
+   desktop — and any other paired device — still shows as its own
+   permanent record, with no architectural basis for Android to own that
+   action unilaterally.
+3. The milestone's own instructions require exactly this reasoning before
+   choosing scope A (Android-local) vs. B (backend) vs. C (combined) —
+   given (1) and (2), only (A) is safe.
+
+**Eligibility ("what is history"):** a transfer is historical the instant
+its backend `status` leaves `in_progress` (`completed`/`failed`/
+`cancelled`) — not a hand-picked subset. `in_progress` alone is the correct
+boundary because it covers *both* a transfer genuinely streaming right now
+*and* one merely sitting in `TransferStreamManager`'s local FIFO queue
+behind it (queueing has no backend status of its own — confirmed above), so
+filtering on backend status can never hide a transfer that is still
+operational, and never needs a second, Android-only "is this queued" check
+layered on top. `failed` and `cancelled` are included in history — the
+codebase's own vocabulary (`transfer_service.py`,
+`TransferStreamManager.ts`) repeatedly groups `completed`/`failed`/
+`cancelled` together as "terminal," in contrast to the sole non-terminal
+`in_progress`.
+
+**Persistence:** a small JSON marker (`{ clearedAt: <ISO timestamp> }`)
+under this app's private storage, read/written via `react-native-blob-util`
+— the exact pattern `files/folderIdentity.ts` and
+`settings/downloadLocationStore.ts` already established for local-only
+state with no backend equivalent, rather than adding AsyncStorage/MMKV as a
+new dependency (CLAUDE.md Rule 2; confirmed neither is already a
+dependency). `applyHistoryReset(transfers, clearedAt)` filters the already
+device-scoped `GET /transfers` list: any `in_progress` transfer is always
+kept; a terminal transfer is hidden only if it finished
+(`completed_at` ?? `started_at`) at or before `clearedAt`. A transfer that
+finishes *after* the reset stays visible, so "Clear History" then propose a
+new transfer works exactly like an ordinary empty-to-populated list.
+
+**UI:** a "Clear History" text control on `TransferListScreen` (below the
+existing upload-row header, in the existing red/destructive text style
+already used for errors elsewhere in this screen), disabled whenever there
+is nothing currently eligible to clear. Confirms via `Alert.alert` (the
+existing confirmation primitive used throughout this app — `FilesScreen.tsx`,
+`SettingsScreen.tsx` — no new dependency), with a destructive-styled
+"Clear History" button and explicit text: *"Completed, failed, and
+cancelled transfers will be removed from this list. Downloaded files are
+not deleted, and active or queued transfers are not affected."*
+
+## Defect Found and Fixed During Physical Verification
+
+**Backend timestamps are naive (no `Z`/UTC-offset) but the value is UTC —
+`new Date(...)` on Android silently parsed them as local time,
+mis-ordering the reset cutoff.** `Transfer.completed_at`/`started_at` are
+generated by `backend/app/utils/time.py`'s `utc_now()` and serialized by
+Pydantic as plain ISO strings with no timezone designator (confirmed via
+`curl http://127.0.0.1:8000/api/v1/transfers/509` — e.g.
+`"completed_at": "2026-08-08T18:19:50.537433"`). JavaScript's `Date`
+constructor treats a timezone-less ISO string as **local** time. On RMX3997
+(IST, UTC+5:30), a transfer that finished a full minute *after* a reset was
+incorrectly hidden by the very first live race test: its `completed_at`
+parsed 5.5 hours earlier than its true UTC instant, landing it before the
+UTC `clearedAt` cutoff. Root-caused by comparing `backend/relay.db` and the
+raw `GET /transfers/{id}` JSON against the app's (incorrect) rendered list.
+Fixed in `historyReset.ts`'s new `parseTimestamp()` helper: appends `Z`
+before parsing whenever no timezone designator is already present, forcing
+correct UTC interpretation regardless of device timezone. Re-verified live
+after the fix (app reloaded, same scenario re-run) — the post-reset
+transfer now correctly reappeared. A regression test
+(`historyReset.test.ts`) pins this using an explicitly timezone-less
+`completed_at` string, independent of the test runner's own timezone.
+
+This is a defect in code written *by this milestone* (the only place in the
+diff that compares a backend timestamp against a computed cutoff), not a
+pre-existing issue — fixing it was required for P14.4 correctness, not
+scope creep. `FilesScreen.tsx`'s own `new Date(shared_at)` calls have the
+same underlying naive-timestamp characteristic but only feed a
+`toLocaleString()` display and a stable sort order, not a hidden/shown
+correctness boundary; left unmodified as pre-existing and out of scope.
+
+## Files Changed
+
+New: `android/src/transfers/historyReset.ts`,
+`android/__tests__/transfers/historyReset.test.ts`.
+
+Modified: `android/src/screens/transfers/TransferListScreen.tsx` (loads/
+applies the clear-history marker, renders the Clear History control and its
+confirmation, filters the rendered list). No backend files changed, no
+desktop files changed.
+
+## Automated Tests
+
+- `npx jest`: 36 suites / 293 tests passed (292 pre-existing + 1 net new
+  suite of 13). Every pre-existing test passed unmodified.
+- `npx tsc --noEmit`: clean.
+- `npx eslint .`: 0 errors; the same 2 pre-existing `no-void` warnings in
+  `TransferStreamManager.ts` as every prior milestone, untouched by this
+  change.
+- New coverage (`historyReset.test.ts`): marker read/write (including a
+  corrupted-file and never-written case), `isHistoricalTransfer` for every
+  status, `applyHistoryReset` for a pre-cutoff hide, a post-cutoff keep, an
+  `in_progress` transfer never hidden regardless of age, a `started_at`
+  fallback when `completed_at` is null, a mixed active/historical list, and
+  the naive-timestamp regression above.
+
+## Physical-Device Verification
+
+All exercised live on RMX3997 (`69DADENFONAIOZS4`), reloaded via Metro
+(JS-only change, no new native dependency).
+
+| Scenario | Result |
+|---|---|
+| Completed file → reset | History row hidden; `p144_file.txt` remained on disk, still opened correctly, both before and after reset |
+| Completed folder → reset | Both rows hidden; nested folder and file remained on disk (`adb shell find`), Open still resolved real content |
+| Nested folder → reset | Same as above — full structure (`share_test/root.txt`, `share_test/nested/inner.txt`) intact after reset |
+| Failed transfer → reset | Not live-reproduced as a genuine backend `FAILED` row (see Remaining Limitations); eligibility verified via unit tests and code (grouped with completed/cancelled as terminal) |
+| Active transfer → reset | Tapped Clear History while a 400 MB download was genuinely mid-stream (312/400 MB observed) — continued uninterrupted to completion, no cancellation, no duplicate stream |
+| Queued transfer → reset | The second, FIFO-queued 400 MB download stayed queued through the reset, then started automatically the moment the first finished — exactly as without the reset |
+| Active + queued → reset | Both preserved simultaneously in the same live test above; no backend errors, no duplicate transfer, no SQLite errors observed in backend logs |
+| Reset → new transfer | The queued transfer's completion (after the reset point) correctly reappeared in the list once the timezone defect above was fixed |
+| App restart after reset | `am force-stop` + relaunch (twice) — the clear-history marker persisted correctly both times; previously-cleared history stayed hidden, the still-`in_progress` zombie row stayed visible |
+| Custom download location → reset | Downloaded into a real custom SAF folder (`RelayP144Custom`), cleared history — file remained at the custom path (`adb shell ls`), Settings still showed the custom location unchanged, "Reset to Default" afterward worked normally |
+| FilesScreen after reset | Every already-downloaded item (file, folder, custom-location file) correctly kept showing "Open" after repeated resets — existence derivation is fully independent of Transfer history, confirmed unaffected |
+| Open after reset | Re-verified: file Open (Android's "Open with" chooser) and folder Open (DocumentsUI, correct nested content) both still worked after multiple resets |
+| Backend state | `GET /transfers` (desktop, unscoped) showed the full, untouched history (100 of the DB's ~500+ rows returned by the endpoint's own limit) after every Android-side clear — confirming zero backend calls were made |
+| Desktop behavior | Unaffected by design and confirmed live — Android's reset is a pure local list filter with no network call |
+
+Also confirmed a genuine cancelled-transfer round trip: started a 1.6 GB
+download, cancelled it mid-stream via the real Cancel button (partial
+`bytes_transferred` confirmed in the backend), then cleared history —
+the cancelled row was hidden and no partially-downloaded file existed in
+public storage to begin with (a cancelled transfer's bytes are never
+published — existing, pre-P14.4 behavior), so there was nothing for the
+reset to endanger.
+
+## Problems Discovered
+
+- **The naive-timestamp/local-time defect above** — found and fixed within
+  this milestone (required for P14.4 correctness).
+- **Pre-existing, unrelated to this milestone**: a shared file whose source
+  is deleted from disk *after* being shared but *before* the first download
+  byte is requested produces a permanently stuck `in_progress` `Transfer`
+  row. `TransferStreamService.resolve_download_source` raises
+  `ValidationError` (mapped to HTTP 400) *before* the streaming response —
+  and therefore `active_stream_registry`/`_finalize` — is ever reached, so
+  the row never transitions to `FAILED`. Android's own
+  `TransferStreamManager` catches the resulting `ApiError` and shows
+  "Failed" locally (`mergeLiveTransferState`'s local-terminal-wins rule),
+  masking that the backend row is still genuinely `in_progress` forever —
+  confirmed live (`p144_fail_source.txt`, transfer id 505, stayed
+  `in_progress` throughout this entire milestone). This transfer correctly
+  stayed visible through every "Clear History" tap in this milestone
+  (per this milestone's own `in_progress`-is-never-hidden rule), which is
+  the *safe* outcome, but the underlying zombie-row bug itself predates
+  P14.4, is unrelated to it, and was not fixed here (out of scope per this
+  milestone's own instructions — "do not fix unrelated issues unless
+  required for P14.4 correctness"). Worth a future milestone: either have
+  `resolve_download_source`'s failure also finalize the transfer as
+  `FAILED`, or have `reconcile_interrupted_transfers` run periodically, not
+  only at startup.
+- **Pre-existing, unrelated to this milestone**: `shared_folder_id` reuse
+  across a `shared_folders` table that was reset/repopulated (as this dev
+  environment's `relay.db` had been, across prior milestones) can collide
+  with `files/folderIdentity.ts`'s registry, which is keyed by the numeric
+  id alone. Observed live: downloading a freshly-shared folder that
+  happened to be assigned `shared_folder_id = 1` (reused from an unrelated
+  folder in a prior session, literally named `share_test`) resolved to the
+  *old* folder's `localRoot` ("share_test") instead of the new folder's own
+  name ("folderX") — confirmed the *content* was still correct (byte sizes
+  matched the new folder exactly), only the on-device directory name was
+  the stale one. `folderIdentity.ts`'s own doc comment documents a related
+  but distinct limitation (registry survives app reinstall); this is the
+  same class of problem from database-side id reuse instead. Not fixed —
+  out of scope for P14.4, and this milestone's own feature never reads or
+  writes that registry, so it cannot make this pre-existing issue worse.
+
+## Documentation Synchronization
+
+- **README.md:** added a Features bullet for the Android transfer-history
+  reset, matching the existing convention for user-facing capabilities
+  (discovery, streaming, download location, etc.).
+- **docs/13_Database_Design.md:** added one clarifying sentence next to the
+  existing "`transfers` rows are never deleted by normal operation" line,
+  noting that P14.4's Android reset is a client-local filter that keeps
+  this invariant intact — this durable fact belongs exactly where the
+  invariant it depends on already lives, so a future reader doesn't have to
+  rediscover it.
+- **CLAUDE.md:** unchanged. The relevant durable invariant ("`transfers`
+  rows are never deleted by normal operation") already existed in
+  `docs/13_Database_Design.md` before this milestone and needed no new
+  restatement; this milestone introduces no new technology (Rule 2), no
+  new layer-boundary rule, and no backend change — matching the
+  P14.1/P14.2/P14.3 precedent of leaving this file alone for contained
+  feature work. Per this milestone's own instructions, not modified merely
+  to record that P14.4 happened.
+- **docs/11_File_Transfer.md:** reviewed — its transfer-lifecycle
+  description does not claim anything about client-side history
+  presentation (only the backend lifecycle, which is unchanged); left
+  unmodified.
+- **docs/14_Testing_Plan.md:** unchanged, following the same
+  P14.1/P14.2/P14.3 precedent — sub-milestones are tracked in this QA
+  notebook.
+- **.gitignore:** unchanged — the new marker file lives in the app's own
+  private on-device storage, not in the repository; no new repo-tracked
+  generated artifact was introduced.
+
+## Remaining Limitations
+
+- **A genuine backend-side `FAILED` transfer was not reproduced live**
+  within this milestone's time budget. Two safe attempts were made: (1) a
+  source file deleted before download surfaces the *pre-existing zombie-row
+  bug* above instead of a clean `FAILED` transition; (2) disabling the
+  phone's Wi-Fi client radio had no effect on the transfer in progress,
+  because in this test setup the phone is the Wi-Fi **hotspot** (access
+  point) the desktop connects to, not a Wi-Fi client — `svc wifi disable`
+  only toggles client-mode radio state, not hotspot/tethering. Restarting
+  the shared backend process (which would reconcile any stuck `in_progress`
+  row to `FAILED` via `reconcile_interrupted_transfers`) was deliberately
+  avoided, since it is a child process of the live Electron desktop app
+  this session did not start and was not asked to restart. `FAILED`
+  eligibility for history reset is instead established by: the backend's
+  own status enum and terminal-status grouping (code-reviewed above), and
+  direct unit-test coverage in `historyReset.test.ts`. A genuinely cancelled
+  transfer *was* reproduced and verified live as a substitute terminal-state
+  test, exercising the same `applyHistoryReset` code path a `failed` row
+  would.
+- **The two pre-existing, unrelated defects** documented above (the
+  zombie-`in_progress` row on early source-file deletion, and
+  `shared_folder_id` reuse colliding with the local folder-identity
+  registry) remain unfixed, by design (out of this milestone's scope).

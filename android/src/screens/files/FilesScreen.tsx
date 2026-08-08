@@ -196,11 +196,11 @@ export function FilesScreen() {
   // Subscribing here re-reads the registry the instant it's actually ready,
   // closing that window instead of just waiting it out.
   //
-  // Also drives the Queued/Downloading distinction below (P13.3 queue
-  // investigation): `streamKey` only changes on a genuine transferId/status
+  // Also drives the Queued/Downloading distinction below (P13.3, and its
+  // correction): `streamKey` only changes on a genuine transferId/status
   // transition (stream start, completion, failure, cancellation), not on
   // every in-flight progress tick, so this doesn't force a re-render for
-  // every byte-count update — just the moments TransferStreamManager.isActive
+  // every byte-count update — just the moments TransferStreamManager.isQueued
   // could actually give a different answer.
   const streamKeyRef = useRef<string | null>(null);
   const [, forceStreamRerender] = useReducer((n: number) => n + 1, 0);
@@ -509,10 +509,14 @@ export function FilesScreen() {
                 reconciledByFolderId[item.data.id],
                 localRootByFolderId[item.data.id] ? folderExistence[localRootByFolderId[item.data.id]] : undefined,
               )}
-              active={(folderFilesMap[item.data.id] ?? []).some(child => {
-                const transferId = latestSendTransferId(child.id, transfers);
-                return transferId != null && TransferStreamManager.isActive(transferId);
-              })}
+              queued={(() => {
+                const children = folderFilesMap[item.data.id] ?? [];
+                const childTransferIds = children
+                  .map(child => latestSendTransferId(child.id, transfers))
+                  .filter((id): id is number => id != null);
+                const anyActive = childTransferIds.some(id => TransferStreamManager.isActive(id));
+                return !anyActive && childTransferIds.some(id => TransferStreamManager.isQueued(id));
+              })()}
               onDownload={() => handleFolderDownload(item.data)}
               onOpen={() => handleOpenFolder(item.data)}
             />
@@ -523,9 +527,9 @@ export function FilesScreen() {
               requestError={requestErrors[item.data.id]}
               openError={openErrors[item.data.id]}
               status={deriveDownloadStatus(item.data.id, requests, transfers, existence[item.data.file_name])}
-              active={(() => {
+              queued={(() => {
                 const transferId = latestSendTransferId(item.data.id, transfers);
-                return transferId != null && TransferStreamManager.isActive(transferId);
+                return transferId != null && TransferStreamManager.isQueued(transferId);
               })()}
               onDownload={() => handleDownload(item.data)}
               onOpen={() => handleOpen(item.data)}
@@ -553,23 +557,31 @@ export function FilesScreen() {
 // which added a meaningless extra step; showing the real label immediately
 // lets the user transition straight into it once the polled data confirms
 // the same thing.
-// `active` (P13.3, queue investigation) distinguishes "this row's bytes are
-// actually moving right now" (TransferStreamManager.isActive) from "the
-// backend already considers this an in-progress transfer" (status.kind ===
-// 'in_progress', true from the moment it's proposed — see
-// TransferService._create_transfer). Before this, a transfer waiting behind
-// another one in TransferStreamManager's FIFO queue (Milestone P11) showed
-// "Downloading..." from the moment it was proposed, indistinguishable from
-// the one whose bytes were actually streaming — misleading, and the queue
-// investigation's own physical verification (a 51 MB file immediately
-// followed by a 6 B tap) is exactly the scenario that surfaces it.
-function downloadButtonLabel(requesting: boolean, status: FileDownloadStatus, active: boolean): string {
+// `queued` (P13.3 correction) distinguishes "this row is genuinely sitting
+// in TransferStreamManager's FIFO queue behind another active stream"
+// (TransferStreamManager.isQueued) from "the backend already considers this
+// an in-progress transfer" (status.kind === 'in_progress', true from the
+// moment it's proposed — see TransferService._create_transfer). A first
+// attempt at this distinction (original P13.3) used the inverse of
+// isActive() instead — "Queued" whenever this row wasn't the one observed
+// streaming — which misfired on a single, unqueued download: isActive()
+// only starts reporting true once TransferStreamManager.start() has gotten
+// past its own internal `await`s (the POST_NOTIFICATIONS permission
+// request), so a lone transfer briefly looked exactly like one waiting in
+// line the instant FilesScreen's poll caught status.kind === 'in_progress'
+// ahead of that. isQueued() has no equivalent gap — it only ever reflects
+// actual membership in `queue`, itself only ever populated synchronously —
+// so "Queued" now only appears for a transfer genuinely waiting behind
+// another one in TransferStreamManager's FIFO queue (Milestone P11);
+// anything else in_progress (including that same startup window) defaults
+// to "Downloading...", matching what's actually about to happen.
+export function downloadButtonLabel(requesting: boolean, status: FileDownloadStatus, queued: boolean): string {
   if (requesting) return 'Downloading...';
   switch (status.kind) {
     case 'pending':
       return 'Requested';
     case 'in_progress':
-      return active ? 'Downloading...' : 'Queued';
+      return queued ? 'Queued' : 'Downloading...';
     case 'failed':
       return 'Retry';
     default:
@@ -583,14 +595,18 @@ function downloadButtonLabel(requesting: boolean, status: FileDownloadStatus, ac
 // carries completedCount/totalCount (folderDownloadStatus.ts) for internal
 // use — e.g. deciding when a folder is fully 'completed' — just not for
 // display here.
-// See downloadButtonLabel's own doc comment for what `active` distinguishes.
-// A folder's `active` is true when any of its currently-fetched children is
-// the one TransferStreamManager is actually streaming right now.
-function folderDownloadButtonLabel(requesting: boolean, status: FolderDownloadStatus, active: boolean): string {
+// See downloadButtonLabel's own doc comment for what `queued` distinguishes.
+// A folder's `queued` is true only when none of its currently-fetched
+// children is the one actually streaming *and* at least one of them is
+// genuinely sitting in TransferStreamManager's queue — so a folder whose
+// first child is still in that same pre-`isActive` startup window (no
+// sibling queued behind it yet either) still reads "Downloading...", not
+// "Queued".
+export function folderDownloadButtonLabel(requesting: boolean, status: FolderDownloadStatus, queued: boolean): string {
   if (requesting) return 'Downloading...';
   switch (status.kind) {
     case 'in_progress':
-      return active ? 'Downloading...' : 'Queued';
+      return queued ? 'Queued' : 'Downloading...';
     case 'failed':
       return 'Retry';
     default:
@@ -604,7 +620,7 @@ function FileRow({
   requestError,
   openError,
   status,
-  active,
+  queued,
   onDownload,
   onOpen,
 }: {
@@ -613,7 +629,7 @@ function FileRow({
   requestError?: string;
   openError?: string;
   status: FileDownloadStatus;
-  active: boolean;
+  queued: boolean;
   onDownload: () => void;
   onOpen: () => void;
 }) {
@@ -654,7 +670,7 @@ function FileRow({
         </Pressable>
       ) : (
         <Pressable style={styles.downloadButton} onPress={onDownload} disabled={disabled}>
-          <Text style={styles.downloadButtonText}>{downloadButtonLabel(requesting, status, active)}</Text>
+          <Text style={styles.downloadButtonText}>{downloadButtonLabel(requesting, status, queued)}</Text>
         </Pressable>
       )}
     </View>
@@ -667,7 +683,7 @@ function FolderRow({
   requestError,
   openError,
   status,
-  active,
+  queued,
   onDownload,
   onOpen,
 }: {
@@ -676,7 +692,7 @@ function FolderRow({
   requestError?: string;
   openError?: string;
   status: FolderDownloadStatus;
-  active: boolean;
+  queued: boolean;
   onDownload: () => void;
   onOpen: () => void;
 }) {
@@ -710,7 +726,7 @@ function FolderRow({
         </Pressable>
       ) : (
         <Pressable style={styles.downloadButton} onPress={onDownload} disabled={disabled}>
-          <Text style={styles.downloadButtonText}>{folderDownloadButtonLabel(requesting, status, active)}</Text>
+          <Text style={styles.downloadButtonText}>{folderDownloadButtonLabel(requesting, status, queued)}</Text>
         </Pressable>
       )}
     </View>

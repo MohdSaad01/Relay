@@ -212,6 +212,18 @@ export const TransferStreamManager = {
   },
 
   /**
+   * True only while this exact transfer is genuinely sitting in the FIFO
+   * queue behind another active stream (P13.3 correction). `queue` is only
+   * ever populated by enqueue(), itself only reached from start()'s
+   * synchronous guard check — so, unlike isActive() above, there is no
+   * window where a transfer is queued without this already reporting it:
+   * no async gap for a caller to race against.
+   */
+  isQueued(transferId: number): boolean {
+    return queue.some(queued => queued.id === transferId);
+  },
+
+  /**
    * Starts streaming `transfer`'s bytes. If this app is already streaming
    * something else, `transfer` is queued and started automatically once the
    * active stream finishes (see `queue` above) rather than dropped. A no-op

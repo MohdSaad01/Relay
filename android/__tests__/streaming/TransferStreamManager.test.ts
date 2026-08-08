@@ -507,3 +507,90 @@ test('cancelActive() is a no-op when nothing is streaming', async () => {
   await TransferStreamManager.cancelActive();
   expect(mockCancelTransfer).not.toHaveBeenCalled();
 });
+
+describe('isQueued()', () => {
+  // P13.3 correction: isQueued() is the source of truth FilesScreen now
+  // relies on to show "Queued" — these pin down the exact moments it must
+  // (and must not) report true, since a false positive during a lone
+  // transfer's own startup window is exactly the regression this milestone
+  // fixed.
+  test('is false for a transfer that was never started', () => {
+    expect(TransferStreamManager.isQueued(999)).toBe(false);
+  });
+
+  test('is false for the sole transfer streaming alone (never queued)', async () => {
+    mockDownloadFile.mockReturnValue(makeTask(Promise.resolve()));
+
+    await TransferStreamManager.start({ ...sendTransfer, id: 80 });
+
+    expect(TransferStreamManager.isQueued(80)).toBe(false);
+  });
+
+  test('is true the instant a second transfer arrives behind an active stream, before it ever starts running', async () => {
+    let resolveFirst: () => void = () => {};
+    mockDownloadFile.mockReturnValueOnce(
+      makeTask(
+        new Promise<void>(resolve => {
+          resolveFirst = resolve;
+        }),
+      ),
+    );
+    mockDownloadFile.mockReturnValueOnce(makeTask(Promise.resolve()));
+
+    const firstStart = TransferStreamManager.start({ ...sendTransfer, id: 90 });
+    await waitUntil(() => TransferStreamManager.getState()?.status === 'streaming');
+
+    const secondStart = TransferStreamManager.start({ ...sendTransfer, id: 91 });
+    expect(TransferStreamManager.isQueued(91)).toBe(true);
+    expect(TransferStreamManager.isActive(91)).toBe(false);
+
+    resolveFirst();
+    await firstStart;
+    await secondStart;
+
+    // Once 91 actually starts running, it is no longer queued.
+    await waitUntil(() => TransferStreamManager.getState()?.transferId === 91);
+    expect(TransferStreamManager.isQueued(91)).toBe(false);
+    await waitUntil(() => TransferStreamManager.getState()?.status === 'completed');
+  });
+
+  test('a third transfer is queued behind the second, not the first', async () => {
+    // Each of the three downloads is held open by its own resolver rather
+    // than left to auto-resolve — an already-resolved mock task lets a
+    // chained auto-start (100 -> 101 -> 102) cascade across several
+    // microtasks before waitUntil's setTimeout(0)-based poll ever gets a
+    // turn, making the "101 is briefly the active one" middle state
+    // unobservably flaky. Holding each open makes every step deterministic.
+    let resolveFirst: () => void = () => {};
+    let resolveSecond: () => void = () => {};
+    mockDownloadFile.mockReturnValueOnce(
+      makeTask(new Promise<void>(resolve => (resolveFirst = resolve))),
+    );
+    mockDownloadFile.mockReturnValueOnce(
+      makeTask(new Promise<void>(resolve => (resolveSecond = resolve))),
+    );
+    mockDownloadFile.mockReturnValueOnce(makeTask(Promise.resolve()));
+
+    const firstStart = TransferStreamManager.start({ ...sendTransfer, id: 100 });
+    await waitUntil(() => TransferStreamManager.getState()?.status === 'streaming');
+
+    await TransferStreamManager.start({ ...sendTransfer, id: 101 });
+    await TransferStreamManager.start({ ...sendTransfer, id: 102 });
+
+    expect(TransferStreamManager.isQueued(101)).toBe(true);
+    expect(TransferStreamManager.isQueued(102)).toBe(true);
+
+    resolveFirst();
+    await firstStart;
+
+    await waitUntil(() => TransferStreamManager.getState()?.transferId === 101);
+    expect(TransferStreamManager.isQueued(101)).toBe(false);
+    expect(TransferStreamManager.isQueued(102)).toBe(true);
+
+    resolveSecond();
+    await waitUntil(() => TransferStreamManager.getState()?.transferId === 102);
+    expect(TransferStreamManager.isQueued(102)).toBe(false);
+
+    await waitUntil(() => TransferStreamManager.getState()?.status === 'completed');
+  });
+});

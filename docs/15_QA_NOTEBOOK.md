@@ -2578,3 +2578,224 @@ without changing who owns what:
   local files on rename/removal are not cleaned up, byte-identical-size
   content edits remain undetectable, and the registry does not survive a
   reinstall.
+
+---
+
+# Milestone P13.3 Correction — Single-Transfer "Queued" Regression
+
+## Objective
+
+The queue-label fix landed by P13.3 above (`active` = `TransferStreamManager.isActive(transferId)`,
+`'Queued'` shown whenever `status.kind === 'in_progress'` and a row wasn't the
+one `isActive` reported streaming) shipped a regression that P13.3's own
+verification did not catch: downloading a single file or a single folder —
+with nothing else queued behind it — now briefly showed `Queued` instead of
+going straight from `Downloading...` to `Open`. This entry re-investigates
+from the physical device first, per this correction's own instructions, and
+does not assume the prior report's root cause or fix were correct going in.
+
+## What Was Initially Observed
+
+User report: a lone download (one file or one folder, nothing else in
+flight) displayed `Download → Downloading... → Queued → Open`. A visible
+`Queued` state should never occur for a transfer that is not genuinely
+waiting behind another one in `TransferStreamManager`'s FIFO queue
+(Milestone P11).
+
+## Live Device Reproduction (before any code change)
+
+Device: physical RMX3997 (realme C65 5G), USB-connected, ADB serial
+`69DADENFONAIOZS4`, backend/Android communicating over the phone's own
+hotspot (`10.169.164.233:8000`), matching P13.3's own verification setup.
+Backend and Electron desktop were already running; Metro (`8081`) was
+already running.
+
+**Test A (single file, 32 MB `single_big.bin`):** rapid `adb exec-out
+screencap` burst (~500 ms cadence) across the whole download. Confirmed
+live: frame at t≈0 ms showed `Downloading...` (the `requesting` window),
+frame at t≈1054 ms showed **`Queued`**, frame at t≈2006 ms was back to
+`Downloading...`, and the transfer finished normally at `Open`. Cross-checked
+against `GET /transfers`: exactly one Transfer row (id 453) existed for this
+download the entire time — no second transfer was ever proposed, so nothing
+could have been genuinely sitting in `TransferStreamManager`'s FIFO queue.
+
+**Test B (single folder, 2-file `folderA`):** same capture method. Frame at
+t≈1941 ms showed the whole folder row as **`Queued`**, despite only its own
+two children being involved and no other item downloading.
+
+Both reproductions confirm the bug is real and occurs for both files and
+folders, exactly as reported — not something introduced only by the report's
+retelling.
+
+## Root Cause
+
+Traced from `TransferStreamManager.start()` (`android/src/streaming/TransferStreamManager.ts`)
+and `FilesScreen`'s label functions (`android/src/screens/files/FilesScreen.tsx`):
+
+- The backend flips `Transfer.status` to `in_progress` the instant a download
+  is *proposed* (`TransferService._create_transfer`) — well before this
+  app's own stream has moved a single byte.
+- `TransferStreamManager.start()` does not commit `state.status = 'streaming'`
+  synchronously either: it sets an internal `starting` flag first, then
+  `await`s `PermissionsAndroid.request(POST_NOTIFICATIONS)` (an unavoidable
+  async gap — the very race the *original* P13 hardening pass, "start()
+  calls fired back-to-back do not both begin streaming," was built around),
+  and only commits `state` after that resolves.
+- The P13.3 label logic used `active = TransferStreamManager.isActive(transferId)`
+  and rendered `'Queued'` for **anything** `in_progress` that wasn't
+  `isActive` yet — treating "not yet observed as active" as equivalent to
+  "genuinely waiting in the FIFO queue." Those are not the same thing:
+  `isActive()` only starts returning `true` once `start()` gets past its own
+  `await`, so a lone, never-queued transfer looks *identical* to a queued one
+  for that entire window, the moment `FilesScreen`'s 2000ms poll observes
+  `status.kind === 'in_progress'` ahead of it.
+- For the folder case (Test B), the same gap applies per-child: the folder's
+  `active` aggregate (`some(child => isActive(...))`) is also false during
+  that window, with the same result at the folder-row level. A second,
+  narrower version of the same gap also appears immediately after a child
+  finishes and the FIFO queue hands the next child off (`queue.shift()` in
+  `start()`'s `finally` block) — the newly-dequeued child is no longer in
+  `queue` (so it doesn't read as queued) but also isn't `isActive` yet until
+  its own `start()` call gets past the same `await` — another brief false
+  `Queued`.
+
+In short: `isActive()` has a real gap between "this call has started" and
+"this call is now the observed active stream," and the P13.3 fix used the
+*inverse* of that gap as its definition of `Queued`, which is wrong — a
+missing/not-yet-true `isActive` was being misread as `Queued` rather than
+as "not yet known, default to Downloading."
+
+## The State Invariant
+
+A transfer is visibly `Queued` only when it has been requested, has not yet
+become the active stream, another transfer currently occupies the
+single-stream slot, and it is actually waiting in `TransferStreamManager`'s
+FIFO queue. Anything else that is `in_progress` — including the startup
+window described above — must default to `Downloading...`, never `Queued`.
+
+## Fix
+
+`android/src/streaming/TransferStreamManager.ts`: added
+`isQueued(transferId): boolean`, reading FIFO membership
+(`queue.some(...)`) directly. Unlike `isActive()`, this has no async gap —
+`queue` is only ever populated by `enqueue()`, itself only ever reached
+synchronously from `start()`'s own guard check, so there is no window where
+a transfer is genuinely queued without `isQueued()` already reporting it.
+
+`android/src/screens/files/FilesScreen.tsx`: `downloadButtonLabel`/
+`folderDownloadButtonLabel` now take a `queued` boolean (not `active`) and
+render `'Queued'` only when it's true — anything else `in_progress` now
+defaults to `'Downloading...'`, restoring the pre-P13.3 behavior for the
+common case while still distinguishing a genuinely queued row. The file-row
+call site computes `queued` directly from `isQueued(transferId)`; the
+folder-row call site computes it as "no child is `isActive`, and at least
+one child `isQueued`" — so a folder with one child actively streaming and
+a sibling genuinely waiting still correctly reads `Downloading...`, not
+`Queued`.
+
+## Files Modified
+
+- `android/src/streaming/TransferStreamManager.ts` — added `isQueued()`.
+- `android/src/screens/files/FilesScreen.tsx` — `active` → `queued`
+  throughout (call sites, both label functions' signatures and switch
+  branches, `FileRow`/`FolderRow` prop types), doc comments updated;
+  `downloadButtonLabel`/`folderDownloadButtonLabel` exported for direct unit
+  testing (previously module-private).
+- `android/__tests__/streaming/TransferStreamManager.test.ts` — added an
+  `isQueued()` describe block: false for a never-started transfer, false for
+  a lone streaming transfer, true the instant a second transfer arrives
+  behind an active one (before it ever runs), and correct FIFO handoff
+  across three chained transfers.
+- `android/__tests__/screens/files/downloadButtonLabel.test.ts` (new) —
+  direct unit tests for both exported label functions: a lone in-progress
+  download/folder reads `Downloading...`, never `Queued`; a genuinely queued
+  one reads `Queued`; the `requesting` window and idle/failed/pending
+  statuses are unaffected by `queued`.
+
+## Automated Test Results
+
+`npx tsc --noEmit`: clean. `npx jest`: 244/244 passing (up from 232 at the
+close of P13.3 — 12 new regression tests: 4 in `TransferStreamManager.test.ts`,
+8 in the new `downloadButtonLabel.test.ts`).
+
+## Physical-Device Verification (after the fix)
+
+App reloaded from the fixed bundle (force-stop + relaunch, `adb reverse
+tcp:8081 tcp:8081` re-established after a mid-session USB drop, RN dev-menu
+`Reload` to recover from a stale "Unable to load script" state after the
+force-stop). All tests re-run live against the same physical device/hotspot
+setup as the reproduction above, with fresh shared content each time (prior
+test files reused from the reproduction pass were already `Open`).
+
+- **Test A (single file, fresh 2 MB `small_a.bin`):** 30-frame burst
+  (~700 ms cadence, 22.5 s total). `Downloading...` continuously from t≈44 ms
+  through t≈2282 ms (spanning and past the exact window that previously
+  flashed `Queued`) to `Open` by t≈3747 ms. Zero `Queued` frames.
+- **Test B (single folder, fresh 2-file `folderB`):** 20-frame burst
+  (~750 ms cadence). `Downloading...` at t≈787 ms and t≈2244 ms, `Open` by
+  t≈14780 ms (folder resolved and both children streamed and published
+  before the row settled). Zero `Queued` frames.
+- **Test C (two 40+ MB files tapped ~100 ms apart):** first row
+  `Downloading...`, second row correctly `Queued` (captured at t≈1549 ms);
+  both reached `Open`, second only after the first's stream actually
+  finished — matches `TransferStreamManager`'s FIFO order.
+- **Test D (three ~35-40 MB files tapped with a 0.5s stagger):** at
+  t≈2346 ms, item 1 `Downloading...`, items 2 and 3 both `Queued`; at
+  t≈8857 ms item 1 `Open`, item 2 `Downloading...`, item 3 still `Queued`;
+  at t≈23120 ms (final frame) item 2 `Open`, item 3 `Downloading...`. Order
+  matched the actual FIFO queue throughout.
+- **Test E (file + folder tapped ~400 ms apart):** the folder (tapped first)
+  read `Downloading...`, the file `Queued` (captured at t≈1725 ms); both
+  reached `Open` — confirms files and folders share identical queue
+  semantics through the same `TransferStreamManager` instance.
+- Backend cross-check: `GET /transfers` after each burst showed each row's
+  UI label backed by the real state — no failed transfers across the whole
+  session (all persisted Transfers ended `completed`).
+- `adb logcat` scanned across the full session for
+  `ReactNativeJS`+error/exception/fatal/reject: none found.
+
+## Regression Verification
+
+- **Folder Open:** tapped `Open` on the freshly-downloaded `folderE`;
+  Android's file manager opened directly into
+  `Download/Relay/folderE` showing both real, correctly-sized children —
+  MediaStore publishing and folder-Open intent both intact.
+- **File Open / on-device content:** navigating up from that same folder
+  view showed every test download (`big2.bin`…`big8.bin`, `d1.bin`…`d3.bin`,
+  etc.) present under `Download/Relay/` with correct sizes — confirms actual
+  bytes landed, not just a UI label change.
+- **Folder duplicate naming, folder freshness/external-deletion detection,
+  notification behavior:** untouched by this fix (no changes to
+  `folderIdentity.ts`, `folderDownloadStatus.ts`, `downloadNotification.ts`,
+  or `useFolderReconciliation.ts`); not re-exercised live this session since
+  the change has no code path into them — see P13.3's own verification above
+  for their last live confirmation.
+- Full automated suite (244 tests, including every pre-existing P13/P13.1/
+  P13.2/P13.3 regression test) still passes unmodified.
+
+## Documentation Changes
+
+This entry (`docs/15_QA_NOTEBOOK.md`). No architectural or invariant change
+to `docs/11_File_Transfer.md` — Milestone P11's single-active-stream + FIFO
+queue design is unchanged; only the UI's classification of that design's
+state was wrong. `docs/14_Testing_Plan.md` unchanged — no material change to
+the testing procedure itself.
+
+## CLAUDE.md
+
+No change. This correction is a milestone-specific implementation detail
+(a UI-state classification bug and its fix), not a new architectural
+decision, workflow rule, or durable project invariant — consistent with
+P13.3 above, which also made no CLAUDE.md change for a comparably detailed
+audit.
+
+## Remaining Limitations
+
+- Same as P13.3's own "Remaining Limitations" above — unchanged by this
+  correction, which touched only the queue-vs-active label classification.
+- The three-way (Test D) and mixed (Test E) live reproductions each required
+  a couple of retries to get reliable `adb shell input tap` delivery for a
+  third rapid tap in immediate succession — an artifact of synthetic input
+  injection timing on this device, not of the app; spacing taps by ~0.3-0.5s
+  resolved it. Not a product limitation, but worth noting for anyone
+  repeating this style of live multi-tap verification.

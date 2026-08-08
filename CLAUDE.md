@@ -150,7 +150,6 @@ Development
 * Visual Studio Code
 * Claude Code
 
-Claude Code must not replace major technologies without developer approval.
 
 ---
 
@@ -368,14 +367,18 @@ Every milestone should end with:
 ---
 ## Documentation Ownership
 
-The developer owns all documentation.
+Claude Code may modify project documentation when the changes are necessary to keep it accurate and up to date.
 
-Claude Code must **never automatically modify**:
+This includes:
 
-* CLAUDE.md
+* `CLAUDE.md`
+* `README.md`
+* Documentation inside `/docs`
+* Component-specific documentation such as `backend/README.md` and `android/README.md`
 
-Claude Code may recommend documentation updates when information becomes outdated, but should wait for developer approval before making documentation changes.
+Whenever an implementation, architecture, workflow, milestone, configuration, or project status changes, Claude Code should update the relevant documentation to reflect the current state.
 
-Implementation-specific documentation may be updated only when explicitly requested.
+Claude Code should not make unnecessary documentation changes unrelated to the task.
+
 
 ---

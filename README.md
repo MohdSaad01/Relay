@@ -73,8 +73,7 @@ touches SQLAlchemy. See `docs/02_Architecture.md`.
 
 ## Tech Stack
 
-Finalized for Version 1 (`docs/03_Tech_Stack.md`); Claude Code must not
-replace any of these without developer approval.
+Finalized for Version 1 (`docs/03_Tech_Stack.md`); 
 
 * **Desktop:** Electron, HTML, CSS, JavaScript
 * **Backend:** Python 3.13+, FastAPI, SQLAlchemy, SQLite, Pydantic, Uvicorn

@@ -50,7 +50,7 @@ from app.models.transfer import Transfer
 from app.repositories.transfer_repository import TransferRepository
 from app.services.active_stream_registry import ActiveStreamRegistry
 from app.services.app_settings_service import AppSettingsService
-from app.services.exceptions import ValidationError
+from app.services.exceptions import NotFoundError, ValidationError
 from app.services.shared_file_service import SharedFileService
 from app.utils.filesystem import (
     is_regular_file,
@@ -95,17 +95,30 @@ class TransferStreamService:
         Raises NotFoundError (via SharedFileService) if the shared file no
         longer exists in the database, ValidationError if the underlying
         file has disappeared, changed type, or changed size since the
-        transfer was accepted.
+        transfer was accepted. Either way, the transfer itself is finalized
+        as FAILED first: this check runs before stream_download ever
+        acquires the active-stream guard, so nothing else on this path would
+        otherwise move the transfer out of IN_PROGRESS, leaving it stuck
+        forever (docs/15_QA_NOTEBOOK.md, Milestone P14.4's "zombie row").
         """
-        if transfer.shared_file_id is None:
-            raise ValidationError("The shared file is no longer available.")
-        shared_file = self.shared_file_service.get_shared_file_or_raise(transfer.shared_file_id)
+        try:
+            if transfer.shared_file_id is None:
+                raise ValidationError("The shared file is no longer available.")
+            shared_file = self.shared_file_service.get_shared_file_or_raise(transfer.shared_file_id)
 
-        path = shared_file.file_path
-        if not path_exists(path) or is_symlink(path) or not is_regular_file(path):
-            raise ValidationError("The source file is no longer available.")
-        if os.path.getsize(path) != transfer.file_size:
-            raise ValidationError("The source file has changed since the transfer was accepted.")
+            path = shared_file.file_path
+            if not path_exists(path) or is_symlink(path) or not is_regular_file(path):
+                raise ValidationError("The source file is no longer available.")
+            if os.path.getsize(path) != transfer.file_size:
+                raise ValidationError("The source file has changed since the transfer was accepted.")
+        except (ValidationError, NotFoundError) as exc:
+            logger.warning(
+                "Download source unavailable, failing transfer: transfer_id=%s reason=%s",
+                transfer.id,
+                exc,
+            )
+            self._finalize(transfer.id, TransferStatus.FAILED, 0, failure_reason=str(exc))
+            raise
         return path
 
     @staticmethod

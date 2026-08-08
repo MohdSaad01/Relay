@@ -3920,3 +3920,271 @@ reset to endanger.
   zombie-`in_progress` row on early source-file deletion, and
   `shared_folder_id` reuse colliding with the local folder-identity
   registry) remain unfixed, by design (out of this milestone's scope).
+
+---
+
+# Milestone P15 — Backend: A Download Whose Source File Disappears Before Streaming Starts Left the Transfer Stuck `in_progress` Forever
+
+## Problem
+
+P14.4's own investigation flagged, but explicitly did not fix (out of that
+milestone's scope), a backend defect: `TransferStreamService
+.resolve_download_source` raises `ValidationError`/`NotFoundError` when a
+SEND transfer's source file is missing, unshared, or has changed size —
+but this check runs in the route handler *before* `stream_download` (and
+therefore `_finalize`) is ever reached, so nothing on that path ever moves
+the `Transfer` row out of `IN_PROGRESS`. The row stays stuck forever (or
+until the next backend restart's `reconcile_interrupted_transfers` sweep),
+misleading `GET /transfers/{id}` for any client still polling it, and — a
+consequence P14.4 itself surfaced live — a row in this state can never
+become eligible for P14.4's own "Clear History" filter, since that filter
+explicitly never hides a non-terminal transfer.
+
+## Requirements / Source of Truth
+
+`docs/15_QA_NOTEBOOK.md`'s own Milestone P14.4 entry ("Problems
+Discovered"): *"Worth a future milestone: either have
+`resolve_download_source`'s failure also finalize the transfer as
+`FAILED`, or have `reconcile_interrupted_transfers` run periodically, not
+only at startup."* This is the only concretely-scoped, directly-flagged
+"next milestone" item in the codebase at the time P15 was scoped — see the
+requirements-review step of this milestone for the other candidates
+considered and why this one was chosen first.
+
+## Architecture Investigation (before any code change)
+
+- `backend/app/api/v1/transfers.py`'s `download_transfer` route: calls
+  `service.get_transfer_or_raise`, checks direction/status, then calls
+  `stream_service.resolve_download_source(transfer)` as a **plain method
+  call** (not inside the generator `stream_download` returns) — confirmed
+  this runs synchronously in the route, before `_WriteTimeoutStreamingResponse`
+  is ever constructed, so a raised exception here goes straight to the
+  centralized exception handlers (`ValidationError` → 400,
+  `NotFoundError` → 404) with no opportunity for anything downstream
+  (`stream_download`, `_generate_download`, `_finalize`) to run.
+- `backend/app/services/transfer_stream_service.py`'s
+  `resolve_download_source`: has four raise sites — `transfer.shared_file_id
+  is None` (unshared), `SharedFileService.get_shared_file_or_raise` (shared
+  file row deleted outright), missing/symlink/non-regular file on disk, and
+  a size mismatch since acceptance. None of them touch the `Transfer` row.
+  Confirmed `_finalize` (already used by every other terminal transition in
+  this same file — `_generate_download`'s `OSError`/`GeneratorExit`
+  handlers, `receive_upload`'s three failure branches) is idempotent and
+  transfer-id-based (re-fetches fresh via `_current`, only mutates when
+  still `IN_PROGRESS`), making it directly reusable here without
+  duplicating its already-terminal-wins guard.
+- `backend/app/services/transfer_service.py`'s
+  `reconcile_interrupted_transfers`: confirmed startup-only (called once
+  from `app/main.py`'s lifespan), matching the QA notebook's own prior
+  finding — the second option P14.4 floated (running it periodically) would
+  additionally require new scheduling infrastructure this codebase doesn't
+  have anywhere else, for a class of defect the first option (fail fast, at
+  the source) fully closes without it. Chose the first option as the
+  smaller, more targeted fix (CLAUDE.md: no unrelated
+  infrastructure/scope beyond what the task requires).
+- Confirmed via `backend/tests/services/test_transfer_stream_service.py`
+  that all four raise sites were already covered by
+  `pytest.raises(ValidationError)`-style tests, none of which asserted
+  anything about the `Transfer` row's resulting status — the tests actively
+  encoded the pre-fix (broken) behavior as acceptable, though never as a
+  positive assertion that it stayed `IN_PROGRESS`.
+- Read `docs/11_File_Transfer.md` §13 ("Missing source file" is listed as a
+  failure to handle, with no claim about *how*) and `docs/13_Database_Design.md`
+  §7 (the `transfers.status` enum and `completed_at` semantics) — neither
+  document asserts the pre-fix behavior as correct; nothing to reconcile.
+
+## Requirements Review: Other Candidates Considered
+
+Two other pre-existing, documented-but-unfixed defects were found in the
+QA notebook and considered for P15 before this one was chosen:
+
+1. **Same-basename existence-status collision** (Milestone P3): two
+   different shared files downloaded with the same basename can make
+   Android's Files screen show "Open" for the wrong file's content.
+   Android-only, `files/downloadStatus.ts`/`useDownloadExistence.ts`.
+2. **`shared_folder_id` reuse** (Milestone P14.4): a `shared_folders`
+   table whose auto-increment ids get reused (only reachable via a reset/
+   repopulated database, not normal operation) can collide with
+   `folderIdentity.ts`'s local registry.
+
+Both are real and worth fixing, but neither was as concretely scoped as
+the zombie-row defect (P14.4 gave two named implementation options for it
+specifically), and both are Android-side UI-correctness issues rather than
+a backend data-integrity issue that also blocks a just-shipped feature
+(P14.4's own history reset) from ever working against this class of row.
+Chosen order, per this milestone's own instructions (architectural
+dependency, risk of regression, ease of physical verification, minimizing
+unrelated changes): **P15 = this backend fix** (self-contained, one
+service file, directly and easily reproducible on the physical device
+without any UI ambiguity); the other two are candidates for **P16**
+(same-basename collision) and **P17** (`shared_folder_id` reuse), in that
+order, should they be taken up next — not started as part of this
+milestone.
+
+## Physical Baseline (before any code change)
+
+Device: physical RMX3997, ADB serial `69DADENFONAIOZS4`, already paired
+and in the foreground. Backend (port 8000) and Metro (port 8081) were
+already running from a prior live session — confirmed via `netstat` and
+`adb devices` — with the backend reachable over the phone's own hotspot
+(`10.169.164.233`), matching every prior milestone's setup in this
+notebook.
+
+Reproduced live, against the **pre-fix** code, via the real app:
+
+1. Shared a fresh, dedicated test file (`p15_zombie_test.txt`, 31 B) via
+   the desktop's own loopback `POST /files` (legitimate per P13/P14.4's own
+   precedent — equivalent to using the desktop UI).
+2. Deleted the file's source from disk.
+3. Tapped **Download** on it from the real Files screen (screenshot
+   confirmed the row, then the tap).
+4. `GET /api/v1/transfers/{id}` confirmed `status: "in_progress"`,
+   `bytes_transferred: 0`, indefinitely — the Android Transfers screen's
+   own row matched exactly: **"In progress · 0 B / 31 B"**, never settling,
+   with "Clear History" left disabled by the P14.4 filter (a non-terminal
+   transfer is never eligible). `backend/logs/relay.log` confirmed the
+   exact defect: `Validation error on GET
+   /api/v1/transfers/513/download: The source file is no longer
+   available.` with no subsequent "Download completed"/"Download failed"
+   log line ever following — the row was permanently orphaned.
+5. Independently cross-checked against transfer id 505
+   (`p144_fail_source.txt`), the exact zombie row P14.4's own live session
+   had already produced and left stuck — still `in_progress` in the
+   database at the start of this milestone, confirming the defect had
+   persisted, unfixed, since that session.
+
+## Root Cause
+
+`resolve_download_source` validates the download's source and raises on
+failure, but has no side effect on the `Transfer` row it's validating for
+— finalizing that row was implicitly assumed to happen elsewhere, but
+nothing downstream of this specific raise ever runs.
+
+## Solution
+
+`resolve_download_source` (`backend/app/services/transfer_stream_service.py`)
+now wraps its existing validation body in a `try`/`except
+(ValidationError, NotFoundError)`: on any of its four existing raise
+conditions, it calls the same `_finalize(transfer.id,
+TransferStatus.FAILED, 0, failure_reason=str(exc))` every other terminal
+transition in this file already uses, logs a `warning` (matching this
+file's existing log-then-finalize pattern in `_mark_connection_lost`), then
+re-raises the original exception unchanged — so the route's response to
+the client (400/404, same message) is byte-for-byte identical to before;
+only the `Transfer` row's fate changes. `_finalize`'s own
+already-terminal-wins guard means a transfer cancelled or otherwise
+finalized by a race just before this runs is left untouched, not
+overwritten.
+
+Considered and rejected: making `reconcile_interrupted_transfers` run
+periodically (P14.4's second suggested option) — a broader, new piece of
+scheduling infrastructure that would still leave a row stuck for up to a
+full sweep interval, versus finalizing it in the same request that
+discovers the problem. The chosen fix is strictly smaller and fully closes
+the defect rather than bounding it.
+
+## Files Changed
+
+Modified: `backend/app/services/transfer_stream_service.py`
+(`resolve_download_source`, `NotFoundError` import).
+
+Test: `backend/tests/services/test_transfer_stream_service.py` — the three
+existing raise-path tests
+(`test_resolve_download_source_raises_when_shared_file_unshared`,
+`_when_file_missing`, `_when_size_changed`) now additionally assert the
+`Transfer` row reaches `FAILED` with the matching `failure_reason`; one new
+test, `test_resolve_download_source_leaves_already_terminal_transfer_untouched`,
+pins the already-terminal-wins guard (a transfer cancelled just before its
+source is found missing keeps `CANCELLED`, not overwritten to `FAILED`).
+
+No Android or desktop files changed — this is a backend-only,
+service-layer fix.
+
+## Automated Tests
+
+- `python -m pytest` (backend): 340 passed, 2 skipped (339 + 1 net new).
+  Every pre-existing test passed with only the three assertions above
+  added, none of the pre-fix behavior needed relaxing.
+- `ruff check app tests`: clean.
+- Android, Desktop: untouched by this milestone; not re-run.
+
+## Physical-Device Verification
+
+Re-verified live on RMX3997 after the fix, restarting the dev backend
+process (confirmed via `Get-CimInstance`/process tree that it was a
+standalone `uvicorn` process started directly by a prior automated
+session's shell, **not** a child of the running Electron desktop app —
+unlike the child-process case P14.4 deliberately avoided restarting, this
+one was safe to restart) — the restart's own
+`reconcile_interrupted_transfers` sweep first retroactively cleared the
+pre-existing stuck row (505/513) to `FAILED` with `"Interrupted by backend
+restart."`, confirmed via `GET /transfers/513` and the Files screen's
+"Retry" button/red error text, replacing the indefinite "Downloading..."
+state.
+
+Then, against the **running, fixed** backend, with no further restart:
+
+| Step | Result |
+|---|---|
+| Shared a fresh file (`p15_zombie_test_v2.txt`, 30 B) via loopback `POST /files` | `id=2` |
+| Deleted its source from disk | confirmed via `ls` |
+| Tapped Download on the real Files screen | — |
+| Files screen, immediately | **"The source file is no longer available."** in red, with a **Retry** button — no longer "Downloading..." |
+| Transfers screen | Row shows **Failed** (not "In progress") |
+| `GET /api/v1/transfers/{id}` | `status: "failed"`, `failure_reason: "The source file is no longer available."`, `completed_at` set ~130ms after `started_at` |
+| `backend/logs/relay.log` | New line: `WARNING ... Download source unavailable, failing transfer: transfer_id=514 reason=The source file is no longer available.` |
+| P14.4 integration | Both the reconciled row and the freshly-failed row now show **Failed** on the Transfers screen with **Clear History enabled** (red, tappable) — confirming this fix makes a P14.4 "Clear History" pass actually reach this class of row for the first time, closing the exact gap P14.4's own physical verification flagged it could not reach |
+
+Cleanup: unshared both test files (`DELETE /api/v1/files/{id}`); the
+device's own pre-existing pairing and unrelated content were left
+untouched, matching this notebook's established cleanup convention.
+
+## Problems Discovered
+
+- None new. (A brief, ultimately benign puzzle during cleanup — two
+  `DELETE /files/{id}` calls appeared to 404 unexpectedly — was root-caused
+  to the first of two redundant delete attempts already having succeeded
+  silently on a 204 No Content response; not a defect.)
+
+## Defects Fixed vs. Intentionally Deferred
+
+**Fixed:** the zombie-`in_progress` row on a SEND transfer whose source
+becomes invalid before streaming starts (this milestone).
+
+**Intentionally deferred (not part of P15):** the same-basename
+existence-status collision (P3) and the `shared_folder_id` reuse defect
+(P14.4) — see Requirements Review above; proposed as P16 and P17
+respectively, not started.
+
+## Documentation Synchronization
+
+- **docs/15_QA_NOTEBOOK.md:** this entry.
+- **docs/11_File_Transfer.md, docs/13_Database_Design.md:** reviewed —
+  neither document asserted the pre-fix (broken) behavior, so neither
+  needed correcting; both already describe "missing source file" and the
+  `transfers.status` enum abstractly enough to remain accurate.
+- **CLAUDE.md:** unchanged — this is a contained bug fix within the
+  existing `TransferStreamService`, reusing its own existing `_finalize`
+  helper; it introduces no new technology (Rule 2), no new layer-boundary
+  rule, and no new durable invariant beyond what `_finalize`'s
+  already-established contract already covers. Matches the P14.1–P14.4
+  precedent of leaving this file alone for contained fixes.
+- **README.md:** unchanged — not a new user-facing feature; the visible
+  effect (a failed download now correctly shows "Failed"/"Retry" instead
+  of hanging on "Downloading...") is a correctness fix to already-documented
+  behavior, not a new capability to list.
+- **.gitignore:** unchanged — no new generated/local artifact.
+
+## Remaining Limitations
+
+- The two deferred defects (same-basename collision, `shared_folder_id`
+  reuse) remain unfixed, by design — proposed as P16/P17, not started.
+- This fix covers every raise path inside `resolve_download_source`
+  specifically (the only place P14.4 identified this gap). It does not
+  audit every other service method for the same "raises before any
+  terminal-state side effect" shape; none surfaced during this milestone's
+  investigation, but a systematic audit was outside this milestone's scope.
+
+## Verdict
+
+**P15 COMPLETE.**

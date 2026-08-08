@@ -94,18 +94,32 @@ def test_resolve_download_source_raises_when_shared_file_unshared(db_session: Se
     # only reflects it in-memory once this session's commit (above) expires
     # and refreshes the object, which is what actually happens here.
 
+    service = _stream_service(db_session)
     with pytest.raises(ValidationError):
-        _stream_service(db_session).resolve_download_source(transfer)
+        service.resolve_download_source(transfer)
+
+    updated = service.transfer_repository.get_by_id(transfer.id)
+    assert updated.status is TransferStatus.FAILED
+    assert updated.failure_reason == "The shared file is no longer available."
 
 
 def test_resolve_download_source_raises_when_file_missing(db_session: Session, tmp_path: Path) -> None:
+    """Regression for docs/15_QA_NOTEBOOK.md Milestone P14.4's "zombie row":
+    a source file deleted before the first download byte is requested must
+    fail the transfer, not leave it stuck IN_PROGRESS forever."""
     device = _register_device(db_session)
     file_path = _make_file(tmp_path)
     transfer = _accept_download(db_session, device, file_path)
     Path(file_path).unlink()
 
+    service = _stream_service(db_session)
     with pytest.raises(ValidationError):
-        _stream_service(db_session).resolve_download_source(transfer)
+        service.resolve_download_source(transfer)
+
+    updated = service.transfer_repository.get_by_id(transfer.id)
+    assert updated.status is TransferStatus.FAILED
+    assert updated.failure_reason == "The source file is no longer available."
+    assert updated.completed_at is not None
 
 
 def test_resolve_download_source_raises_when_size_changed(db_session: Session, tmp_path: Path) -> None:
@@ -114,8 +128,34 @@ def test_resolve_download_source_raises_when_size_changed(db_session: Session, t
     transfer = _accept_download(db_session, device, file_path)
     Path(file_path).write_bytes(b"a much longer replacement file body")
 
+    service = _stream_service(db_session)
     with pytest.raises(ValidationError):
-        _stream_service(db_session).resolve_download_source(transfer)
+        service.resolve_download_source(transfer)
+
+    updated = service.transfer_repository.get_by_id(transfer.id)
+    assert updated.status is TransferStatus.FAILED
+    assert updated.failure_reason == "The source file has changed since the transfer was accepted."
+
+
+def test_resolve_download_source_leaves_already_terminal_transfer_untouched(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """A transfer cancelled just before its source is found missing must keep
+    its CANCELLED status, not be overwritten to FAILED — the same
+    already-terminal-wins rule `_finalize` applies everywhere else."""
+    device = _register_device(db_session)
+    file_path = _make_file(tmp_path)
+    transfer = _accept_download(db_session, device, file_path)
+    Path(file_path).unlink()
+    service = _stream_service(db_session)
+    transfer.status = TransferStatus.CANCELLED
+    db_session.commit()
+
+    with pytest.raises(ValidationError):
+        service.resolve_download_source(transfer)
+
+    updated = service.transfer_repository.get_by_id(transfer.id)
+    assert updated.status is TransferStatus.CANCELLED
 
 
 # --- stream_download --------------------------------------------------------------

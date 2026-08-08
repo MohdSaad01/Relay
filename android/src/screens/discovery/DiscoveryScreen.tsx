@@ -10,10 +10,20 @@ import { PairingStackParamList } from '../../navigation/types';
 type Navigation = NativeStackNavigationProp<PairingStackParamList, 'Discovery'>;
 
 /**
- * Purely informational: lists desktops currently broadcasting on the LAN.
- * Pairing itself never depends on this list — "Scan QR to Pair" is always
- * available regardless of what (if anything) has been discovered, since the
- * QR payload carries everything needed on its own.
+ * Lists desktops currently broadcasting on the LAN and lets the user tap one
+ * to start pairing with it. This list is still purely a UX convenience, not
+ * a source of truth for pairing — "Scan QR to Pair" stays available
+ * regardless of what (if anything) has been discovered, since the QR
+ * payload carries everything the pairing flow itself needs on its own.
+ * Tapping a specific row instead of the generic button just carries that
+ * device's (IP, port) along so QrScanScreen can flag a scanned QR that
+ * belongs to a different desktop (see qrPayload.ts's matchesSelectedDesktop).
+ *
+ * There is no "already paired" state to distinguish here: this whole screen
+ * only ever renders while unpaired (RootNavigator swaps to MainTabs the
+ * instant pairing succeeds — see secureStorage.ts, "only ever one paired
+ * desktop per device in V1"), so every row shown is, by construction, not
+ * yet paired with this phone.
  */
 export function DiscoveryScreen() {
   const navigation = useNavigation<Navigation>();
@@ -35,17 +45,30 @@ export function DiscoveryScreen() {
         data={desktops}
         keyExtractor={item => item.instanceId}
         renderItem={({ item }: { item: DiscoveredDesktop }) => (
-          <View style={styles.row}>
-            <Text style={styles.name}>{item.displayName}</Text>
-            <Text style={styles.address}>{item.desktopIp}</Text>
-          </View>
+          <Pressable
+            style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
+            onPress={() => navigation.navigate('QrScan', { device: item })}
+            accessibilityRole="button"
+            accessibilityLabel={`${item.displayName}. Discovered. Tap to pair.`}
+          >
+            <View style={styles.rowInfo}>
+              <Text style={styles.name}>{item.displayName}</Text>
+              <Text style={styles.address}>Discovered • Tap to pair</Text>
+            </View>
+            <Text style={styles.chevron}>{'›'}</Text>
+          </Pressable>
         )}
         ListEmptyComponent={
-          <Text style={styles.empty}>Looking for Relay on your network...</Text>
+          <View>
+            <Text style={styles.empty}>Looking for Relay on your network...</Text>
+            <Text style={styles.emptyHint}>
+              Make sure this phone and the desktop are on the same Wi-Fi network or mobile hotspot.
+            </Text>
+          </View>
         }
         contentContainerStyle={desktops.length === 0 ? styles.emptyContainer : undefined}
       />
-      <Pressable style={styles.scanButton} onPress={() => navigation.navigate('QrScan')}>
+      <Pressable style={styles.scanButton} onPress={() => navigation.navigate('QrScan', {})}>
         <Text style={styles.scanButtonText}>Scan QR to Pair</Text>
       </Pressable>
     </View>
@@ -57,10 +80,18 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   row: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#ccc',
+  },
+  rowPressed: {
+    backgroundColor: '#f0f0f0',
+  },
+  rowInfo: {
+    flex: 1,
   },
   name: {
     fontSize: 16,
@@ -70,13 +101,26 @@ const styles = StyleSheet.create({
     marginTop: 2,
     color: '#666',
   },
+  chevron: {
+    marginLeft: 12,
+    fontSize: 20,
+    color: '#999',
+  },
   emptyContainer: {
     flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    padding: 24,
   },
   empty: {
     color: '#666',
+    textAlign: 'center',
+  },
+  emptyHint: {
+    marginTop: 8,
+    color: '#999',
+    fontSize: 13,
+    textAlign: 'center',
   },
   scanButton: {
     margin: 16,

@@ -3019,3 +3019,235 @@ on RMX3997 against the same shared content as the baseline:
   since it shares the identical `deriveFolderDownloadStatus` code path
   already covered by the file case plus the existing P13.3 folder test
   suite.
+
+# Milestone P14.2 — Device Discovery & QR Pairing UX
+
+## Architecture Investigation (before any code change)
+
+Discovery: `android/src/discovery/DiscoveryService.ts` listens for
+`DiscoveryAnnouncePayload` UDP broadcasts (`docs/09_Networking.md` §4) and
+exposes a de-duped, staleness-evicted list of `DiscoveredDesktop` (name, IP,
+port, `instance_id`) via `useDiscovery()`. `DiscoveryScreen.tsx` rendered
+each entry as a plain `View` (name + raw IP) — no `Pressable`, no
+`onPress`, confirmed by reading the file before touching it.
+
+Pairing: `QrScanScreen.tsx` already implements the one and only scanner
+(`react-native-camera-kit`), reached from `DiscoveryScreen`'s
+always-available "Scan QR to Pair" button. `qrPayload.ts`'s
+`PairingQrPayload` carries `desktop_ip`, `port`, `pairing_token`,
+`protocol_version`, `relay_version` — **no device/instance identity field**.
+`DiscoveryAnnouncePayload` (discovery) and `PairingQrPayload` (QR) are
+otherwise unrelated wire formats that happen to share `desktop_ip`/`port`.
+
+Identity/persistence: `session/secureStorage.ts`'s own doc comment states
+"there is only ever one paired desktop per device in V1" — confirmed by
+`RootNavigator.tsx`, which switches the entire app between `PairingStack`
+(no session) and `MainTabs` (session present) the instant pairing succeeds.
+Consequently `DiscoveryScreen` only ever renders while unpaired; there is no
+in-app concept of an "already paired" row to distinguish, and no multi-
+device list on the Android side (that exists only on the desktop, in
+`desktop/src/renderer/views/devices.js`'s "Paired Devices" table, out of
+scope for this Android-focused milestone).
+
+## Physical Baseline (before any code change)
+
+Device: physical RMX3997, ADB serial `69DADENFONAIOZS4`, backend + Electron
+desktop ("Thomas") + Metro all already running on the same host.
+
+**Test A (discovered device tap):** unpaired the phone (`DELETE /devices/{id}`
+so the app's next request 401s and self-clears its session — no in-app
+"forget" action exists yet, and this device's OEM shell blocks both
+`pm clear` and `pm revoke`, see Remaining Limitations), relaunched, and
+confirmed the Discovery screen showed the desktop ("Thomas", `10.169.164.233`)
+as a plain row. `adb shell input tap` directly on the row: **no navigation,
+no visual feedback, no scanner opened** — screenshots before/after the tap
+were pixel-identical apart from the clock. Confirmed this matches the code:
+the row was a bare `View`.
+
+**Test B (dedicated QR button):** tapping "Scan QR to Pair" opened
+`QrScanScreen` normally (camera live, header "Scan QR Code", default
+back arrow). Android back returned cleanly to Discovery. No partial-pairing
+state was created (nothing pending server- or client-side before a QR is
+actually read).
+
+## Root Cause
+
+`DiscoveryScreen.tsx`'s row was informational-only by original design (its
+own doc comment: "Purely informational... pairing itself never depends on
+this list"), which was correct about pairing not *depending* on discovery
+but left tapping a row with no effect at all — not a regression, a UX gap
+in the original implementation.
+
+## Architecture Decision
+
+Reuse the existing scanner/pairing flow unconditionally — no second
+scanner, no new pairing protocol, no new persisted state. A tapped row
+navigates to the same `QrScanScreen` the "Scan QR to Pair" button already
+uses, optionally carrying the tapped `DiscoveredDesktop` as a route param.
+Because the QR payload has no device-identity field, the strongest
+same-desktop check available without changing the protocol is comparing the
+QR's `(desktop_ip, port)` against the tapped device's own `(desktopIp,
+port)` — implemented as a pure, unit-tested function
+(`matchesSelectedDesktop`) rather than inline in the screen, so the
+mismatch logic is testable independent of the camera/RN rendering. Tapping
+the generic button (no device selected) skips this check entirely,
+preserving the original "pairing never depends on discovery" guarantee.
+
+"Already-paired" row states (§11/§12 of the requirements) were **not**
+implemented on `DiscoveryScreen` — per the architecture investigation above,
+this screen structurally cannot render while paired, so there is nothing
+for it to distinguish. Documented here rather than invented.
+
+## Implementation
+
+- `android/src/navigation/types.ts`: `QrScan` route now accepts an optional
+  `{ device?: DiscoveredDesktop }` param.
+- `android/src/pairing/qrPayload.ts`: added `matchesSelectedDesktop(payload,
+  desktop)`, comparing `(desktop_ip, port)`.
+- `android/src/screens/discovery/DiscoveryScreen.tsx`: row is now a
+  `Pressable` (`accessibilityRole="button"`) navigating to
+  `QrScan` with `{ device: item }`; shows "Discovered • Tap to pair" plus a
+  trailing chevron in place of the raw IP address. Empty state gained a
+  second line ("Make sure this phone and the desktop are on the same Wi-Fi
+  network or mobile hotspot") — the local-network/hotspot language matches
+  `docs/09_Networking.md` §1, not an invented requirement. "Scan QR to Pair"
+  is unchanged (still always visible, now passes `{}`).
+- `android/src/screens/pairing/QrScanScreen.tsx`: added an instructional
+  overlay ("Point your camera at the QR code shown on the device you want
+  to pair with."), an explicit **Close** button (in addition to the header's
+  existing back arrow) wired to the same `navigation.goBack()` as a new
+  explicit `BackHandler` listener for the hardware back key, a
+  `matchesSelectedDesktop` check before submitting a pairing request when a
+  device was selected (mismatch shows an error and leaves the scanner live,
+  submitting nothing), and a three-way camera-permission state
+  (`granted`/`denied`/`blocked`) — `blocked` (Android's "never ask again")
+  now offers an **Open Settings** button via `Linking.openSettings()`,
+  still Android's own permission system, no custom one. Also removed the
+  file's `[QR-DEBUG]` `console.log`/`console.error` calls — temporary
+  instrumentation left over from an earlier diagnostic session, in the
+  exact functions this milestone was already rewriting for the new overlay/
+  Close/mismatch logic.
+
+## Files Changed
+
+**Source:**
+- `android/src/navigation/types.ts`
+- `android/src/pairing/qrPayload.ts`
+- `android/src/screens/discovery/DiscoveryScreen.tsx`
+- `android/src/screens/pairing/QrScanScreen.tsx`
+
+**Tests:**
+- `android/__tests__/pairing/qrPayload.test.ts` (extended with
+  `matchesSelectedDesktop` cases)
+
+**Documentation:**
+- `docs/15_QA_NOTEBOOK.md` (this entry)
+
+**Project configuration:** none — no new dependency, no `package.json`,
+`.gitignore`, or native-project change.
+
+## Automated Test Results
+
+- `npx tsc --noEmit`: clean, no errors.
+- `npx eslint <changed files>`: 0 errors, 0 warnings.
+- `npx jest`: 33/33 suites, 252/252 tests passing (up from 249 before this
+  milestone — 3 new `matchesSelectedDesktop` cases; every pre-existing test
+  unchanged and still green).
+
+## Physical-Device Verification
+
+All exercised live on RMX3997 via `adb shell input tap`/`keyevent` plus
+screenshots, against the same running backend/desktop/Metro as the
+baseline. App updated via Metro's live JS reload (force-stop + relaunch;
+no native code changed, so no fresh `.apk` install was needed).
+
+- **Test 1 (discovered device → tap → scanner):** row now reads "Thomas /
+  Discovered • Tap to pair ›"; tapping it opened `QrScanScreen` with the
+  instructional overlay and Close button visible over the live camera feed.
+- **Test 2 (dedicated QR button → same scanner):** unchanged path, still
+  opens the identical screen.
+- **Test 3 (correct QR → pairing succeeds):** user scanned the desktop's
+  real pairing QR from the row-tap-opened scanner; `GET /devices` on the
+  backend showed a newly-registered device immediately after, and the app
+  landed on the Files/MainTabs screen — full pairing succeeded end to end.
+- **Test 4 (invalid QR → error → scanner remains usable):** user scanned an
+  unrelated QR first; got the "not a Relay pairing code" error banner with
+  the camera still live underneath, then successfully scanned the real QR
+  immediately after in the same session (feeding directly into Test 3) —
+  confirming the scanner was never left in a dead state by the invalid scan.
+- **Test 5 (Close → returns correctly):** tapping Close from the
+  row-opened scanner returned to Discovery, list/empty-state rendering
+  intact.
+- **Test 6 (Android back → returns correctly):** hardware back from the
+  scanner returned to Discovery cleanly (confirmed via
+  `dumpsys activity activities` showing `MainActivity` still foregrounded,
+  not the launcher, and a matching screenshot).
+- **Test 7 (already-paired device):** not applicable — see Architecture
+  Decision above; verified structurally instead (RootNavigator swaps to
+  MainTabs on pairing, unmounting Discovery).
+- **Regression:** post-pairing, Files screen rendered its three shared items
+  normally; P14.1's long-press context menu still opened correctly on a
+  folder row; Transfers tab loaded ("No transfers yet.", upload buttons
+  present) with no crash. None of this milestone's diff touches
+  `FilesScreen.tsx`, `TransferListScreen.tsx`, or `FileActionMenu.tsx`.
+
+## Problems Discovered
+
+- A `pm clear com.relay.mobile` / `pm revoke ... CAMERA` were both rejected
+  by this device's OEM shell with `SecurityException` (missing
+  `CLEAR_APP_USER_DATA`/`REVOKE_RUNTIME_PERMISSIONS` even for the `shell`
+  UID) — not a Relay issue, a locked-down ADB shell on this particular
+  ColorOS/RealmeUI build. Worked around for the "reach unpaired state"
+  need via `DELETE /devices/{id}` on the desktop (the app's existing 401 →
+  `SessionManager.clearSession()` path already handles a revoked session
+  gracefully — this is exactly what "device removed from the desktop while
+  the phone still thinks it's paired" looks like in production, not a
+  test-only shortcut).
+- An unrelated, pre-existing `[QR-DEBUG]` temporary logging block was also
+  found in `android/src/api/client.ts` (not part of this milestone's file
+  set) — left untouched per the instruction not to make unrelated cleanup
+  changes.
+- One flaky synthetic tap on "Scan QR to Pair" during verification produced
+  no visible effect on the first attempt; an identical retry immediately
+  after worked normally, with no code change in between. Treated as
+  synthetic-input timing noise (the same category of finding as P13.3's own
+  "Problems Discovered" note about spacing rapid taps), not a product defect
+  — not reproducible on a second pass.
+
+## Documentation Synchronization
+
+- **README.md:** unchanged — no user-facing/project-level description of
+  the pairing UX exists there to update.
+- **CLAUDE.md:** unchanged — this milestone is a UX fix within the existing,
+  unchanged architecture (no new durable rule, workflow, or invariant).
+- **.gitignore:** unchanged — no new generated/local artifact introduced.
+- `docs/11_File_Transfer.md`: reviewed — does not document Android-side
+  pairing/discovery UI, only the transfer protocol; unaffected.
+- `docs/14_Testing_Plan.md`: unchanged, following the same P14.1 precedent
+  (sub-milestones are tracked in this QA notebook, not given their own
+  Testing Plan section).
+
+## Remaining Limitations
+
+- **Device mismatch is a heuristic, not a guarantee**: the current pairing
+  protocol carries no device/instance identity in the QR payload, so
+  "wrong device" detection can only compare `(desktop_ip, port)` against
+  the discovery announcement — the closest available signal, not a true
+  identity check. A protocol change (e.g. echoing `instance_id` in the QR)
+  would be needed for a stronger guarantee; out of scope for this UX-only
+  milestone per its own architectural constraint.
+- **Device-mismatch and camera-permission-denied/blocked paths were not
+  exercised live with a second real desktop or a revoked permission** —
+  this environment has exactly one desktop to pair with, and this device's
+  OEM shell blocks the ADB commands (`pm revoke`, and a
+  `android.settings.APPLICATION_DETAILS_SETTINGS` deep link that landed on
+  an unrelated settings sub-page instead of the app's permissions page)
+  that would otherwise force those states. Both paths are covered by
+  `matchesSelectedDesktop`'s unit tests and by `tsc`/`eslint` against
+  React Native's own documented `PermissionsAndroid.RESULTS` values, but not
+  by a live camera-denied or two-desktop physical run.
+- **Discovery-disappears-during-pairing (§14) and pairing-timeout scenarios**
+  were not independently re-triggered live in this pass — the code paths
+  involved (`submitPairingRequest`'s catch block, `PairingWaitingScreen`'s
+  existing 5-minute give-up) are unmodified by this milestone and were not
+  exercised beyond what Test 3/4 already covered.

@@ -3,6 +3,7 @@
  */
 
 import { Session } from '../session/types';
+import { DiscoveredDesktop } from '../discovery/types';
 
 /** The outcome PairingWaitingScreen hands off once polling reaches a terminal state. */
 export type PairingResultParams =
@@ -11,7 +12,14 @@ export type PairingResultParams =
 
 export type PairingStackParamList = {
   Discovery: undefined;
-  QrScan: undefined;
+  // `device` is only present when the scanner was opened by tapping a
+  // specific discovered device (as opposed to the always-available "Scan QR
+  // to Pair" button) — it lets QrScanScreen flag a scanned QR that belongs to
+  // a different desktop than the one the user selected. See
+  // qrPayload.ts's matchesSelectedDesktop for the (IP, port) comparison this
+  // enables — the closest thing to a device-identity check the current QR
+  // payload supports.
+  QrScan: { device?: DiscoveredDesktop } | undefined;
   PairingWaiting: { desktopBaseUrl: string; pairingToken: string };
   PairingResult: PairingResultParams;
 };

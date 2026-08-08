@@ -4,6 +4,7 @@
  */
 
 import { PairingQrPayload } from '../api/types';
+import { DiscoveredDesktop } from '../discovery/types';
 
 // Must match backend Settings.PAIRING_PROTOCOL_VERSION (docs/10_Security.md §5).
 const SUPPORTED_PAIRING_PROTOCOL_VERSION = 1;
@@ -47,4 +48,19 @@ export function parsePairingQrPayload(raw: string): PairingQrPayload {
 /** e.g. "http://192.168.1.23:8000/api/v1" — matches the backend's own API_V1_PREFIX convention. */
 export function buildDesktopBaseUrl(payload: PairingQrPayload): string {
   return `http://${payload.desktop_ip}:${payload.port}/api/v1`;
+}
+
+/**
+ * Whether a scanned QR payload plausibly belongs to the desktop the user
+ * explicitly selected before opening the scanner.
+ *
+ * PairingQrPayload carries no device/instance identity (unlike
+ * DiscoveryAnnouncePayload's instance_id) — desktop_ip + port is the only
+ * signal both sides share, so that's the strongest check available without
+ * changing the pairing protocol. It's a heuristic, not a guarantee (two
+ * desktops could theoretically share an address at different times), but a
+ * mismatch here reliably means "not the device you tapped."
+ */
+export function matchesSelectedDesktop(payload: PairingQrPayload, desktop: DiscoveredDesktop): boolean {
+  return payload.desktop_ip === desktop.desktopIp && payload.port === desktop.port;
 }

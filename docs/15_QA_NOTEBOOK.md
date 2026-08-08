@@ -2799,3 +2799,223 @@ audit.
   injection timing on this device, not of the app; spacing taps by ~0.3-0.5s
   resolved it. Not a product limitation, but worth noting for anyone
   repeating this style of live multi-tap verification.
+
+# Milestone P14.1 — Long-Press Context Menu: Core UX
+
+## Physical Baseline (before any code change)
+
+Device: physical RMX3997 (realme C65 5G), USB-connected, ADB serial
+`69DADENFONAIOZS4`. Confirmed the Relay app (`com.relay.mobile`) installed,
+in the foreground (`MainActivity`), and its process running before touching
+any source file.
+
+Shared Files screen at baseline showed one folder (`test_folder`, 2 items)
+and two files (`large_test_file.bin`, `remote_test_file.txt`), all already
+downloaded (`Open`). Confirmed via code inspection
+(`android/src/screens/files/FilesScreen.tsx`) that `FileRow`/`FolderRow`'s
+outer container was a plain `View`, not `Pressable` — no long-press handler
+existed anywhere in the row. Confirmed live: a synthetic long-press
+(`adb shell input swipe <x> <y> <x> <y> 800`) on the downloaded file row
+produced no visible change (before/after screenshots pixel-identical) and no
+new `ReactNativeJS` log output — long-press was a genuine no-op, matching
+P14.0's finding, independent of row state (the mechanism is the same `View`
+regardless of what the row displays, so this wasn't re-verified separately
+per state). Confirmed the existing Open action still worked: tapping `Open`
+on `remote_test_file.txt` produced Android's native "Open with" chooser.
+
+## Implementation
+
+Added a small, generic bottom-sheet component,
+`android/src/components/FileActionMenu.tsx` (the repo's `components/`
+directory previously held only `PlaceholderScreen.tsx`, confirming P14.0's
+finding that no Modal/ActionSheet primitive existed yet). Built on React
+Native's own `Modal` (`transparent`, `animationType="fade"`), not a
+third-party library — nothing in `package.json` changed. It takes a title,
+optional subtitle, and a list of `{ key, label, onPress }` actions; a
+backdrop `Pressable` dismisses on outside tap, `onRequestClose` dismisses on
+Android back, and an inner no-op `Pressable` around the sheet stops a tap
+inside it from falling through to the backdrop.
+
+`FilesScreen.tsx` changes:
+
+- `FileRow`/`FolderRow`'s outer `View` became a `Pressable` with
+  `onLongPress`; the existing `Open`/`Download` buttons stayed nested
+  `Pressable`s exactly as before. React Native's responder system gives an
+  inner (deeper, smaller) `Pressable` the touch before the outer one gets a
+  chance, so this needed no manual event-propagation handling.
+- Added `menuTarget` state (`{ kind, id } | null`) identifying which row's
+  menu is open, not a snapshot of its data — the menu's title/subtitle/
+  actions are recomputed on every render from the current `files`/`folders`/
+  `requests`/`transfers` state by the row's `id`, so a state change while the
+  menu is open (a queued download starting, a completed download's file
+  being deleted externally) is reflected automatically, the same way the row
+  itself already updates from polling. If the targeted item is no longer in
+  either list, the menu closes itself instead of showing stale content.
+- Extracted `computeFileRowState`/`computeFolderRowState` — the status/
+  queued derivation that previously lived inline in each row's `renderItem`
+  call — so `FileRow`/`FolderRow` and the menu's own computation share one
+  implementation instead of duplicating it (CLAUDE.md Rule 5).
+- Added `describeStatus` (exported for its own test, matching
+  `downloadButtonLabel`'s existing precedent) for the Details action's
+  state text — deliberately separate from `downloadButtonLabel`/
+  `folderDownloadButtonLabel`, which phrase the same states as a button's
+  call-to-action ("Download", "Retry") rather than a description
+  ("Not downloaded", "Downloading").
+- Added `handleFileDetails`/`handleFolderDetails`, using the built-in
+  `Alert.alert` (no new UI dependency) to show name, size, type (file) or
+  item count/total size (folder), shared date (formatted with
+  `Date.toLocaleString()`, no new date library), and current status — all
+  values Relay already had; no new backend/API call.
+- Open is only offered in the menu when the row's own `canOpen` condition
+  (`status.kind === 'completed'`) is true — mirrors the existing button
+  exactly, reusing `handleOpen`/`handleOpenFolder`/`openDownloadedFile`/
+  `openDownloadedFolder` unchanged, per the milestone's explicit instruction
+  not to duplicate or rewrite that logic.
+
+## Files Changed
+
+**Source:**
+- `android/src/components/FileActionMenu.tsx` (new)
+- `android/src/screens/files/FilesScreen.tsx`
+
+**Tests:**
+- `android/__tests__/screens/files/describeStatus.test.ts` (new)
+
+**Documentation:**
+- `docs/15_QA_NOTEBOOK.md` (this entry)
+
+**Project configuration:** none — no new dependency, no `package.json` or
+`.gitignore` change (the feature needed nothing beyond RN's built-in
+`Modal`/`Pressable`/`Alert`).
+
+## Automated Test Results
+
+- `npx tsc --noEmit`: clean, no errors.
+- `npx eslint .`: 0 errors, 2 pre-existing warnings in
+  `TransferStreamManager.ts` (`no-void`), unrelated to this milestone and
+  unmodified by it.
+- `npx jest`: 33/33 suites, 249/249 tests passing (up from 32/244 before this
+  milestone — 5 new tests in `describeStatus.test.ts`; every pre-existing
+  test, including P13.x's folder/queue regression suite, unchanged and still
+  green).
+
+## Physical-Device Verification
+
+App updated via Metro's live-reload (`curl -X POST http://localhost:8081/reload`,
+confirmed by the RN dev bundle reloading in place — no native code changed,
+so no fresh `.apk` install was needed). All of the following exercised live
+on RMX3997 against the same shared content as the baseline:
+
+- **File row, downloaded (`large_test_file.bin`):** long-press opened the
+  menu with title/subtitle matching the row (name, size, MIME type), showing
+  both **Open** and **Details**. **Details** showed size, type, shared
+  timestamp, and `Status: Downloaded` via a native `Alert`, then closed the
+  menu cleanly (no duplicate/lingering overlay).
+- **Folder row, downloaded (`test_folder`):** long-press opened the menu
+  with the same folder emoji + name shown in the row, subtitle "2 items ·
+  26 B", **Open** and **Details** both present; **Details** showed item
+  count, total size, shared timestamp, `Status: Downloaded`.
+- **File row, not locally available:** after deleting the on-device copy via
+  `adb shell rm` and letting the existing filesystem-detection effect
+  downgrade the row to `Download` (confirmed by screenshot: button flipped
+  from `Open` to `Download` on its own, no interaction), long-press showed
+  **only Details** — no Open action offered, matching the instruction not to
+  invent a new Open mechanism for an unavailable item.
+- **Active + Queued pair:** triggered downloads on two remote files in quick
+  succession; row 1 read `Downloading...`, row 2 read `Queued`, confirming
+  `computeFileRowState`'s reuse of `TransferStreamManager.isQueued` renders
+  identically to the pre-existing button logic.
+- **Live state transition while menu open (queued/active → completed):**
+  long-pressed a row mid-download (menu showed **Details only**, no Open);
+  left the menu open across the transfer's completion; the same menu
+  instance updated in place to add the **Open** action the moment the
+  transfer finished, with no close/reopen and no stale content.
+- **Live state transition while menu open (downloaded → deleted
+  externally):** long-pressed a downloaded file's row (menu showed Open +
+  Details); deleted its on-device copy via `adb shell rm` while the menu
+  stayed open; the row behind it reverted to `Download` and the open menu
+  dropped its Open action down to Details-only, live, confirming the menu
+  has no second source of truth independent of the row's own derivation.
+- **Interaction safety:** a plain (non-long) tap on a row produced no menu
+  and no other change (before/after screenshots identical). The existing
+  `Open` button still worked with a normal tap post-change (native "Open
+  with" chooser, matching the baseline exactly). A **long-press directly on
+  the `Open` button** triggered the button's own action (the "Open with"
+  chooser), not the row's menu — confirms nested `Pressable`s isolate
+  correctly with no extra propagation handling needed.
+- **Dismissal:** confirmed both outside-tap (tap on blank screen area below
+  the list) and Android back button close the menu without navigating away
+  from the Files screen or otherwise disturbing app state; reopening
+  afterward worked normally; no duplicate menus were ever observed.
+- **Regression / cleanup:** re-downloaded both externally-deleted files to
+  restore the screen to its original baseline state (all three items
+  `Open`) before finishing.
+- `adb logcat`, filtered to the app's own PID, scanned across the full
+  session for `FATAL`/`Exception`/`ReactNativeJS.*Error`: none found. Two
+  benign OEM (`OplusScrollToTopManager`) log lines appeared around the
+  Metro reload (an unregistered-receiver `IllegalArgumentException` logged
+  by the device's ColorOS/RealmeUI shell on Activity lifecycle transitions,
+  not a Relay/JS error) — pre-existing device behavior, unrelated to this
+  change.
+
+## Problems Discovered
+
+- A one-time yellow "Open debugger to view warnings" LogBox banner appeared
+  during the active+queued burst test. Investigated: no matching
+  `console.warn` output for the app's PID in the logcat window covering that
+  moment, and the codebase's existing `console.warn` call sites are all in
+  `streaming/` (foreground-service start, MediaStore publish,
+  download-complete notification) and `session/secureStorage.ts` /
+  `discovery/DiscoveryService.ts` — none touched by this milestone's diff.
+  Most likely one of the pre-existing best-effort streaming/notification
+  warnings (e.g. a notification-permission edge case on this OS build) firing
+  during the real download triggered for that test, not a regression from
+  this change. Did not block or alter any of the verification above and was
+  not investigated further, per the instruction to fix only issues actually
+  blocking this milestone.
+- No implementation-side defects were found during physical verification —
+  the menu, live-state behavior, and dismissal all worked as designed on the
+  first build.
+
+## Documentation Synchronization
+
+- **README.md:** unchanged. It documents the Files resource and API routes
+  at a project level and does not describe row-level button/interaction
+  behavior anywhere (no existing mention of the `Open`/`Download` buttons
+  either), so there was nothing at that level of detail to update.
+- **CLAUDE.md:** unchanged. CLAUDE.md's own "Documentation Ownership"
+  section states Claude Code must never automatically modify it, even though
+  this milestone's instructions granted permission to do so — the file's own
+  standing rule takes precedence. Recommend the developer consider a CLAUDE.md
+  pass covering both this milestone and the still-open P13 folder-transfer
+  documentation gap P14.0 already flagged, together, rather than two
+  piecemeal edits.
+- **.gitignore:** unchanged — no new build artifact or tool introduced.
+- **docs/14_Testing_Plan.md:** unchanged. Reviewed its structure: major
+  milestones (P1–P13) each have their own `## P<n>` section, but sub-
+  milestones (P13.1, P13.2, P13.3, P13.3-correction, P9.1) do not — those are
+  tracked only in this QA notebook. P14.1 follows that established pattern
+  as a sub-milestone of P14, so no new Testing Plan section was added; the
+  existing manual-verification-plus-Jest/tsc/eslint procedure it already
+  describes fully covers what this milestone needed.
+
+## Remaining Limitations
+
+- Details is presented via the platform's native `Alert.alert`, not a
+  themed in-sheet view — deliberate, to avoid building a second custom modal
+  for one milestone (CLAUDE.md Rule 6); acceptable for this first version
+  per the milestone's "smallest reusable component" guidance, but a future
+  pass could fold it into `FileActionMenu` itself if a richer presentation is
+  wanted.
+- No accessibility screen-reader pass was performed beyond adding
+  `accessibilityRole`/`accessibilityLabel` props to the interactive
+  elements — TalkBack itself was not exercised live on-device.
+- Queued/active live-transition testing exercised the file case in depth
+  (queued → active → completed); the folder case's aggregate state was
+  covered functionally (folder Details/Open reflect
+  `computeFolderRowState` exactly as designed, and that helper is unchanged
+  in shape from the pre-existing inline logic it replaced) but was not
+  separately re-run through the same live mid-transfer menu-open sequence,
+  since it shares the identical `deriveFolderDownloadStatus` code path
+  already covered by the file case plus the existing P13.3 folder test
+  suite.

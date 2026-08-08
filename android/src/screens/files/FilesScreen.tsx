@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   RefreshControl,
@@ -25,10 +26,17 @@ import { useTransfers } from '../../transfers/useTransfers';
 import { getFolderFiles } from '../../api/endpoints/folders';
 import { getTransfer, proposeTransfer } from '../../api/endpoints/transfers';
 import { ApiError } from '../../api/client';
-import { AvailableFileResponse, AvailableFolderFileResponse, AvailableFolderResponse } from '../../api/types';
+import {
+  AvailableFileResponse,
+  AvailableFolderFileResponse,
+  AvailableFolderResponse,
+  TransferRequestResponse,
+  TransferResponse,
+} from '../../api/types';
 import { formatFileSize } from '../../utils/formatFileSize';
 import { TransferStreamManager } from '../../streaming/TransferStreamManager';
 import { ensureEmptyFolderStaged } from '../../streaming/blobUtil';
+import { FileActionMenu, FileActionMenuAction } from '../../components/FileActionMenu';
 
 const POLL_INTERVAL_MS = 2000;
 // Deliberately longer than the transfer-progress poll above: the shared-file
@@ -44,6 +52,66 @@ const FILES_POLL_INTERVAL_MS = 5000;
 type SharedItem =
   | { kind: 'file'; data: AvailableFileResponse }
   | { kind: 'folder'; data: AvailableFolderResponse };
+
+/**
+ * A row's derived download status/queued flag, computed once and shared by
+ * both its FileRow rendering (renderItem below) and the P14.1 long-press
+ * menu (FilesScreen's menuTarget rendering) — the menu deliberately reads
+ * off the same derivation the row itself uses instead of snapshotting it at
+ * long-press time, so a state change (e.g. queued -> active) while the menu
+ * is open is reflected the next time FilesScreen re-renders, exactly like
+ * the row already does. See downloadButtonLabel's own doc comment above for
+ * what `queued` distinguishes from `status.kind === 'in_progress'`.
+ */
+function computeFileRowState(
+  file: AvailableFileResponse,
+  requests: TransferRequestResponse[],
+  transfers: TransferResponse[],
+  existence: Record<string, boolean>,
+): { status: FileDownloadStatus; queued: boolean } {
+  const status = deriveDownloadStatus(file.id, requests, transfers, existence[file.file_name]);
+  const transferId = latestSendTransferId(file.id, transfers);
+  const queued = transferId != null && TransferStreamManager.isQueued(transferId);
+  return { status, queued };
+}
+
+function computeFolderRowState(
+  children: AvailableFolderFileResponse[],
+  requests: TransferRequestResponse[],
+  transfers: TransferResponse[],
+  reconciledChildren: Record<string, number> | undefined,
+  folderExists: boolean | undefined,
+): { status: FolderDownloadStatus; queued: boolean } {
+  const status = deriveFolderDownloadStatus(children, requests, transfers, reconciledChildren, folderExists);
+  const childTransferIds = children
+    .map(child => latestSendTransferId(child.id, transfers))
+    .filter((id): id is number => id != null);
+  const anyActive = childTransferIds.some(id => TransferStreamManager.isActive(id));
+  const queued = !anyActive && childTransferIds.some(id => TransferStreamManager.isQueued(id));
+  return { status, queued };
+}
+
+/**
+ * Human-readable state for the Details action — distinct from
+ * downloadButtonLabel/folderDownloadButtonLabel, which phrase the same
+ * states as a button's call to action ("Download", "Retry") rather than a
+ * description. Exported for its own pin test, matching downloadButtonLabel's
+ * own precedent (__tests__/screens/files/downloadButtonLabel.test.ts).
+ */
+export function describeStatus(kind: FileDownloadStatus['kind'] | FolderDownloadStatus['kind'], queued: boolean): string {
+  switch (kind) {
+    case 'completed':
+      return 'Downloaded';
+    case 'in_progress':
+      return queued ? 'Queued' : 'Downloading';
+    case 'pending':
+      return 'Requested';
+    case 'failed':
+      return 'Failed';
+    default:
+      return 'Not downloaded';
+  }
+}
 
 /**
  * Browses the desktop's shared file list and lets the user *initiate* a
@@ -102,6 +170,16 @@ export function FilesScreen() {
   // independent numeric spaces, so sharing either of those dicts could
   // surface the wrong row's error under a coincidental id collision.
   const [folderOpenErrors, setFolderOpenErrors] = useState<Record<number, string>>({});
+  // P14.1: identifies the row the long-press context menu is open for, not a
+  // snapshot of its state — rendering below always looks the identified
+  // file/folder back up in the current `files`/`folders` lists and recomputes
+  // its status via computeFileRowState/computeFolderRowState, so the menu
+  // can never go stale while it's open (see those functions' own doc
+  // comment). `null` means the menu is closed.
+  const [menuTarget, setMenuTarget] = useState<{ kind: 'file'; id: number } | { kind: 'folder'; id: number } | null>(
+    null,
+  );
+  const closeMenu = useCallback(() => setMenuTarget(null), []);
   // useTransferRequests/useTransfers/useSharedFiles/useSharedFolders each
   // already fetch once on mount, and a screen's first focus coincides with
   // that same mount — so the immediate refresh below is only needed from the
@@ -294,6 +372,21 @@ export function FilesScreen() {
     [verify],
   );
 
+  // P14.1: the long-press menu's Details action for a file — surfaces only
+  // metadata Relay already has (no new backend/API call), matching the
+  // milestone's "use-existing-system" scope.
+  const handleFileDetails = useCallback((file: AvailableFileResponse, state: { status: FileDownloadStatus; queued: boolean }) => {
+    Alert.alert(
+      file.file_name,
+      [
+        `Size: ${formatFileSize(file.file_size)}`,
+        `Type: ${file.mime_type ?? 'Unknown'}`,
+        `Shared: ${new Date(file.shared_at).toLocaleString()}`,
+        `Status: ${describeStatus(state.status.kind, state.queued)}`,
+      ].join('\n'),
+    );
+  }, []);
+
   /**
    * Enumerates a shared folder's children (GET /folders/{id}/files, always
    * fetched fresh here — not read from folderFilesMap — so a retry after an
@@ -463,6 +556,24 @@ export function FilesScreen() {
     }
   }, [verifyFolderExists]);
 
+  // P14.1: the long-press menu's Details action for a folder — mirrors
+  // handleFileDetails exactly, against folder metadata instead of file
+  // metadata.
+  const handleFolderDetails = useCallback(
+    (folder: AvailableFolderResponse, state: { status: FolderDownloadStatus; queued: boolean }) => {
+      Alert.alert(
+        folder.folder_name,
+        [
+          `Items: ${folder.file_count}`,
+          `Total size: ${formatFileSize(folder.total_size)}`,
+          `Shared: ${new Date(folder.shared_at).toLocaleString()}`,
+          `Status: ${describeStatus(state.status.kind, state.queued)}`,
+        ].join('\n'),
+      );
+    },
+    [],
+  );
+
   if (loading || foldersLoading) {
     return (
       <View style={styles.center}>
@@ -475,6 +586,57 @@ export function FilesScreen() {
     ...files.map(file => ({ kind: 'file' as const, data: file })),
     ...folders.map(folder => ({ kind: 'folder' as const, data: folder })),
   ].sort((a, b) => new Date(b.data.shared_at).getTime() - new Date(a.data.shared_at).getTime());
+
+  // P14.1: resolves the long-press menu's content from the *current* files/
+  // folders lists by menuTarget's id, not a snapshot taken at long-press
+  // time — see menuTarget's own doc comment. If the targeted item is no
+  // longer in either list (e.g. unshared from the desktop while the menu
+  // was open — out of this milestone's scope to trigger from Android, but
+  // not out of scope to not crash on), menuFile/menuFolder end up
+  // undefined and menuVisible below resolves to false, closing the menu
+  // instead of showing stale or empty content.
+  const menuFile = menuTarget?.kind === 'file' ? files.find(f => f.id === menuTarget.id) : undefined;
+  const menuFolder = menuTarget?.kind === 'folder' ? folders.find(f => f.id === menuTarget.id) : undefined;
+  const menuVisible = menuFile != null || menuFolder != null;
+
+  let menuTitle = '';
+  let menuSubtitle: string | undefined;
+  let menuActions: FileActionMenuAction[] = [];
+
+  if (menuFile) {
+    const fileState = computeFileRowState(menuFile, requests, transfers, existence);
+    const canOpen = fileState.status.kind === 'completed';
+    menuTitle = menuFile.file_name;
+    menuSubtitle = `${formatFileSize(menuFile.file_size)}${menuFile.mime_type ? ` · ${menuFile.mime_type}` : ''}`;
+    menuActions = [
+      ...(canOpen ? [{ key: 'open', label: 'Open', onPress: () => { closeMenu(); handleOpen(menuFile); } }] : []),
+      { key: 'details', label: 'Details', onPress: () => { closeMenu(); handleFileDetails(menuFile, fileState); } },
+    ];
+  } else if (menuFolder) {
+    const children = folderFilesMap[menuFolder.id] ?? [];
+    const folderState = computeFolderRowState(
+      children,
+      requests,
+      transfers,
+      reconciledByFolderId[menuFolder.id],
+      localRootByFolderId[menuFolder.id] ? folderExistence[localRootByFolderId[menuFolder.id]] : undefined,
+    );
+    const canOpen = folderState.status.kind === 'completed';
+    menuTitle = `\u{1F4C1} ${menuFolder.folder_name}`;
+    const itemLabel = `${menuFolder.file_count} item${menuFolder.file_count === 1 ? '' : 's'}`;
+    menuSubtitle = `${itemLabel} · ${formatFileSize(menuFolder.total_size)}`;
+    menuActions = [
+      ...(canOpen ? [{ key: 'open', label: 'Open', onPress: () => { closeMenu(); handleOpenFolder(menuFolder); } }] : []),
+      {
+        key: 'details',
+        label: 'Details',
+        onPress: () => {
+          closeMenu();
+          handleFolderDetails(menuFolder, folderState);
+        },
+      },
+    ];
+  }
 
   return (
     <View style={styles.container}>
@@ -502,23 +664,16 @@ export function FilesScreen() {
               requesting={requestingFolderIds[item.data.id] ?? false}
               requestError={folderRequestErrors[item.data.id]}
               openError={folderOpenErrors[item.data.id]}
-              status={deriveFolderDownloadStatus(
+              {...computeFolderRowState(
                 folderFilesMap[item.data.id] ?? [],
                 requests,
                 transfers,
                 reconciledByFolderId[item.data.id],
                 localRootByFolderId[item.data.id] ? folderExistence[localRootByFolderId[item.data.id]] : undefined,
               )}
-              queued={(() => {
-                const children = folderFilesMap[item.data.id] ?? [];
-                const childTransferIds = children
-                  .map(child => latestSendTransferId(child.id, transfers))
-                  .filter((id): id is number => id != null);
-                const anyActive = childTransferIds.some(id => TransferStreamManager.isActive(id));
-                return !anyActive && childTransferIds.some(id => TransferStreamManager.isQueued(id));
-              })()}
               onDownload={() => handleFolderDownload(item.data)}
               onOpen={() => handleOpenFolder(item.data)}
+              onLongPress={() => setMenuTarget({ kind: 'folder', id: item.data.id })}
             />
           ) : (
             <FileRow
@@ -526,13 +681,10 @@ export function FilesScreen() {
               requesting={requestingIds[item.data.id] ?? false}
               requestError={requestErrors[item.data.id]}
               openError={openErrors[item.data.id]}
-              status={deriveDownloadStatus(item.data.id, requests, transfers, existence[item.data.file_name])}
-              queued={(() => {
-                const transferId = latestSendTransferId(item.data.id, transfers);
-                return transferId != null && TransferStreamManager.isQueued(transferId);
-              })()}
+              {...computeFileRowState(item.data, requests, transfers, existence)}
               onDownload={() => handleDownload(item.data)}
               onOpen={() => handleOpen(item.data)}
+              onLongPress={() => setMenuTarget({ kind: 'file', id: item.data.id })}
             />
           )
         }
@@ -543,6 +695,7 @@ export function FilesScreen() {
         }
         contentContainerStyle={items.length === 0 ? styles.emptyList : undefined}
       />
+      <FileActionMenu visible={menuVisible} title={menuTitle} subtitle={menuSubtitle} actions={menuActions} onClose={closeMenu} />
     </View>
   );
 }
@@ -623,6 +776,7 @@ function FileRow({
   queued,
   onDownload,
   onOpen,
+  onLongPress,
 }: {
   file: AvailableFileResponse;
   requesting: boolean;
@@ -632,6 +786,7 @@ function FileRow({
   queued: boolean;
   onDownload: () => void;
   onOpen: () => void;
+  onLongPress: () => void;
 }) {
   const disabled = requesting || status.kind === 'pending' || status.kind === 'in_progress';
   // deriveDownloadStatus only ever reports 'completed' when the file isn't
@@ -653,7 +808,11 @@ function FileRow({
     (status.kind === 'failed' ? status.message ?? 'This download failed.' : undefined);
 
   return (
-    <View style={styles.row}>
+    <Pressable
+      style={styles.row}
+      onLongPress={onLongPress}
+      accessibilityLabel={`${file.file_name}. Double tap and hold for more options.`}
+    >
       <View style={styles.rowInfo}>
         <Text style={styles.name} numberOfLines={1}>
           {file.file_name}
@@ -673,7 +832,7 @@ function FileRow({
           <Text style={styles.downloadButtonText}>{downloadButtonLabel(requesting, status, queued)}</Text>
         </Pressable>
       )}
-    </View>
+    </Pressable>
   );
 }
 
@@ -686,6 +845,7 @@ function FolderRow({
   queued,
   onDownload,
   onOpen,
+  onLongPress,
 }: {
   folder: AvailableFolderResponse;
   requesting: boolean;
@@ -695,6 +855,7 @@ function FolderRow({
   queued: boolean;
   onDownload: () => void;
   onOpen: () => void;
+  onLongPress: () => void;
 }) {
   const disabled = requesting || status.kind === 'in_progress';
   const itemLabel = `${folder.file_count} item${folder.file_count === 1 ? '' : 's'}`;
@@ -710,7 +871,11 @@ function FolderRow({
   const errorMessage = requestError ?? (canOpen ? openError : undefined);
 
   return (
-    <View style={styles.row}>
+    <Pressable
+      style={styles.row}
+      onLongPress={onLongPress}
+      accessibilityLabel={`${folder.folder_name} folder. Double tap and hold for more options.`}
+    >
       <View style={styles.rowInfo}>
         <Text style={styles.name} numberOfLines={1}>
           {'\u{1F4C1}'} {folder.folder_name}
@@ -729,7 +894,7 @@ function FolderRow({
           <Text style={styles.downloadButtonText}>{folderDownloadButtonLabel(requesting, status, queued)}</Text>
         </Pressable>
       )}
-    </View>
+    </Pressable>
   );
 }
 

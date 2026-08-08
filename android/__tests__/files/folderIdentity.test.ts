@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
+import * as SafX from 'react-native-saf-x';
 import {
   getReconciledChildren,
   markFolderReconciled,
@@ -7,6 +8,7 @@ import {
   readAllReconciledChildren,
   resolveLocalFolderRoot,
 } from '../../src/files/folderIdentity';
+import { DownloadLocationManager } from '../../src/settings/DownloadLocationManager';
 
 const mockReadFile = ReactNativeBlobUtil.fs.readFile as jest.Mock;
 const mockWriteFile = ReactNativeBlobUtil.fs.writeFile as jest.Mock;
@@ -200,6 +202,28 @@ describe('resolveLocalFolderRoot (P13.2, Issue 1)', () => {
     const localRoot = await resolveLocalFolderRoot(2, 'test');
 
     expect(localRoot).toBe('test (1)');
+  });
+
+  describe('under a custom SAF download location (P14.3)', () => {
+    const treeUri = 'content://com.android.externalstorage.documents/tree/primary%3APhotos';
+
+    beforeEach(async () => {
+      await DownloadLocationManager.setLocation({ mode: 'custom', treeUri, displayName: 'Photos' });
+    });
+
+    afterEach(async () => {
+      await DownloadLocationManager.resetToDefault();
+    });
+
+    test('checks name availability against the custom SAF tree, not MediaStore', async () => {
+      (SafX.exists as jest.Mock).mockImplementation((uri: string) => Promise.resolve(uri === `${treeUri}/test`));
+
+      const localRoot = await resolveLocalFolderRoot(1, 'test');
+
+      expect(localRoot).toBe('test (1)');
+      expect(SafX.exists).toHaveBeenCalledWith(`${treeUri}/test`);
+      expect(mockExists).not.toHaveBeenCalled();
+    });
   });
 });
 

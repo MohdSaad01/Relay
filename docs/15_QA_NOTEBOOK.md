@@ -3251,3 +3251,316 @@ no native code changed, so no fresh `.apk` install was needed).
   involved (`submitPairingRequest`'s catch block, `PairingWaitingScreen`'s
   existing 5-minute give-up) are unmodified by this milestone and were not
   exercised beyond what Test 3/4 already covered.
+
+---
+
+# Milestone P14.3 — Android Settings & Download Location
+
+## Architecture Investigation (before any code change)
+
+`screens/settings/SettingsScreen.tsx` was an unimplemented `PlaceholderScreen`
+— no way to view or change the download destination existed at all.
+
+The download pipeline's destination was hard-coded in three places, none of
+them sharing a single source of truth:
+- `streaming/blobUtil.ts`'s `publishDownload` — copies a fully-streamed file
+  from its private staging path into MediaStore `Downloads/Relay` (API 29+)
+  via `copyToMediaStore`, with its own `resolveAvailableMediaStoreName`
+  conflict-check reading `LegacyDownloadDir/Relay` directly.
+- `files/downloadExistence.ts`'s `downloadedFilePath`/`downloadedFileExists`/
+  `downloadedFolderContentUri` — the pipeline's actual abstraction boundary:
+  every other consumer (`downloadActions.ts`, `TransferStreamManager.ts`,
+  `folderIdentity.ts`, `FilesScreen.tsx`) already went through these three
+  functions rather than building paths itself.
+- `TransferStreamManager.ts`'s own `downloadStagingPath` — always private
+  app storage, never the final destination; unaffected by this milestone.
+
+The backend's `AppSettings.download_directory`
+(`docs/13_Database_Design.md` §6) is an unrelated, desktop-only setting for
+uploads the desktop *receives* — confirmed by reading
+`backend/app/services/app_settings_service.py` and the DB design doc; no
+backend change was needed or made.
+
+`react-native-saf-x` (already a dependency, already used for the P13 upload
+folder picker in `streaming/folderPicker.ts`) was read in full, including
+its native Android source
+(`node_modules/react-native-saf-x/android/.../EfficientDocumentHelper.java`),
+to confirm two load-bearing facts before designing around it: `copyFile`
+auto-creates missing intermediate directories at its destination (falls
+back to `createFile`, which resolves its parent via
+`getDocumentUri(..., createIfDirectoryNotExist=true, ...)`), and `stat`'s
+returned `uri` is **not** safe to hand to `ACTION_VIEW` for browsing a
+directory — see Root Cause below.
+
+## Physical Baseline (before any code change)
+
+Device: physical RMX3997, ADB serial `69DADENFONAIOZS4`, backend (port
+8000) + Electron desktop + Metro (port 8081) all already running, phone
+connected via USB with the backend reachable over the phone's hotspot
+(`10.169.164.233`).
+
+Shared a file (`baseline_file.txt`) and a folder with a nested subfolder
+(`share_test/Nested/fileB.txt`) via the backend's loopback API, downloaded
+both from the Android app. Confirmed via `adb shell`:
+- Both landed at `/storage/emulated/0/Download/Relay/`, nested structure
+  preserved.
+- Open on the file launched `ACTION_VIEW` on a
+  `content://com.relay.mobile.provider/...` FileProvider URI (chooser with
+  matching apps appeared).
+- Open on the folder launched DocumentsUI browsed directly to
+  `Download > Relay > share_test`, showing `Nested` and its file.
+- Deleting the downloaded file externally (`adb shell rm`) correctly
+  reverted its row from "Open" back to "Download" on the next poll.
+- Confirmed there was no way to change the destination — Settings was a
+  placeholder.
+
+## Root Cause / Design Gap
+
+Not a defect — a genuinely unimplemented feature. The gap was architectural:
+nothing in the pipeline had a concept of "the current download location" as
+a first-class, persisted, runtime value; `Relay`/`LegacyDownloadDir` were
+compile-time constants.
+
+## Architecture Decision
+
+Added a `mode: 'default' | 'custom'` setting
+(`settings/types.ts`), persisted as a small private JSON file via
+`react-native-blob-util`'s `readFile`/`writeFile`
+(`settings/downloadLocationStore.ts`) — the exact pattern
+`files/folderIdentity.ts` already established for local app state with no
+backend equivalent, avoiding a new dependency (AsyncStorage/MMKV) per
+CLAUDE.md Rule 2. `settings/DownloadLocationManager.ts` mirrors
+`session/SessionManager.ts`'s exact shape (in-memory cache + boot-time
+`restore()`, called from `App.tsx` alongside `SessionManager.restore()`),
+which resolves a real sync/async tension: several path-building call sites
+were previously synchronous, but a custom SAF location's path resolution is
+inherently async. Making the setting's *read* synchronous (an
+already-loaded in-memory cache) while making the *path-building functions*
+themselves `async` (all call sites already sat inside async functions —
+mechanical, not a redesign) kept every call site's diff small.
+
+`files/downloadExistence.ts` (the pipeline's existing sole abstraction
+boundary) became mode-aware: default-mode behavior is byte-for-byte
+unchanged (confirmed — see Automated Tests below, every pre-existing test
+passed unmodified except one intentional error-message change);
+custom-mode resolves the same relative path against the user-picked SAF
+tree. `streaming/blobUtil.ts`'s `publishDownload` dispatches to
+`publishToDefaultLocation` (the original code, renamed) or
+`publishToCustomLocation` (new — `SafX.copyFile` from the staging path into
+`<treeUri>/<relativePath>`, relying on the auto-mkdir behavior confirmed
+above). Conflict-name resolution
+(`resolveAvailableMediaStoreName` → generalized to
+`resolveAvailableDownloadName`) now routes its existence check through
+`downloadedFileExists` instead of hard-coding `LegacyDownloadDir`, so
+unique-naming works under either destination. `files/folderIdentity.ts`'s
+own name-collision check was switched to the same `downloadedFileExists`
+call for the same reason — its persisted registry schema
+(`localRoot`/`reconciledChildren`) needed **no change**, since it was
+already keyed by `shared_folder_id`, not by location.
+
+**Why switching locations needs no migration/reconciliation logic**:
+on-device existence was already re-derived live on every poll (that's how
+external-deletion detection has always worked — P13.3). Switching away from
+a location where a folder was downloaded makes that folder's row correctly
+report "Download" again (nothing at the *new* root); switching back makes
+it report "Completed" again automatically, because the reconciliation
+record was never mode-specific and the files were never touched. This was
+verified live (see below) rather than assumed.
+
+Settings UI (`screens/settings/SettingsScreen.tsx`) is a single card: current
+location, "Change Location" (opens `react-native-saf-x`'s
+`openDocumentTree(true)`, same call already used in P13's folder picker),
+"Reset to Default" (only shown in custom mode), and a `hasPermission`
+recheck on every focus to surface a revoked grant.
+
+## Defect Found and Fixed During Physical Verification
+
+**"Invalid root Uri" opening a custom-location folder.** Live on RMX3997:
+tapping "Open" on a folder downloaded to a custom SAF location launched
+DocumentsUI, but it landed on the device's generic "Download" root instead
+of the actual folder, logging `W Metrics: Invalid root Uri
+content://com.android.externalstorage.documents/...`.
+
+Root cause (confirmed by reading `react-native-saf-x`'s
+`DocumentStat.getWritableMap()`): for a child document whose id contains
+the tree's own document id as a substring — true for any ordinary nested
+child — `stat()` deliberately returns a **tree**-shaped URI
+(`DocumentsContract.buildTreeDocumentUri`), not a document URI scoped to
+the originally-granted tree. That shape round-trips fine through the
+library's own calls (they re-resolve it via persisted-permission prefix
+matching), but Android's `DocumentsUI` only accepts a tree URI as a
+browsable root if it's the *exact* URI it originally granted — a
+synthesized one fails. (File-open, by contrast, worked fine with the same
+URI shape — reading raw bytes via `ContentResolver` doesn't go through
+`DocumentsUI`'s root-validation path at all.)
+
+Fix: `files/downloadExistence.ts`'s `buildCustomTreeDocumentUri` builds the
+correct `content://<authority>/tree/<treeDocId>/document/<childDocId>`
+shape directly from the *granted* tree URI's own document id (parsed out of
+`location.treeUri`) plus the child's name — matching what
+`DocumentsContract.buildDocumentUriUsingTree` produces natively, the same
+approach the pre-existing default-mode `downloadedFolderContentUri` branch
+already used successfully. Re-verified live after the fix: Open on a
+custom-location folder now navigates directly to
+`RelayCustom > share_test`, and the folder-download-complete notification's
+tap-through was independently re-verified too (see below).
+
+## Files Changed
+
+New: `settings/types.ts`, `settings/downloadLocationStore.ts`,
+`settings/DownloadLocationManager.ts`, `settings/useDownloadLocation.ts`,
+plus matching tests and `__mocks__/react-native-saf-x.js`.
+
+Modified: `App.tsx` (boot-time restore), `files/downloadExistence.ts`
+(mode-aware path/existence/folder-URI resolution + new
+`deleteDownloadedPath`), `streaming/blobUtil.ts` (mode-aware
+`publishDownload`), `files/folderIdentity.ts` (existence check delegation),
+`files/downloadActions.ts` (await the now-async path functions; folder-open
+error message generalized), `streaming/TransferStreamManager.ts` (folder
+notification URI resolution simplified — the duplicated
+`Platform.Version >= MEDIASTORE_MIN_SDK` gate at this call site was removed
+in favor of `downloadedFolderContentUri` owning that decision once),
+`screens/files/FilesScreen.tsx` (stale-child delete routed through the new
+helper instead of a raw, default-mode-only `fs.unlink`),
+`screens/settings/SettingsScreen.tsx` (real UI, replacing the placeholder).
+
+## Automated Tests
+
+- `npx tsc --noEmit`: clean.
+- `npx eslint .`: 0 errors, 2 pre-existing warnings in
+  `TransferStreamManager.ts` (unrelated `no-void` lines, not touched by this
+  milestone).
+- `npx jest`: 35 suites / 280 tests passed. Every pre-existing test in
+  `downloadExistence.test.ts`, `blobUtil.test.ts`, `folderIdentity.test.ts`
+  passed **unmodified**, confirming default-mode behavior is unchanged;
+  only one pre-existing assertion was deliberately updated
+  (`downloadActions.test.ts`'s folder-open error message, generalized since
+  it's no longer specifically an "OS version" failure). New tests added for
+  every new state/branch: `settings/downloadLocationStore.test.ts`,
+  `settings/DownloadLocationManager.test.ts`, and custom-location
+  `describe` blocks added to `downloadExistence.test.ts`,
+  `blobUtil.test.ts`, `downloadActions.test.ts`, `folderIdentity.test.ts`
+  (including a regression test pinning the tree-scoped document URI shape
+  from the defect above).
+
+## Physical-Device Verification
+
+All exercised live on RMX3997 (`69DADENFONAIOZS4`), reloaded via Metro
+(JS-only change, no new native dependency — `react-native-saf-x` was
+already linked).
+
+**Default location (regression):** re-downloaded the baseline file after
+reload — landed at `Download/Relay/`, correct content; Open launched the
+same FileProvider chooser as the pre-change baseline; behavior pixel- and
+log-identical to the recorded baseline above.
+
+**Custom location:** picked a real folder (`RelayCustom`, created via the
+system picker's own "Create new folder") from the new Settings screen.
+- Switching to it immediately downgraded the already-downloaded default
+  items back to "Download" (existence re-derived against the new root) —
+  confirmed via `adb shell find` that neither `Download/Relay/`'s contents
+  nor their bytes were touched.
+- File and folder (with nested subfolder) downloads landed at
+  `/storage/emulated/0/RelayCustom/...`, correct content and structure,
+  confirmed via `adb shell cat`/`find`.
+- Open (file and, after the fix above, folder) both resolved correctly.
+- Folder-download-complete notification fired and, tapped, opened
+  DocumentsUI directly at `RelayCustom > notif_test` — a second, distinct
+  folder shared and downloaded specifically to exercise this path.
+- External deletion (`adb shell rm`) of a custom-location file correctly
+  reverted its row to "Download".
+- Duplicate-name suffixing: sharing a second, different file also named
+  `baseline_file.txt` and downloading it produced
+  `baseline_file (1).txt` at the custom root with the correct (second
+  file's) content — the same conflict algorithm as default mode, now
+  proven under a custom root too.
+- App restart (full `am force-stop` + relaunch, not just a Metro reload):
+  Settings still showed `RelayCustom`; a download made after restart still
+  landed there.
+- Reset to Default: Settings reverted to "Default (Downloads/Relay)";
+  default-location rows correctly reported "Open" again (untouched, still
+  physically present); custom-location-only rows correctly reported
+  "Download" (not present at the now-active default root). Nothing was
+  moved or deleted on either side.
+
+**Failure/revocation path:** `pm revoke`/a settings-UI toggle for a
+per-folder SAF grant is not exposed on this OEM (ColorOS/RealmeUI) shell —
+consistent with the `pm revoke`/`pm clear` `SecurityException`s already
+documented in this notebook's P14.2 entry. Instead, deleted the
+granted folder itself (`adb shell rm -rf`) to exercise the closest
+available failure mode. Finding: **the SAF permission grant survives
+folder deletion** — `hasPermission(treeUri)` kept returning `true` (a
+grant is an OS-level permission record independent of whether the target
+document still exists), so Settings showed no revoked-grant warning for
+this specific scenario — expected, not a bug, and worth recording since it
+means `hasPermission` alone cannot detect "the folder is gone." What *is*
+exercised and confirmed safe: attempting a download to the now-nonexistent
+destination failed gracefully — `SafX.copyFile` rejected
+(`ENOENT: Missing file for primary:RelayCustom at
+/storage/emulated/0/RelayCustom`), caught by `publishToCustomLocation`'s
+existing best-effort `catch`, logged via `console.warn`, and the transfer's
+row correctly stayed "Download" (re-downloadable) rather than falsely
+reporting success or crashing the app.
+
+## Problems Discovered
+
+- The "Invalid root Uri" folder-open defect above — found and fixed within
+  this milestone (required for P14.3 correctness, not a pre-existing
+  issue).
+- **Pre-existing, unrelated to this milestone**: `useDownloadExistence`'s
+  on-device existence check is keyed by a shared file's declared
+  `file_name`, not by whatever unique on-device name conflict-resolution
+  actually assigned it. Observed live: after downloading two different
+  shared files that both happen to be named `baseline_file.txt` (the
+  second correctly saved as `baseline_file (1).txt` on disk), the second
+  file's row still shows "Open" the moment *any* file named
+  `baseline_file.txt` exists at the current destination — even one
+  belonging to the *first*, unrelated shared file. Tapping "Open" on that
+  row would open the wrong file's content. This bug is identical in
+  default mode and predates P14.3 entirely (confirmed by inspection —
+  `downloadStatus.ts`/`useDownloadExistence.ts` were not touched by this
+  milestone); switching download locations only made it easier to notice
+  because it surfaces sooner with fewer files. **Not fixed** — out of this
+  milestone's scope per its own instructions ("only fix a discovered
+  prerequisite bug if required for P14.3 correctness"); documented here for
+  a future milestone.
+
+## Documentation Synchronization
+
+- **README.md:** added a Features bullet for the configurable download
+  location — this is exactly the kind of user-facing capability that
+  section already documents (discovery, pairing, streaming, notifications).
+- **CLAUDE.md:** unchanged — this milestone adds a contained feature within
+  the existing Android domain structure and layered architecture; it
+  introduces no new technology (Rule 2), no new layer-boundary rule, and no
+  backend change. Matches the P14.1/P14.2 precedent of leaving this file
+  alone for feature work that doesn't change a durable project-wide rule.
+- **docs/11_File_Transfer.md:** reviewed — its §6 download-side-state
+  description ("resolved on-device directory", `folderIdentity.ts`) was
+  already written abstractly enough to remain accurate; it never hard-coded
+  `Downloads/Relay` as a protocol statement. Unchanged.
+- **docs/14_Testing_Plan.md:** unchanged, following the same P14.1/P14.2
+  precedent — sub-milestones are tracked in this QA notebook.
+- **.gitignore:** unchanged — the new persisted setting lives in the app's
+  own private on-device storage (`DocumentDir`), not in the repository; no
+  new repo-tracked generated artifact was introduced.
+
+## Remaining Limitations
+
+- **True SAF grant revocation was not exercised live** — this OEM shell
+  exposes no command or settings UI to revoke a single persisted
+  per-folder grant (see Failure/revocation path above); the closest safe
+  substitute (deleting the underlying folder while the grant remains
+  valid) was tested instead and confirmed to fail gracefully.
+- **The pre-existing same-basename existence-status collision** documented
+  above under Problems Discovered remains unfixed, by design (out of
+  scope).
+- **`downloadedFilePath`'s custom-mode branch still returns
+  `react-native-saf-x`'s own `stat().uri`** (a tree-shaped URI) rather than
+  the tree-scoped document URI `buildCustomTreeDocumentUri` now builds for
+  folders. This was deliberately left as-is: it was verified live to work
+  correctly for file-open (`ContentResolver` reads don't go through
+  DocumentsUI's root-validation path), and changing a call site with no
+  observed defect would be scope creep beyond what P14.3 requires — noted
+  here in case a future file-open edge case ever surfaces the same class of
+  issue the folder case did.

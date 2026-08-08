@@ -10,12 +10,14 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { RootNavigator } from './src/navigation/RootNavigator';
 import { SessionManager } from './src/session/SessionManager';
+import { DownloadLocationManager } from './src/settings/DownloadLocationManager';
 
 function App() {
   const isDarkMode = useColorScheme() === 'dark';
 
   useEffect(() => {
     SessionManager.restore();
+    DownloadLocationManager.restore();
   }, []);
 
   return (

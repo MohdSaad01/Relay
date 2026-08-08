@@ -62,7 +62,7 @@
  */
 
 import ReactNativeBlobUtil from 'react-native-blob-util';
-import { downloadedFilePath } from './downloadExistence';
+import { downloadedFileExists } from './downloadExistence';
 
 const REGISTRY_PATH = `${ReactNativeBlobUtil.fs.dirs.DocumentDir}/relay-folder-registry.json`;
 
@@ -122,11 +122,12 @@ async function writeRegistry(registry: Registry): Promise<void> {
 }
 
 /**
- * Finds a directory name under Downloads/Relay (or the private staging
- * equivalent below MEDIASTORE_MIN_SDK — see downloadedFilePath) that isn't
- * already occupied, resolving a conflict with the same "name (1)", "name
- * (2)", ... pattern blobUtil.ts's resolveAvailableMediaStoreName already
- * uses for an individual file.
+ * Finds a directory name under the current download destination (P14.3 —
+ * settings/DownloadLocationManager; default Downloads/Relay, the private
+ * staging equivalent below MEDIASTORE_MIN_SDK, or a custom SAF folder) that
+ * isn't already occupied, resolving a conflict with the same "name (1)",
+ * "name (2)", ... pattern blobUtil.ts's resolveAvailableDownloadName
+ * already uses for an individual file.
  *
  * P13.3: a name is "taken" if EITHER an on-device stat finds it OR some
  * other registry entry has already claimed it as its `localRoot`. The
@@ -152,7 +153,7 @@ async function findAvailableRootName(registry: Registry, rawFolderName: string):
     if (reservedNames.has(name)) {
       return true;
     }
-    return ReactNativeBlobUtil.fs.exists(downloadedFilePath(name)).catch(() => false);
+    return downloadedFileExists(name);
   };
 
   if (!(await isTaken(rawFolderName))) {

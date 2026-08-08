@@ -9,7 +9,6 @@ import {
   Text,
   View,
 } from 'react-native';
-import ReactNativeBlobUtil from 'react-native-blob-util';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSharedFiles } from '../../files/useSharedFiles';
 import { useSharedFolders } from '../../files/useSharedFolders';
@@ -18,7 +17,7 @@ import { useFolderReconciliation } from '../../files/useFolderReconciliation';
 import { deriveDownloadStatus, FileDownloadStatus, latestSendTransferId } from '../../files/downloadStatus';
 import { deriveFolderDownloadStatus, FolderDownloadStatus, isFolderChildReconciled } from '../../files/folderDownloadStatus';
 import { useDownloadExistence } from '../../files/useDownloadExistence';
-import { downloadedFileExists, downloadedFilePath } from '../../files/downloadExistence';
+import { deleteDownloadedPath, downloadedFileExists } from '../../files/downloadExistence';
 import { markFolderReconciled, resolveLocalFolderRoot } from '../../files/folderIdentity';
 import { openDownloadedFile, openDownloadedFolder } from '../../files/downloadActions';
 import { useTransferRequests } from '../../transfers/useTransferRequests';
@@ -482,9 +481,7 @@ export function FilesScreen() {
             if (isFolderChildReconciled(child, reconciledChildren)) {
               continue;
             }
-            await ReactNativeBlobUtil.fs
-              .unlink(downloadedFilePath(`${localRoot}/${child.relative_path}`))
-              .catch(() => undefined);
+            await deleteDownloadedPath(`${localRoot}/${child.relative_path}`);
           }
           pending.push(child);
         }

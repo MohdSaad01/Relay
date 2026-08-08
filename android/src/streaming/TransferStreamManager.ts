@@ -31,7 +31,7 @@
  * FilesScreen — froze until its detail screen was visited).
  */
 
-import { PermissionsAndroid, Platform } from 'react-native';
+import { PermissionsAndroid } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
 import { getApiConfig } from '../api/config';
 import { cancelTransfer, listTransferRequests, listTransfers } from '../api/endpoints/transfers';
@@ -40,7 +40,7 @@ import { ApiError } from '../api/client';
 import { TransferResponse } from '../api/types';
 import { SessionManager } from '../session/SessionManager';
 import { areAllFolderChildrenDownloaded } from '../files/folderDownloadStatus';
-import { downloadedFolderContentUri, MEDIASTORE_MIN_SDK } from '../files/downloadExistence';
+import { downloadedFolderContentUri } from '../files/downloadExistence';
 import { markFolderReconciled, resolveLocalFolderRoot } from '../files/folderIdentity';
 import { downloadFile, isStreamCancelError, publishDownload, StreamTask, uploadFile } from './blobUtil';
 import { clearUploadSource, getUploadSource } from './uploadSourceRegistry';
@@ -194,7 +194,7 @@ async function notifyIfFolderComplete(transfer: TransferResponse): Promise<void>
     // resolution.
     const rawFolderName = transfer.folder_relative_path?.split('/')[0] ?? transfer.file_name;
     const folderName = await resolveLocalFolderRoot(folderId, rawFolderName);
-    const folderUri = Number(Platform.Version) >= MEDIASTORE_MIN_SDK ? downloadedFolderContentUri(folderName) : null;
+    const folderUri = await downloadedFolderContentUri(folderName);
     await notifyFolderDownloadComplete(folderName, folderUri);
   } catch (err) {
     console.warn('Could not determine whether the folder download finished.', err);

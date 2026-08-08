@@ -28,9 +28,8 @@
  * this UX-polish milestone's scope (CLAUDE.md Rule 2).
  */
 
-import { Platform } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
-import { downloadedFilePath, downloadedFolderContentUri, MEDIASTORE_MIN_SDK } from './downloadExistence';
+import { downloadedFilePath, downloadedFolderContentUri } from './downloadExistence';
 
 const DEFAULT_MIME_TYPE = 'application/octet-stream';
 const DIRECTORY_MIME_TYPE = 'vnd.android.document/directory';
@@ -60,7 +59,8 @@ const DIRECTORY_MIME_TYPE = 'vnd.android.document/directory';
  * library defect without touching `node_modules`.
  */
 export async function openDownloadedFile(fileName: string, mimeType: string | null): Promise<void> {
-  await ReactNativeBlobUtil.android.actionViewIntent(downloadedFilePath(fileName), mimeType || DEFAULT_MIME_TYPE, undefined);
+  const path = await downloadedFilePath(fileName);
+  await ReactNativeBlobUtil.android.actionViewIntent(path, mimeType || DEFAULT_MIME_TYPE, undefined);
 }
 
 /**
@@ -80,16 +80,20 @@ export async function openDownloadedFile(fileName: string, mimeType: string | nu
  * ReactNativeBlobUtilImpl.actionViewIntent), so this URI reaches
  * startActivity() unmodified, exactly as constructed.
  *
- * Only offered on API 29+ (MEDIASTORE_MIN_SDK) — see
- * downloadedFolderContentUri's own doc comment for why a folder downloaded
- * on an older device has no public-storage location for a file manager to
- * browse to in the first place. Rejects on that older-OS case so the caller
- * (FilesScreen.handleOpenFolder) surfaces the same kind of inline error a
- * failed file Open already does, rather than silently doing nothing.
+ * Only offered when downloadedFolderContentUri can actually resolve one
+ * (see its own doc comment): API 29+ in the default location, unrestricted
+ * in a custom SAF location (P14.3) unless its grant has been revoked.
+ * Rejects when it can't so the caller (FilesScreen.handleOpenFolder)
+ * surfaces the same kind of inline error a failed file Open already does,
+ * rather than silently doing nothing. The message deliberately doesn't
+ * name a specific cause (OS version vs. a revoked SAF grant) — callers show
+ * their own generic, more actionable message already (see
+ * FilesScreen.handleOpenFolder's catch block).
  */
 export async function openDownloadedFolder(folderName: string): Promise<void> {
-  if (Number(Platform.Version) < MEDIASTORE_MIN_SDK) {
-    throw new Error('Opening a downloaded folder needs Android 10 or later.');
+  const folderUri = await downloadedFolderContentUri(folderName);
+  if (!folderUri) {
+    throw new Error('This folder is not available to open.');
   }
-  await ReactNativeBlobUtil.android.actionViewIntent(downloadedFolderContentUri(folderName), DIRECTORY_MIME_TYPE, undefined);
+  await ReactNativeBlobUtil.android.actionViewIntent(folderUri, DIRECTORY_MIME_TYPE, undefined);
 }

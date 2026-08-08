@@ -40,6 +40,10 @@ build yet — plus the enhancements listed under
 * **Android foreground service** keeps in-progress transfers alive with a
   live progress notification, plus a separate "download complete"
   notification (via Notifee) with tap-to-open support on Android 10+.
+* **Configurable Android download location** — downloads default to
+  `Downloads/Relay`; a Settings tab lets you pick any folder via the
+  system folder picker instead. Changing it never moves or deletes files
+  already saved at the previous location.
 * **Desktop system tray integration** for background operation.
 
 ## Architecture

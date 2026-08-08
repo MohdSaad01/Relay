@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
+import * as SafX from 'react-native-saf-x';
 import {
   downloadFile,
   ensureEmptyFolderStaged,
@@ -7,6 +8,7 @@ import {
   publishDownload,
   uploadFile,
 } from '../../src/streaming/blobUtil';
+import { DownloadLocationManager } from '../../src/settings/DownloadLocationManager';
 
 function lastTask(): any {
   const fetchMock = ReactNativeBlobUtil.fetch as jest.Mock;
@@ -332,6 +334,86 @@ describe('publishDownload', () => {
         '/mock/documents/Downloads/Semester 1/DBMS.pdf',
       );
     });
+  });
+});
+
+describe('publishDownload to a custom SAF location (P14.3)', () => {
+  const treeUri = 'content://com.android.externalstorage.documents/tree/primary%3APhotos';
+
+  beforeEach(async () => {
+    await DownloadLocationManager.setLocation({ mode: 'custom', treeUri, displayName: 'Photos' });
+    (SafX.copyFile as jest.Mock).mockResolvedValue({ uri: `${treeUri}/report.pdf` });
+    (SafX.exists as jest.Mock).mockResolvedValue(false);
+    (SafX.stat as jest.Mock).mockResolvedValue({ uri: `${treeUri}/report.pdf`, size: 100 });
+  });
+
+  afterEach(async () => {
+    await DownloadLocationManager.resetToDefault();
+  });
+
+  test('copies into the picked SAF tree instead of MediaStore, and removes the staging copy', async () => {
+    const contentUri = await publishDownload('/mock/documents/Downloads/report.pdf', 'report.pdf');
+
+    expect(SafX.copyFile).toHaveBeenCalledWith('file:///mock/documents/Downloads/report.pdf', `${treeUri}/report.pdf`);
+    expect(ReactNativeBlobUtil.MediaCollection.copyToMediaStore).not.toHaveBeenCalled();
+    expect(ReactNativeBlobUtil.fs.unlink).toHaveBeenCalledWith('/mock/documents/Downloads/report.pdf');
+    expect(contentUri).toBe(`${treeUri}/report.pdf`);
+  });
+
+  test('is not gated by MEDIASTORE_MIN_SDK — SAF works below API 29 too', async () => {
+    versionSpy.mockReturnValue(24);
+
+    const contentUri = await publishDownload('/mock/documents/Downloads/report.pdf', 'report.pdf');
+
+    expect(contentUri).toBe(`${treeUri}/report.pdf`);
+  });
+
+  test('resolves a "name (1).ext" alternative when the requested name already exists at the custom location', async () => {
+    (SafX.exists as jest.Mock).mockImplementation((uri: string) => Promise.resolve(uri === `${treeUri}/report.pdf`));
+    (SafX.stat as jest.Mock).mockResolvedValue({ uri: `${treeUri}/report (1).pdf`, size: 100 });
+
+    await publishDownload('/mock/documents/Downloads/report.pdf', 'report.pdf');
+
+    expect(SafX.copyFile).toHaveBeenCalledWith(
+      'file:///mock/documents/Downloads/report.pdf',
+      `${treeUri}/report (1).pdf`,
+    );
+  });
+
+  test('does not throw when copyFile fails, leaving the file at its staging path and returning null', async () => {
+    (SafX.copyFile as jest.Mock).mockRejectedValueOnce(new Error('permission denied'));
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    await expect(publishDownload('/mock/documents/Downloads/report.pdf', 'report.pdf')).resolves.toBeNull();
+    expect(ReactNativeBlobUtil.fs.unlink).not.toHaveBeenCalled();
+  });
+
+  test('treats a copy that reports success but never actually lands at its destination as a failure', async () => {
+    (SafX.stat as jest.Mock).mockRejectedValueOnce(new Error('ENOENT'));
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const contentUri = await publishDownload('/mock/documents/Downloads/report.pdf', 'report.pdf');
+
+    expect(contentUri).toBeNull();
+    expect(ReactNativeBlobUtil.fs.unlink).not.toHaveBeenCalled();
+  });
+
+  // P13: a folder child's relativePath carries its nested directory portion — copyFile
+  // (per react-native-saf-x's own native transferFile/createFile implementation) auto-creates
+  // any missing intermediate directories, so no separate mkdir call is needed here.
+  test('publishes a nested folder child directly under its relative path, no manual mkdir', async () => {
+    (SafX.stat as jest.Mock).mockResolvedValue({ uri: `${treeUri}/University Notes/Semester 1/DBMS.pdf`, size: 100 });
+
+    const contentUri = await publishDownload(
+      '/mock/documents/Downloads/Semester 1/DBMS.pdf',
+      'University Notes/Semester 1/DBMS.pdf',
+    );
+
+    expect(SafX.copyFile).toHaveBeenCalledWith(
+      'file:///mock/documents/Downloads/Semester 1/DBMS.pdf',
+      `${treeUri}/University Notes/Semester 1/DBMS.pdf`,
+    );
+    expect(contentUri).toBe(`${treeUri}/University Notes/Semester 1/DBMS.pdf`);
   });
 });
 

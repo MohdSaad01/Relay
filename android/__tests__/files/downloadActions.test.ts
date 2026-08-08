@@ -1,6 +1,8 @@
 import { Platform } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
+import * as SafX from 'react-native-saf-x';
 import { openDownloadedFile, openDownloadedFolder } from '../../src/files/downloadActions';
+import { DownloadLocationManager } from '../../src/settings/DownloadLocationManager';
 
 let versionSpy: jest.SpyInstance;
 
@@ -55,10 +57,10 @@ describe('openDownloadedFolder', () => {
     );
   });
 
-  test('rejects without touching actionViewIntent below the MediaStore-capable SDK', async () => {
+  test('rejects without touching actionViewIntent below the MediaStore-capable SDK (default location)', async () => {
     versionSpy.mockReturnValue(24);
 
-    await expect(openDownloadedFolder('University Notes')).rejects.toThrow(/Android 10 or later/);
+    await expect(openDownloadedFolder('University Notes')).rejects.toThrow(/not available to open/);
     expect(ReactNativeBlobUtil.android.actionViewIntent).not.toHaveBeenCalled();
   });
 
@@ -66,5 +68,54 @@ describe('openDownloadedFolder', () => {
     (ReactNativeBlobUtil.android.actionViewIntent as jest.Mock).mockRejectedValueOnce(new Error('No activity found'));
 
     await expect(openDownloadedFolder('University Notes')).rejects.toThrow('No activity found');
+  });
+});
+
+describe('a custom SAF download location (P14.3)', () => {
+  const treeUri = 'content://com.android.externalstorage.documents/tree/primary%3APhotos';
+
+  beforeEach(async () => {
+    await DownloadLocationManager.setLocation({ mode: 'custom', treeUri, displayName: 'Photos' });
+  });
+
+  afterEach(async () => {
+    await DownloadLocationManager.resetToDefault();
+  });
+
+  test('openDownloadedFile opens the resolved SAF content URI', async () => {
+    (SafX.stat as jest.Mock).mockResolvedValueOnce({ uri: `${treeUri}/report.pdf` });
+
+    await openDownloadedFile('report.pdf', 'application/pdf');
+
+    expect(ReactNativeBlobUtil.android.actionViewIntent).toHaveBeenCalledWith(
+      `${treeUri}/report.pdf`,
+      'application/pdf',
+      undefined,
+    );
+  });
+
+  // Regression test: opening a downloaded folder must build a genuine
+  // tree-scoped document URI (matching what DocumentsUI recognizes as a
+  // browsable root), not react-native-saf-x's own stat().uri — see
+  // downloadExistence.ts's buildCustomTreeDocumentUri doc comment for the
+  // "Invalid root Uri" defect found live on RMX3997.
+  test('openDownloadedFolder works below the MediaStore SDK floor, since SAF has none', async () => {
+    versionSpy.mockReturnValue(24);
+
+    await openDownloadedFolder('University Notes');
+
+    expect(ReactNativeBlobUtil.android.actionViewIntent).toHaveBeenCalledWith(
+      'content://com.android.externalstorage.documents/tree/primary%3APhotos/document/primary%3APhotos%2FUniversity%20Notes',
+      'vnd.android.document/directory',
+      undefined,
+    );
+    expect(SafX.stat).not.toHaveBeenCalled();
+  });
+
+  test('openDownloadedFolder rejects when the tree URI is not a recognizable shape', async () => {
+    await DownloadLocationManager.setLocation({ mode: 'custom', treeUri: 'content://weird', displayName: 'x' });
+
+    await expect(openDownloadedFolder('University Notes')).rejects.toThrow(/not available to open/);
+    expect(ReactNativeBlobUtil.android.actionViewIntent).not.toHaveBeenCalled();
   });
 });

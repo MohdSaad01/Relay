@@ -13,7 +13,11 @@
 
 import { Platform } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
+import { copyFile as safCopyFile, stat as safStat } from 'react-native-saf-x';
 import { ApiError } from '../api/client';
+import { downloadedFileExists } from '../files/downloadExistence';
+import { DownloadLocationManager } from '../settings/DownloadLocationManager';
+import { DownloadLocation } from '../settings/types';
 
 export interface StreamTask {
   promise: Promise<void>;
@@ -27,7 +31,8 @@ const PROGRESS_CONFIG = { interval: 250 };
 // Android 10 (API 29); there is no equivalent public-storage API on older
 // versions without a legacy WRITE_EXTERNAL_STORAGE permission this app does
 // not request, so downloads below this SDK stay at their private staging
-// path — see TransferStreamManager's downloadStagingPath.
+// path — see TransferStreamManager's downloadStagingPath. Only applies to
+// the default location (P14.3) — a custom SAF location has no such floor.
 const MEDIASTORE_MIN_SDK = 29;
 const PUBLIC_DOWNLOAD_FOLDER = 'Relay';
 
@@ -122,32 +127,29 @@ async function isActuallyComplete(err: unknown, destPath: string, expectedBytes:
 }
 
 /**
- * Finds a display name under Downloads/Relay (or, for a folder download —
- * P13 — Downloads/Relay/<folder path>) that isn't already taken, resolving a
- * conflict (if any) with the same "name (1).ext", "name (2).ext" pattern the
- * backend already uses for uploads (`backend/app/utils/filesystem.
- * resolve_available_path`). Downloads have no equivalent on the Android
- * side: `copyToMediaStore` is asked to insert `fileName` verbatim every
- * time, and the same file name is a genuinely reachable case
- * (re-downloading the same shared file, or two different shared files that
- * happen to share a basename) — see docs/15_QA_NOTEBOOK.md's Milestone P3
- * entry.
+ * Finds a display name under the current download destination (or, for a
+ * folder download — P13 — <destination>/<folder path>) that isn't already
+ * taken, resolving a conflict (if any) with the same "name (1).ext", "name
+ * (2).ext" pattern the backend already uses for uploads (`backend/app/
+ * utils/filesystem.resolve_available_path`). Downloads have no equivalent
+ * on the Android side: neither `copyToMediaStore` (default location) nor
+ * SAF's `copyFile` (custom location, P14.3) rename on conflict themselves,
+ * and the same file name is a genuinely reachable case (re-downloading the
+ * same shared file, or two different shared files that happen to share a
+ * basename) — see docs/15_QA_NOTEBOOK.md's Milestone P3 entry.
  *
- * `relativePath` is the full path under Relay/ (e.g. "University
- * Notes/Semester 1/DBMS.pdf" for a folder child, or just "photo.jpg" for a
- * standalone file) — only its own basename is ever renamed; the directory
- * portion is preserved as-is.
+ * `relativePath` is the full path under the destination root (e.g.
+ * "University Notes/Semester 1/DBMS.pdf" for a folder child, or just
+ * "photo.jpg" for a standalone file) — only its own basename is ever
+ * renamed; the directory portion is preserved as-is.
  *
- * Checked via a raw filesystem read under the public Downloads directory,
- * the same technique (and same unverified-on-a-physical-device caveat)
- * `files/downloadExistence.ts` already relies on for its own existence
- * check.
+ * Existence is checked via `downloadedFileExists` — the same mode-aware
+ * check `files/downloadExistence.ts` uses for its own on-device existence
+ * check — so unique-naming keeps working whether the current destination is
+ * the default public Downloads/Relay or a user-picked custom folder.
  */
-async function resolveAvailableMediaStoreName(relativePath: string): Promise<string> {
-  const dir = `${ReactNativeBlobUtil.fs.dirs.LegacyDownloadDir}/${PUBLIC_DOWNLOAD_FOLDER}`;
-  const exists = (path: string) => ReactNativeBlobUtil.fs.exists(`${dir}/${path}`).catch(() => false);
-
-  if (!(await exists(relativePath))) {
+async function resolveAvailableDownloadName(relativePath: string): Promise<string> {
+  if (!(await downloadedFileExists(relativePath))) {
     return relativePath;
   }
 
@@ -159,7 +161,7 @@ async function resolveAvailableMediaStoreName(relativePath: string): Promise<str
   const ext = dotIndex > 0 ? fileName.slice(dotIndex) : '';
   for (let counter = 1; ; counter++) {
     const candidate = `${dirPrefix}${base} (${counter})${ext}`;
-    if (!(await exists(candidate))) {
+    if (!(await downloadedFileExists(candidate))) {
       return candidate;
     }
   }
@@ -168,19 +170,13 @@ async function resolveAvailableMediaStoreName(relativePath: string): Promise<str
 /**
  * Copies a fully-downloaded file out of its private staging path
  * (app-internal storage, invisible to the Downloads app, any file manager,
- * or media/file search) into the public Downloads/Relay folder via
- * MediaStore, then removes the staging copy. Requires no storage permission
- * — MediaStore.Downloads is writable by any app on API 29+ without one.
- *
- * `relativePath` (P13) is the full path under Relay/ — e.g. "University
- * Notes/Semester 1/DBMS.pdf" for a folder child, or just "photo.jpg" for a
- * standalone file (the pre-P13 shape). Only the trailing segment is ever
- * renamed on conflict; MediaStore's RELATIVE_PATH column natively supports
- * nested subdirectories under Downloads/ on API 29+, so `parentFolder` here
- * carries the full directory portion, not just the fixed "Relay" constant —
- * **unverified on a physical device until Physical Verification**; if
- * MediaStore rejects a nested parentFolder in practice, the fallback is
- * flattening into `Relay/<folder> - <file>` naming instead.
+ * or media/file search) into the currently configured download destination
+ * (P14.3 — settings/DownloadLocationManager), then removes the staging
+ * copy. Dispatches to whichever of the two publish strategies matches the
+ * current destination; both share the same conflict-free naming
+ * (`resolveAvailableDownloadName`) and the same "verify what's really on
+ * disk, don't trust the library's return value" discipline (see each
+ * strategy's own doc comment for why).
  *
  * Best-effort and never throws: the transfer has already fully received its
  * bytes by the time this runs (it's only ever called after a download's
@@ -188,18 +184,29 @@ async function resolveAvailableMediaStoreName(relativePath: string): Promise<str
  * turn an otherwise-successful transfer into a reported failure — it just
  * leaves the file at its private staging path instead.
  *
- * The requested display name is resolved to a conflict-free one first
- * (`resolveAvailableMediaStoreName`) rather than handed to `copyToMediaStore`
- * verbatim: unlike the backend's own upload path, nothing here previously
- * accounted for two downloads landing on the same file name, which could
- * make a later download's MediaStore insert fail against an already-taken
- * name — silently, since this function swallows every failure — leaving
- * that file stuck at its private staging path while its Transfer still
- * reported "completed".
+ * Returns the resulting `content://` URI on success, so a caller (the
+ * download-complete notification) can offer to open the file directly — or
+ * null when publishing didn't happen (pre-API 29 in default mode) or failed.
+ */
+export async function publishDownload(stagingPath: string, relativePath: string): Promise<string | null> {
+  const location = DownloadLocationManager.getLocation();
+  return location.mode === 'default'
+    ? publishToDefaultLocation(stagingPath, relativePath)
+    : publishToCustomLocation(location, stagingPath, relativePath);
+}
+
+/**
+ * The default (unconfigured) destination — public MediaStore Downloads/Relay
+ * on API 29+, or (below that SDK) a no-op that leaves the file at its
+ * private staging path. Requires no storage permission — MediaStore.Downloads
+ * is writable by any app on API 29+ without one.
  *
- * Returns the resulting `content://` MediaStore URI on success, so a caller
- * (the download-complete notification) can offer to open the file directly
- * — or null when publishing didn't happen (pre-API 29) or failed.
+ * `relativePath` (P13) is the full path under Relay/ — e.g. "University
+ * Notes/Semester 1/DBMS.pdf" for a folder child, or just "photo.jpg" for a
+ * standalone file (the pre-P13 shape). Only the trailing segment is ever
+ * renamed on conflict; MediaStore's RELATIVE_PATH column natively supports
+ * nested subdirectories under Downloads/ on API 29+, so `parentFolder` here
+ * carries the full directory portion, not just the fixed "Relay" constant.
  *
  * `copyToMediaStore` is not trusted at face value: on at least one real
  * device (RMX3997, Android 16/API 36 — see docs/15_QA_NOTEBOOK.md's
@@ -208,17 +215,16 @@ async function resolveAvailableMediaStoreName(relativePath: string): Promise<str
  * never actually lands (or is immediately truncated) in the public folder —
  * no exception is thrown, so this function's own try/catch never saw it.
  * The publish is therefore verified by statting the real destination path
- * (the same raw-filesystem technique `resolveAvailableMediaStoreName` and
- * `files/downloadExistence.ts` already use) and comparing its size against
- * the staged file's — only a byte-for-byte match counts as success.
+ * and comparing its size against the staged file's — only a byte-for-byte
+ * match counts as success.
  */
-export async function publishDownload(stagingPath: string, relativePath: string): Promise<string | null> {
+async function publishToDefaultLocation(stagingPath: string, relativePath: string): Promise<string | null> {
   if (Number(Platform.Version) < MEDIASTORE_MIN_SDK) {
     return null;
   }
   try {
     const stagedSize = Number((await ReactNativeBlobUtil.fs.stat(stagingPath)).size);
-    const targetRelativePath = await resolveAvailableMediaStoreName(relativePath);
+    const targetRelativePath = await resolveAvailableDownloadName(relativePath);
     const lastSlash = targetRelativePath.lastIndexOf('/');
     const targetName = lastSlash >= 0 ? targetRelativePath.slice(lastSlash + 1) : targetRelativePath;
     const targetSubdir = lastSlash >= 0 ? targetRelativePath.slice(0, lastSlash) : '';
@@ -228,7 +234,7 @@ export async function publishDownload(stagingPath: string, relativePath: string)
       'Download',
       stagingPath,
     );
-    if (!(await isPublishedAt(targetRelativePath, stagedSize))) {
+    if (!(await isPublishedAtDefaultLocation(targetRelativePath, stagedSize))) {
       console.warn(
         'copyToMediaStore reported success but the file is missing or incomplete at its public destination; leaving it in private storage.',
       );
@@ -254,10 +260,50 @@ export async function publishDownload(stagingPath: string, relativePath: string)
  * a `copyToMediaStore` call that had genuinely and correctly published the
  * file to `LegacyDownloadDir`/Relay.
  */
-async function isPublishedAt(relativePath: string, expectedBytes: number): Promise<boolean> {
+async function isPublishedAtDefaultLocation(relativePath: string, expectedBytes: number): Promise<boolean> {
   const dir = `${ReactNativeBlobUtil.fs.dirs.LegacyDownloadDir}/${PUBLIC_DOWNLOAD_FOLDER}`;
   const stat = await ReactNativeBlobUtil.fs.stat(`${dir}/${relativePath}`).catch(() => null);
   return stat != null && Number(stat.size) === expectedBytes;
+}
+
+/**
+ * A user-picked SAF folder (P14.3 — settings/DownloadLocationManager).
+ * `react-native-saf-x`'s `copyFile` resolves a destination shaped
+ * `<tree-uri>/<relative/path>` by walking/creating each path segment from
+ * the persisted tree root (confirmed by reading its native
+ * `EfficientDocumentHelper.transferFile`/`createFile` implementation),
+ * auto-creating any missing nested directories — the same "just works for a
+ * folder child's nested path" property `copyToMediaStore`'s
+ * `parentFolder` already has in default mode, so no separate `mkdir` calls
+ * are needed here.
+ *
+ * Mirrors `publishToDefaultLocation`'s own "don't trust the library's
+ * return value" discipline (P8.1): the publish is verified by statting the
+ * real destination and comparing its size against the staged file's.
+ */
+async function publishToCustomLocation(
+  location: Extract<DownloadLocation, { mode: 'custom' }>,
+  stagingPath: string,
+  relativePath: string,
+): Promise<string | null> {
+  try {
+    const stagedSize = Number((await ReactNativeBlobUtil.fs.stat(stagingPath)).size);
+    const targetRelativePath = await resolveAvailableDownloadName(relativePath);
+    const destUri = `${location.treeUri}/${targetRelativePath}`;
+    await safCopyFile(`file://${stagingPath}`, destUri);
+    const publishedStat = await safStat(destUri).catch(() => null);
+    if (!publishedStat || Number(publishedStat.size) !== stagedSize) {
+      console.warn(
+        'copyFile reported success but the file is missing or incomplete at its destination; leaving it in private storage.',
+      );
+      return null;
+    }
+    await ReactNativeBlobUtil.fs.unlink(stagingPath).catch(() => undefined);
+    return publishedStat.uri;
+  } catch (err) {
+    console.warn('Could not publish download to the selected folder; file remains in private storage.', err);
+    return null;
+  }
 }
 
 export function uploadFile(

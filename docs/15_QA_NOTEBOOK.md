@@ -4188,3 +4188,397 @@ respectively, not started.
 ## Verdict
 
 **P15 COMPLETE.**
+
+---
+
+# Milestone P16 — Android: Same-Basename Existence/Identity Collision
+
+## Problem
+
+Milestone P3 (this notebook, above) found and closed a *write-side* gap:
+`publishDownload` had no conflict handling, so two downloads landing on the
+same on-device name could silently collide. The fix
+(`resolveAvailableMediaStoreName`, later renamed
+`resolveAvailableDownloadName`) made the *physical* files land at distinct
+names ("report.txt" / "report (1).txt"). What P3 did not fix, and
+Milestone P15's Requirements Review explicitly deferred as this
+milestone's own starting point: nothing on the *read* side — existence
+checks, the Open action — ever learned about that disambiguation. Every
+read-side call kept asking about the shared file's own raw, undisambiguated
+`file_name`, so two different shared files sharing a basename read and
+wrote through what the UI believed was one shared identity.
+
+## Requirements / Source of Truth
+
+`docs/15_QA_NOTEBOOK.md`'s own Milestone P15 entry ("Requirements Review:
+Other Candidates Considered"): *"Same-basename existence-status collision
+(Milestone P3): two different shared files downloaded with the same
+basename can make Android's Files screen show 'Open' for the wrong file's
+content."* Proposed there as P16, not started. Per this milestone's own
+instructions, the prior diagnosis was not assumed correct — Phase 1/2 below
+re-traced and re-reproduced it against the current (post-P15) codebase
+before any code change.
+
+## Phase 1 — Inspection (current implementation)
+
+- `android/src/files/useDownloadExistence.ts`: an on-device existence cache
+  **keyed by a bare file-name string** (`Record<string, boolean>`), with no
+  concept of *which shared file* a name belongs to.
+- `android/src/screens/files/FilesScreen.tsx`: `computeFileRowState` read
+  `existence[file.file_name]` — the shared file's raw display name — and the
+  existence-verification effect called `verify(file.file_name)` for every
+  row whose latest Transfer was `completed`. `handleOpen` called
+  `openDownloadedFile(file.file_name, file.mime_type)`, and its re-verify
+  path (on a failed Open) called `verify(file.file_name)` too. All four call
+  sites used the same raw, undisambiguated name.
+- `android/src/streaming/TransferStreamManager.ts`'s
+  `resolveDownloadRelativePath`: for a standalone (non-folder) transfer,
+  simply `return transfer.file_name;` — no disambiguation at all upstream of
+  streaming. `blobUtil.ts`'s `resolveAvailableDownloadName` (P3) only ran
+  *after* the file finished downloading, inside `publishDownload`, and its
+  resolved `targetRelativePath` was discarded once used — never returned to
+  the caller, never persisted anywhere keyed by `shared_file_id`.
+- `android/src/files/folderIdentity.ts` (P13.2, Issue 1) had already solved
+  the structurally identical problem *for folders*: a `shared_folder_id`
+  -keyed, disk-persisted registry mapping to a disambiguated `localRoot`,
+  resolved once (before any bytes move) and reused for every later
+  reference (re-download, existence check, Open, notification). No
+  equivalent existed for standalone files — the gap was specifically
+  file-shaped, not a general architectural gap.
+- Backend (`backend/app/models/shared_file.py`,
+  `backend/app/schemas/shared_file.py`, `TransferResponse`): `shared_file_id`
+  is a stable, unique identifier already threaded through every relevant
+  Android API type (`TransferRequestResponse`, `TransferResponse`), already
+  used elsewhere in this exact file (`downloadStatus.ts`'s
+  `deriveDownloadStatus`/`latestSendTransferId`) to disambiguate rows.
+  Nothing new was needed from the backend — Phase 4/5's own conclusion.
+
+Grep for basename-based comparisons/registries confirmed the collision was
+confined to the standalone-file path: `folderDownloadStatus.ts`,
+`folderIdentity.ts`, and `useFolderReconciliation.ts` were already
+`shared_folder_id`-keyed throughout.
+
+## Phase 2 — Physical Reproduction (RMX3997, pre-fix)
+
+Device: physical RMX3997, ADB serial `69DADENFONAIOZS4`, already paired,
+backend and Metro already running (matching every prior milestone's live
+setup), app in the foreground.
+
+**Case A — same-named files.** Shared two distinct files via the desktop's
+own loopback `POST /files`, both named `report.txt` but with different
+content/size and different source paths (`shared_file_id=1`, 47 B, source
+A; `shared_file_id=2`, 65 B, source B). Downloaded both from the real Files
+screen. `adb shell ls`/`cat` on `/storage/emulated/0/Download/Relay/`
+confirmed P3's write-side fix still worked — two genuinely distinct
+physical files (`report.txt` = B's content, `report (1).txt` = A's
+content). Both rows showed **Open**.
+
+Tapped **Open** on the 47 B row (file A). The chooser opened
+`report.txt` — **file B's physical content** ("P16 SOURCE B..."), not
+file A's own — confirmed on-screen via a text viewer. This is a genuine
+data-identity mix-up, not merely a stale status label.
+
+Deleted only `report.txt` (file B's physical copy) via `adb shell rm`, then
+returned to the Files screen. **Both** rows reverted to **Download** —
+including file A's row, whose own physical copy (`report (1).txt`) was
+never touched. Confirmed the documented collision: one file's disappearance
+flips the *other* same-named file's status too.
+
+**Case B — same-named folders.** Shared two distinct folders, both named
+`test`, with distinguishable single-file contents (`shared_folder_id=1`,
+16 B; `shared_folder_id=2`, 36 B). First attempt was contaminated by a
+live, separate instance of the deferred P17 defect (`shared_folder_id`
+reuse): the backend's fresh ids (1, 2) collided with stale
+`relay-folder-registry.json` entries from an earlier, unrelated milestone
+session, silently redirecting the new downloads into old, wrongly-named
+directories (`share_test`, `notif_test`) — documented, not fixed, per this
+milestone's explicit scope boundary (do not investigate P17 unless it
+blocks P16). Cleared the local registry/on-device leftovers (my own
+just-written test files only) and re-ran cleanly: the two `test` folders
+correctly disambiguated to on-device roots `test` / `test (1)`
+(`folderIdentity.ts`, P13.2), confirmed via `adb shell find`/`cat` showing
+two genuinely distinct directory trees. Deleting one folder's physical
+directory correctly flipped only that folder's row to **Download**, leaving
+the other's **Open** untouched — **folders do not reproduce this defect**;
+P13.2's existing `shared_folder_id`-keyed registry already isolates them
+correctly. This confirms the task's own caution not to assume the folder
+and file paths share an implementation shape — they don't.
+
+## Root Cause
+
+Two different shared files that happen to share a display name
+(`file_name`) have no on-device identity distinct from that name once P3's
+write-side renaming has occurred: nothing downstream of `publishDownload`
+ever recorded *which* `shared_file_id` actually claimed *which* resolved
+on-device name. Every read-side consumer (the existence cache, the Open
+action) therefore fell back to asking about the shared, undisambiguated
+`file_name` — a single cache key/physical-path lookup silently shared by
+both files' rows. Folders never had this gap because P13.2 already gives a
+folder a persistent, `shared_folder_id`-keyed identity
+(`folderIdentity.ts`); no equivalent existed for a standalone file.
+
+## Identity / Source-of-Truth Decision
+
+`shared_file_id` — already a stable, unique identifier flowing through
+every relevant type (`AvailableFileResponse.id`, `TransferResponse
+.shared_file_id`), already relied on elsewhere in this exact file
+(`downloadStatus.ts`) to disambiguate rows — is the correct identity to key
+on. Rejected alternatives:
+
+- **`transfer_id`**: a file can accumulate several transfers over its
+  lifetime (retries, re-downloads); the identity that must stay stable is
+  the *file*, not any one transfer attempt. `downloadStatus.ts` already
+  derives the *latest* transfer for a given `shared_file_id` for exactly
+  this reason.
+- **A new display-name-based lookup with extra fields (e.g. hashing
+  file_name + shared_at)**: would still be a display-name-shaped identity,
+  just obscured — explicitly ruled out by this milestone's own non-negotiable
+  rule 3 ("do not solve an identity problem with another display-name
+  lookup").
+- **Resolved physical path as the primary key**: the path is *derived from*
+  the identity (via disambiguation), not independent of it — using it as
+  the key would still need something else to decide, on first resolution,
+  which of two colliding files gets which path. `shared_file_id` is that
+  something else.
+
+## Architecture Decision
+
+Mirrored `folderIdentity.ts`'s already-proven shape (P13.2) exactly, rather
+than inventing a new pattern: a small, disk-persisted, `shared_file_id`
+-keyed registry (`android/src/files/fileIdentity.ts`,
+`relay-file-registry.json`), resolved once — before a standalone file's
+bytes start moving — and permanently remembered, so every later reference
+(a re-download after external deletion, an existence check, the Open
+action) reads the same answer back instead of re-deriving it.
+
+Deliberately a **separate** registry file from `folderIdentity.ts`'s own,
+not a shared/merged one: a file's identity has no reconciliation concept (a
+leaf file either exists or it doesn't — there is no set of children to
+compare against), so folding the two together would blur two structurally
+distinct sources of truth and complicate the one that already works.
+Matches this codebase's existing file/folder module split
+(`downloadStatus.ts` vs `folderDownloadStatus.ts`).
+
+Where the fix lives, and why nowhere else:
+
+- **`fileIdentity.ts`** (new): the registry itself — resolve-and-remember,
+  exactly like `resolveLocalFolderRoot`.
+- **`TransferStreamManager.ts`'s `resolveDownloadRelativePath`**: the one
+  place that already resolves a folder child's local root before staging;
+  extended with a parallel, guarded (`direction === 'send' && shared_file_id
+  != null`) branch for a standalone file. Resolving here — before staging,
+  not just before publish — means the disambiguated name is already
+  reserved (registry-checked, not just disk-checked) the moment two
+  never-before-seen same-named files are downloaded back-to-back, closing
+  the same not-yet-materialized-on-disk race P13.3 already documented and
+  fixed for folders.
+- **`FilesScreen.tsx`**: every read-side call site (the existence-
+  verification effect, `computeFileRowState`, `handleOpen`'s own
+  Open/re-verify calls, the long-press menu's file-state derivation) now
+  resolves each file's actual on-device name via a new `localFileName`
+  helper (`localNameByFileId[file.id] ?? file.file_name`) before consulting
+  `existence`/calling `openDownloadedFile` — mirroring exactly how the same
+  screen already reads `localRootByFolderId` for folders.
+- **`useFileIdentity.ts`** (new): a thin hook loading the registry into
+  React state on the same poll tick `useFolderReconciliation` already
+  piggybacks on — the file-level mirror of that hook.
+- **Deliberately untouched**: `downloadExistence.ts` (its
+  `downloadedFileExists`/`downloadedFilePath` already operate on *any*
+  relative path — generic by construction, nothing file/folder-specific to
+  fix), `downloadActions.ts` (`openDownloadedFile`'s own signature is
+  unchanged; only the *name it's called with* changes, at the call site),
+  `blobUtil.ts` (`resolveAvailableDownloadName` still runs, now as a
+  harmless no-op safety net for a name already reserved upstream — still
+  load-bearing for folder children's own per-file disambiguation, untouched
+  by this milestone), `folderIdentity.ts`/`folderDownloadStatus.ts` (Case B
+  confirmed already correct).
+
+This affects **both** status detection (existence) and the **Open** action
+— not just one of them, per Phase 5's own question 5. Notifications and
+folder reconciliation are unaffected: `notifyDownloadComplete` already
+receives its `content://` URI straight from `publishDownload`'s own return
+value (never derived from `file_name`), and folder reconciliation has never
+touched standalone-file identity.
+
+## Files Changed
+
+- **New:** `android/src/files/fileIdentity.ts` — the `shared_file_id`
+  -keyed local-name registry (`resolveLocalFileName`,
+  `readAllLocalFileNames`).
+- **New:** `android/src/files/useFileIdentity.ts` — the React hook loading
+  that registry, mirroring `useFolderReconciliation.ts`.
+- **Modified:** `android/src/streaming/TransferStreamManager.ts` —
+  `resolveDownloadRelativePath` resolves a standalone SEND file's on-device
+  name via the new registry before staging.
+- **Modified:** `android/src/screens/files/FilesScreen.tsx` — new
+  `localFileName` helper; `computeFileRowState`, the existence-verification
+  effect, `handleOpen` (both the Open call and its re-verify path), and the
+  long-press menu's file-state derivation all resolve through it instead of
+  the raw `file.file_name`; the `TransferStreamManager` subscription now
+  also refreshes the file-identity map alongside folder reconciliation.
+
+Test: `android/__tests__/files/fileIdentity.test.ts` (new — mirrors
+`folderIdentity.test.ts`'s coverage: fresh resolution, collision → "(1)",
+extension-preserving disambiguation, incrementing past an already-taken
+"(1)", reuse of an existing mapping without touching the filesystem,
+re-download after external deletion resolving back to the *same* name,
+corrupted-registry tolerance, concurrent-resolution race safety, custom SAF
+location per P14.3). `android/__tests__/files/useFileIdentity.test.tsx`
+(new — mirrors `useFolderReconciliation.test.tsx`). Two new cases added to
+`android/__tests__/streaming/TransferStreamManager.test.ts`: two same-named
+files stage/publish to distinct on-device names (mirrors the existing
+P13.2 folder test), and a re-download of the same `shared_file_id` resolves
+back to its already-registered name rather than drifting.
+
+No backend or desktop files changed — Phase 1/3's own conclusion (the
+backend already exposes a sufficient stable identifier) held; nothing
+required a backend change.
+
+## Automated Tests
+
+- `npx jest` (Android): 38 suites / 310 tests passing (2 new suites, 3 new
+  cases in an existing suite; every pre-existing test passed unchanged —
+  confirmed the fix is additive, not a behavior change for the
+  no-collision case, since a resolved name equals the raw name whenever
+  nothing is actually taken).
+- `npx tsc --noEmit`: clean.
+- `npx eslint .`: clean (two pre-existing `no-void` warnings in
+  `TransferStreamManager.ts`, on lines this milestone did not touch,
+  predate this change).
+- Backend: untouched by this milestone; not re-run.
+
+## Physical-Device Verification (RMX3997, post-fix)
+
+Reloaded the app against the fixed JS bundle (Metro + `adb reverse
+tcp:8081 tcp:8081`; a stale reverse tunnel from an earlier device
+disconnect briefly showed RN's "Unable to load script" screen — re-running
+`adb reverse` and reloading resolved it, not a defect in this change).
+
+To avoid the confound of *pre-fix* completed Transfers (which predate the
+registry and therefore still fall back to the raw name — see Remaining
+Limitations), unshared the original Case A test files and re-shared two
+brand-new ones (`shared_file_id=5`, 40 B; `shared_file_id=6`, 58 B), both
+named `report.txt`, for a clean post-fix-only test:
+
+| Scenario | Result |
+|---|---|
+| Download B (58 B) | Registry: `{"6":"report.txt"}`; physical `report.txt` = 58 B |
+| Download A (40 B) | Registry: `{"5":"report (1).txt","6":"report.txt"}`; physical `report (1).txt` = 40 B, both distinct on disk |
+| Both rows | **Open** |
+| Tap Open on A (40 B) | Chooser title bar: **"report (1)"**; body text: **"P16 CLEAN A..."** — A's own content |
+| Tap Open on B (58 B) | Chooser title bar: **"report"**; body text: **"...BBBB..."** — B's own content |
+| Delete only physical `report.txt` (B) | B → **Download**; A → **Open**, unaffected |
+| Re-download B | Registry unchanged (`{"6":"report.txt"}`, same name); both rows → **Open** |
+| App restart (force-stop + relaunch) | Both rows still **Open**, registry/physical state intact |
+| Folder Case B re-check (post-fix) | Re-downloaded the previously-deleted folder; correctly resolved back to its already-registered root (`test (1)`); both folder rows **Open** |
+
+Deleting file A's physical copy and re-verifying the *other* direction was
+covered symmetrically by the pre-fix Case A reproduction already showing
+the opposite half of the same bug (deleting B affected both) — the post-fix
+matrix above demonstrates the fix from the other direction (deleting B, A
+unaffected; re-download recovers). Both directions rely on the same
+registry mechanism, so this is not treated as leaving a gap.
+
+## P13/P14/P15 Regression Checks
+
+- **P13/P13.2 (folder duplicate naming) and P13.3 (folder state machine):**
+  Case B's physical re-verification above (`test` / `test (1)`, correct
+  Open targets, correct independent existence tracking, correct
+  re-download-to-same-root recovery) — all untouched by this milestone's
+  code changes, confirmed still correct live.
+- **P14.1 (long-press menu):** `FilesScreen.tsx`'s menu file-state
+  derivation was one of the four call sites updated to resolve through
+  `localFileName` — exercised implicitly by every Open/Details action taken
+  during physical verification above; no separate regression found.
+- **P14.2 (discovery/QR pairing):** untouched code path; not re-exercised
+  beyond the pairing already in place for this device.
+- **P14.3 (custom download location):** not touched by physical
+  verification this session (would require reconfiguring the device's
+  download location mid-session), but covered by
+  `fileIdentity.test.ts`'s "checks name availability against the custom SAF
+  tree, not MediaStore" case — `resolveLocalFileName` delegates to the same
+  mode-aware `downloadedFileExists` every other P14.3-aware check already
+  uses, with no default-mode assumption hard-coded.
+- **P14.4 (transfer history reset):** Transfers tab spot-checked live
+  post-fix — all rows "Completed", "Clear History" enabled and red/tappable,
+  matching expected P14.4 behavior; this milestone touches no transfer-
+  history code.
+- **P15 (disappearing-source failure handling):** not re-exercised this
+  session (backend-only, untouched by this milestone); no interaction
+  between the two fixes' code paths.
+
+## Defects Discovered During Verification
+
+- **A live instance of the deferred P17 defect** (`shared_folder_id`
+  reuse) surfaced while setting up Case B's reproduction: two freshly
+  shared folders happened to receive ids matching stale
+  `relay-folder-registry.json` entries from an earlier, unrelated session,
+  silently redirecting new downloads into old, wrongly-named directories.
+  Documented here as encountered; not investigated or fixed, per this
+  milestone's explicit scope boundary ("do NOT investigate/fix
+  `shared_folder_id` reuse unless it blocks P16" — it was worked around by
+  clearing the contaminating local test state, not fixed).
+
+## Defects Fixed vs. Intentionally Deferred
+
+**Fixed:** the same-basename existence/identity collision for standalone
+shared files (this milestone) — both the existence-status collision (P3's
+own original finding) and the more severe Open-opens-wrong-content
+data-identity mix-up (found during this milestone's own Phase 2
+reproduction, not previously documented as its own defect).
+
+**Intentionally deferred (not part of P16):** `shared_folder_id` reuse
+(P17) — re-confirmed live during this milestone's own setup, per the
+Requirements Review above and this milestone's explicit scope boundary.
+
+## Documentation Synchronization
+
+- **docs/15_QA_NOTEBOOK.md:** this entry.
+- **docs/11_File_Transfer.md, docs/13_Database_Design.md:** reviewed — the
+  identity invariant this milestone establishes (download existence/status/
+  Open must never key on display basename alone) is an Android-local
+  implementation detail with no backend or database counterpart to
+  document; neither file asserted the pre-fix (broken) behavior, so
+  neither needed correcting.
+- **CLAUDE.md:** updated — this milestone establishes a durable
+  architectural rule (Android download-identity resolution must key on a
+  stable id, never on display basename alone) that is exactly the kind of
+  rule future milestones need to inherit without re-deriving it, per
+  CLAUDE.md's own "Documentation Ownership" section. Added under a new
+  short "Android Download Identity" note.
+- **README.md:** unchanged — this is a correctness fix to already-documented
+  behavior (a downloaded file's status/Open now correctly reflects its own
+  identity), not a new user-facing capability to list.
+- **.gitignore:** unchanged — no new local/generated artifact type (the new
+  registry file lives in the same app-private storage
+  `relay-folder-registry.json` already uses, already outside the repo).
+
+## Remaining Limitations
+
+- **Pre-fix completed downloads have no registry entry.** A `Transfer` that
+  reached `completed` *before* this fix shipped has no corresponding
+  `fileIdentity.ts` entry; until that specific file is re-downloaded (which
+  mints a fresh registry entry) or its row is otherwise re-verified, it
+  still falls back to the raw `file_name` for existence checks and Open —
+  meaning it can still transiently collide with a *newly*-downloaded
+  same-named file until it is itself refreshed. This mirrors
+  `folderIdentity.ts`'s own already-documented "reinstall" limitation
+  (a mapping lost or never created resolves as if seen for the first time)
+  and was not treated as a new defect to fix: retroactively resolving which
+  of two historical same-named files "really" held a given legacy path is
+  fundamentally ambiguous after the fact, and a full backfill/migration is
+  outside this milestone's scope (CLAUDE.md Rule 3). A **fresh** download of
+  either file (the normal recovery path this milestone's own required
+  invariants call for) immediately and permanently fixes that file's
+  identity going forward.
+- **The deferred P17 defect** (`shared_folder_id` reuse) remains unfixed,
+  re-confirmed live this session — see Defects Discovered above.
+- **P14.3 custom-location coverage this session was automated-only**, not
+  physically re-verified against a real custom SAF folder (would require
+  reconfiguring the live device's download location) — the underlying
+  mechanism (`downloadedFileExists`, already mode-aware) is unchanged by
+  this milestone and already physically verified under P14.3 itself.
+
+## Verdict
+
+**P16 COMPLETE.**

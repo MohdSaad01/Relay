@@ -14,6 +14,7 @@ import { useSharedFiles } from '../../files/useSharedFiles';
 import { useSharedFolders } from '../../files/useSharedFolders';
 import { useFolderFilesMap } from '../../files/useFolderFilesMap';
 import { useFolderReconciliation } from '../../files/useFolderReconciliation';
+import { useFileIdentity } from '../../files/useFileIdentity';
 import { deriveDownloadStatus, FileDownloadStatus, latestSendTransferId } from '../../files/downloadStatus';
 import { deriveFolderDownloadStatus, FolderDownloadStatus, isFolderChildReconciled } from '../../files/folderDownloadStatus';
 import { useDownloadExistence } from '../../files/useDownloadExistence';
@@ -53,6 +54,20 @@ type SharedItem =
   | { kind: 'folder'; data: AvailableFolderResponse };
 
 /**
+ * `localNameByFileId` (P16 — files/fileIdentity.ts) resolves a file's
+ * *actual* on-device name — two different shared files that happen to share
+ * a display name (file_name) resolve to distinct on-device names (e.g.
+ * "report.txt" / "report (1).txt"), so consulting existence/Open by the raw,
+ * undisambiguated file_name would answer for whichever of the two happened
+ * to occupy that exact name, silently mixing up both rows' Download/Open
+ * state. A file with no registry entry yet (never successfully downloaded)
+ * falls back to its raw file_name — nothing to disambiguate yet.
+ */
+function localFileName(file: AvailableFileResponse, localNameByFileId: Record<number, string>): string {
+  return localNameByFileId[file.id] ?? file.file_name;
+}
+
+/**
  * A row's derived download status/queued flag, computed once and shared by
  * both its FileRow rendering (renderItem below) and the P14.1 long-press
  * menu (FilesScreen's menuTarget rendering) — the menu deliberately reads
@@ -67,8 +82,9 @@ function computeFileRowState(
   requests: TransferRequestResponse[],
   transfers: TransferResponse[],
   existence: Record<string, boolean>,
+  localNameByFileId: Record<number, string>,
 ): { status: FileDownloadStatus; queued: boolean } {
-  const status = deriveDownloadStatus(file.id, requests, transfers, existence[file.file_name]);
+  const status = deriveDownloadStatus(file.id, requests, transfers, existence[localFileName(file, localNameByFileId)]);
   const transferId = latestSendTransferId(file.id, transfers);
   const queued = transferId != null && TransferStreamManager.isQueued(transferId);
   return { status, queued };
@@ -151,6 +167,7 @@ export function FilesScreen() {
   } = useSharedFolders();
   const folderFilesMap = useFolderFilesMap(folders);
   const { reconciledByFolderId, localRootByFolderId, refresh: refreshReconciliation } = useFolderReconciliation(folders);
+  const { localNameByFileId, refresh: refreshFileIdentity } = useFileIdentity(files);
   const { requests, refresh: refreshRequests } = useTransferRequests();
   const { transfers, refresh: refreshTransfers } = useTransfers();
   const { existence, verify } = useDownloadExistence();
@@ -228,17 +245,20 @@ export function FilesScreen() {
   // Re-verifies on-device existence for every file the polled data currently
   // reports as a completed download — covers both a stale 'completed' from
   // before this screen mounted and a file deleted while it stayed open.
-  // Folder children are not individually covered here — useDownloadExistence
-  // is keyed by a flat file_name and does not extend to a nested
-  // relative_path — but the folder as a whole is, via a live check of its
-  // root directory in the next effect below (P13.3, Problem 1).
+  // Checked against each file's *resolved* on-device name (localFileName,
+  // P16 — files/fileIdentity.ts), not its raw, possibly-colliding file_name
+  // — see localFileName's own doc comment. Folder children are not
+  // individually covered here — useDownloadExistence is keyed by a flat name
+  // and does not extend to a nested relative_path — but the folder as a
+  // whole is, via a live check of its root directory in the next effect
+  // below (P13.3, Problem 1).
   useEffect(() => {
     files.forEach(file => {
       if (deriveDownloadStatus(file.id, requests, transfers).kind === 'completed') {
-        verify(file.file_name);
+        verify(localFileName(file, localNameByFileId));
       }
     });
-  }, [files, requests, transfers, verify]);
+  }, [files, requests, transfers, verify, localNameByFileId]);
 
   // P13.3 (Problem 1): the folder-level equivalent of the file check above —
   // closes the gap folderDownloadStatus.ts used to document as an accepted
@@ -292,9 +312,10 @@ export function FilesScreen() {
         }
         if (streamState?.status === 'completed') {
           refreshReconciliation();
+          refreshFileIdentity();
         }
       }),
-    [refreshReconciliation],
+    [refreshReconciliation, refreshFileIdentity],
   );
 
   const handleDownload = useCallback(
@@ -353,7 +374,7 @@ export function FilesScreen() {
         return next;
       });
       try {
-        await openDownloadedFile(file.file_name, file.mime_type);
+        await openDownloadedFile(localFileName(file, localNameByFileId), file.mime_type);
       } catch {
         // Open is offered optimistically (see canOpen below), so a failure
         // here can mean either "no app handles this file type" or "the file
@@ -361,14 +382,14 @@ export function FilesScreen() {
         // Re-verify so a genuinely-missing file downgrades back to a
         // re-downloadable 'idle' row instead of staying stuck offering an
         // "Open" that will keep failing.
-        verify(file.file_name);
+        verify(localFileName(file, localNameByFileId));
         setOpenErrors(prev => ({
           ...prev,
           [file.id]: 'Could not open this file. It may have been moved, deleted, or need another app.',
         }));
       }
     },
-    [verify],
+    [verify, localNameByFileId],
   );
 
   // P14.1: the long-press menu's Details action for a file — surfaces only
@@ -601,7 +622,7 @@ export function FilesScreen() {
   let menuActions: FileActionMenuAction[] = [];
 
   if (menuFile) {
-    const fileState = computeFileRowState(menuFile, requests, transfers, existence);
+    const fileState = computeFileRowState(menuFile, requests, transfers, existence, localNameByFileId);
     const canOpen = fileState.status.kind === 'completed';
     menuTitle = menuFile.file_name;
     menuSubtitle = `${formatFileSize(menuFile.file_size)}${menuFile.mime_type ? ` · ${menuFile.mime_type}` : ''}`;
@@ -678,7 +699,7 @@ export function FilesScreen() {
               requesting={requestingIds[item.data.id] ?? false}
               requestError={requestErrors[item.data.id]}
               openError={openErrors[item.data.id]}
-              {...computeFileRowState(item.data, requests, transfers, existence)}
+              {...computeFileRowState(item.data, requests, transfers, existence, localNameByFileId)}
               onDownload={() => handleDownload(item.data)}
               onOpen={() => handleOpen(item.data)}
               onLongPress={() => setMenuTarget({ kind: 'file', id: item.data.id })}

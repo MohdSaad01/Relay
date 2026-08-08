@@ -276,6 +276,80 @@ test('P13.2 (Issue 1): two shared folders with the same raw name stage/publish i
   expect(mockPublishDownload).toHaveBeenLastCalledWith(expect.any(String), 'Duplicate (1)/b.txt');
 });
 
+test('P16: two shared files with the same raw name stage/publish into distinct on-device names', async () => {
+  mockDownloadFile.mockReturnValue(makeTask(Promise.resolve()));
+  const mockExists = ReactNativeBlobUtil.fs.exists as jest.Mock;
+  // Simulates on-device state: a name "exists" once a file has actually
+  // published under it, tracked independently of the (also mocked, and in
+  // this test never actually persisted across calls) file-identity
+  // registry file — this alone is enough to prove the disambiguation
+  // itself, regardless of how the registry is backed. Mirrors the
+  // equivalent P13.2 (Issue 1) folder test above.
+  const published = new Set<string>();
+  mockExists.mockImplementation((path: string) => Promise.resolve(published.has(path)));
+  mockPublishDownload.mockImplementation((_stagingPath: string, relativePath: string) => {
+    published.add(`/mock/downloads/Relay/${relativePath}`);
+    return Promise.resolve(null);
+  });
+
+  const fileA: TransferResponse = { ...sendTransfer, id: 930, shared_file_id: 40, file_name: 'report.txt' };
+  const fileB: TransferResponse = { ...sendTransfer, id: 931, shared_file_id: 41, file_name: 'report.txt' };
+
+  await TransferStreamManager.start(fileA);
+  expect(mockDownloadFile).toHaveBeenLastCalledWith(
+    expect.any(String),
+    expect.any(Object),
+    expect.stringContaining('/report.txt'),
+    1000,
+    expect.any(Function),
+  );
+  expect(mockPublishDownload).toHaveBeenLastCalledWith(expect.any(String), 'report.txt');
+
+  await TransferStreamManager.start(fileB);
+  expect(mockDownloadFile).toHaveBeenLastCalledWith(
+    expect.any(String),
+    expect.any(Object),
+    expect.stringContaining('report (1).txt'),
+    1000,
+    expect.any(Function),
+  );
+  expect(mockPublishDownload).toHaveBeenLastCalledWith(expect.any(String), 'report (1).txt');
+});
+
+// Required invariant: a re-download of the same shared_file_id (e.g. after
+// its physical copy was deleted externally) must resolve back to the exact
+// same on-device name it originally claimed, not drift to a new one — this
+// is what lets the *other* same-named file's row stay unaffected across a
+// delete/re-download cycle. start() refuses to restart a transfer that
+// already reached a terminal result (see "start() does not restart..."
+// below), so this uses two distinct transfer ids for the same
+// shared_file_id, exactly like a real retry (a fresh Transfer row) would.
+test('P16: re-downloading the same shared_file_id resolves back to its already-registered name', async () => {
+  mockDownloadFile.mockReturnValue(makeTask(Promise.resolve()));
+  const mockExists = ReactNativeBlobUtil.fs.exists as jest.Mock;
+  const mockReadFile = ReactNativeBlobUtil.fs.readFile as jest.Mock;
+  let registry: Record<string, string> = {};
+  mockReadFile.mockImplementation(() =>
+    Object.keys(registry).length > 0 ? Promise.resolve(JSON.stringify(registry)) : Promise.reject(new Error('ENOENT')),
+  );
+  (ReactNativeBlobUtil.fs.writeFile as jest.Mock).mockImplementation((_path: string, data: string) => {
+    registry = JSON.parse(data);
+    return Promise.resolve();
+  });
+  // Another file already claimed the bare name — simulates the collision
+  // this file previously resolved around.
+  registry = { '99': 'report.txt' };
+  mockExists.mockResolvedValue(false); // this file's own copy was deleted externally
+
+  const firstAttempt: TransferResponse = { ...sendTransfer, id: 940, shared_file_id: 41, file_name: 'report.txt' };
+  await TransferStreamManager.start(firstAttempt);
+  expect(mockPublishDownload).toHaveBeenLastCalledWith(expect.any(String), 'report (1).txt');
+
+  const retryAttempt: TransferResponse = { ...sendTransfer, id: 941, shared_file_id: 41, file_name: 'report.txt' };
+  await TransferStreamManager.start(retryAttempt);
+  expect(mockPublishDownload).toHaveBeenLastCalledWith(expect.any(String), 'report (1).txt');
+});
+
 test('start() on a send transfer shows a download-complete notification with the published content URI', async () => {
   mockDownloadFile.mockReturnValue(makeTask(Promise.resolve()));
   mockPublishDownload.mockResolvedValue('content://media/downloads/1');

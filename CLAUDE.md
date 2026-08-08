@@ -75,6 +75,21 @@ desktop via M13's UDP broadcast, pairs with it, and drives the transfer
 flow from the phone side. See `README.md` for the full three-component
 overview and per-component setup instructions.
 
+### Android Download Identity (P16)
+
+Android's own download-existence/status/Open logic must key on a stable
+backend identifier (`shared_file_id` for a standalone file,
+`shared_folder_id` for a folder — see `android/src/files/fileIdentity.ts`
+and `folderIdentity.ts`), never on a shared file/folder's raw display
+name alone. Two different shared items can legitimately carry the same
+display name; deriving on-device identity from that name (rather than from
+the id) lets one item's download/deletion silently affect the other's
+Download/Open state — the defect fixed in P16 for standalone files (P13.2
+had already established the same rule for folders). Any new download-path
+code (existence checks, Open, notifications, reconciliation) must resolve
+through the appropriate id-keyed registry, not `file_name`/`folder_name`
+directly.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)

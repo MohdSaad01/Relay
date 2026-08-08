@@ -42,6 +42,7 @@ import { SessionManager } from '../session/SessionManager';
 import { areAllFolderChildrenDownloaded } from '../files/folderDownloadStatus';
 import { downloadedFolderContentUri } from '../files/downloadExistence';
 import { markFolderReconciled, resolveLocalFolderRoot } from '../files/folderIdentity';
+import { resolveLocalFileName } from '../files/fileIdentity';
 import { downloadFile, isStreamCancelError, publishDownload, StreamTask, uploadFile } from './blobUtil';
 import { clearUploadSource, getUploadSource } from './uploadSourceRegistry';
 import { startTransferNotification, stopTransferNotification, updateTransferNotification } from './foregroundService';
@@ -87,34 +88,42 @@ function setState(next: StreamState): void {
 // start() moves the finished file into public storage via publishDownload
 // once the download completes. See blobUtil.ts's publishDownload for why.
 //
-// resolveDownloadRelativePath (P13, P13.2) is transfer.folder_relative_path
+// resolveDownloadRelativePath (P13, P13.2, P16) is transfer.folder_relative_path
 // with its leading segment substituted for the folder's locally-resolved
 // root name when set (a folder child, e.g. "University Notes (1)/Semester
-// 1/DBMS.pdf") or otherwise just transfer.file_name (the pre-P13,
-// single-file shape) — either way, react-native-blob-util's
-// `.config({ path })` is expected to create any missing intermediate
-// directories itself when writing the response.
+// 1/DBMS.pdf"), or otherwise a standalone SEND file's locally-resolved name
+// (P16, e.g. "report (1).txt" — see fileIdentity.ts) — either way,
+// react-native-blob-util's `.config({ path })` is expected to create any
+// missing intermediate directories itself when writing the response.
 //
-// The substitution (P13.2, Issue 1) only ever applies to a SEND transfer
-// with shared_folder_id set — an Android folder *upload*'s own
+// The folder-root substitution (P13.2, Issue 1) only ever applies to a SEND
+// transfer with shared_folder_id set — an Android folder *upload*'s own
 // folder_relative_path (RECEIVE direction) has no shared_folder_id at all
 // (see backend/app/models/transfer.py: that column is "set only for a SEND
 // transfer whose source file belongs to a shared folder") and is never
 // actually read for an upload's own relativePath anyway (see start()
 // below), so it's returned unchanged rather than run through folder-root
-// resolution it doesn't need.
+// resolution it doesn't need. The standalone-file resolution (P16) is
+// guarded the same way — only a SEND transfer has a shared_file_id
+// identifying *which* shared file this download's destination name must
+// stay consistent for; a RECEIVE upload's relativePath is likewise never
+// actually read (see start() below), so it's returned unchanged too.
 //
 // Resolving here — the one place that actually needs the local path, called
-// exactly once per child as it starts streaming — rather than upfront when
-// the whole folder download is proposed keeps this correct without any
-// extra coordination: TransferStreamManager only ever streams one transfer
-// at a time (this module's own one-active-stream invariant, documented
-// above), so the first child of a folder to actually start is always the
-// one that resolves (and persists) the folder's local root, and every later
-// sibling — started here later, or via FilesScreen's Open/notification call
-// sites — just reads that same answer back (see folderIdentity.ts).
+// exactly once per transfer as it starts streaming — rather than upfront
+// when the download is proposed keeps this correct without any extra
+// coordination: TransferStreamManager only ever streams one transfer at a
+// time (this module's own one-active-stream invariant, documented above),
+// so the first of two same-named transfers to actually start is always the
+// one that resolves (and persists) the disambiguated name, and every later
+// reference — a later sibling started here, or via FilesScreen's
+// existence/Open call sites — just reads that same answer back (see
+// folderIdentity.ts/fileIdentity.ts).
 async function resolveDownloadRelativePath(transfer: TransferResponse): Promise<string> {
   if (transfer.folder_relative_path == null) {
+    if (transfer.direction === 'send' && transfer.shared_file_id != null) {
+      return resolveLocalFileName(transfer.shared_file_id, transfer.file_name);
+    }
     return transfer.file_name;
   }
   if (transfer.direction !== 'send' || transfer.shared_folder_id == null) {

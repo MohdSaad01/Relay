@@ -325,7 +325,19 @@ button.danger:hover {
 
 .pairing-card {
   max-width: 440px;
+  margin-left: auto;
+  margin-right: auto;
   text-align: center;
+}
+
+/* .pairing-card's text-align: center centers its text content, but
+   .button-row is a flex container - flex children follow justify-content,
+   not the ancestor's text-align, so the Approve/Reject group stayed
+   docked left. Scoped to .button-row inside .pairing-card only (today,
+   only the Pairing Request card), so other .button-row usages (e.g.
+   Settings' Save button) are unaffected. */
+.pairing-card .button-row {
+  justify-content: center;
 }
 
 .qr-code {

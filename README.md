@@ -33,6 +33,10 @@ build yet — plus the enhancements listed under
 * **Desktop-managed sharing** — the desktop chooses which local files are
   shared; Android sees a sanitized list (no local paths) and can request a
   download or propose an upload.
+* **Folder sharing** — the desktop can also share an entire folder
+  (including nested subfolders); Android downloads or uploads it as a
+  unit, with automatic `name (1)` disambiguation if a folder's display
+  name collides with one already on-device.
 * **Explicit approval on every transfer** — the desktop accepts or rejects
   each transfer proposal before any bytes move; nothing transfers silently.
 * **Chunked HTTP streaming** in both directions, with cooperative
@@ -188,6 +192,7 @@ request/response shapes, and auth rules: `backend/README.md`.
 | Pairing | `/pairing` | none (handshake issues the session token) |
 | Discovery | `/discovery` | none (desktop-only, loopback) |
 | Shared Files | `/files` | dual-audience: loopback desktop, or `DeviceSession` token |
+| Shared Folders | `/folders` | dual-audience: loopback desktop, or `DeviceSession` token |
 | Transfers | `/transfers`, `/transfers/requests` | dual-audience or token-only, per route |
 
 Paired Android devices authenticate with a `DeviceSession` bearer token

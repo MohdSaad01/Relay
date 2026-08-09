@@ -165,15 +165,16 @@ Partially transferred files should be handled gracefully.
 
 # 12. Duplicate Files
 
-When a file with the same name already exists, Relay should not overwrite it automatically.
+When a file with the same name already exists, Relay does not overwrite it automatically.
 
-The exact conflict resolution strategy will be implemented during the File Transfer milestone.
-
-Possible options include:
-
-* Rename automatically
-* Ask the user
-* Skip the file
+**Implemented strategy: automatic rename.** Both sides resolve a name
+collision the same way — the incoming file is saved as `name (1).ext`,
+`name (2).ext`, etc. (`app/utils/filesystem.resolve_available_path` on the
+backend; `folderIdentity.ts`'s `findAvailableRootName` on Android),
+picking the first suffix not already in use at the destination. This
+applies to standalone file downloads/uploads (M12) and to a shared/
+downloaded folder whose display name collides with an existing one
+(P13.1). Neither "ask the user" nor "skip the file" is implemented.
 
 ---
 

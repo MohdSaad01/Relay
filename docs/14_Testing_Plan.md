@@ -158,7 +158,7 @@ feature-complete / a Release Candidate.** Result: 293 passed, 2 skipped.
 
 ---
 
-# 5. Product-Polish & Reliability Milestones (P1–P16)
+# 5. Product-Polish & Reliability Milestones (P1–P17)
 
 Scoped, targeted passes after T9 — mostly Android UX/reliability, some
 backend-only. Sub-milestones (`P8.1`, `P9.1`, `P13.1`–`P13.3` + its
@@ -441,21 +441,49 @@ streaming starts). This is now a documented standing rule — see
 code must resolve identity through the appropriate id-keyed registry, never
 through `file_name`/`folder_name` directly. Result: 310 tests / 38 suites.
 
+#### P17 — `shared_folder_id` reuse / folder identity collision (Android)
+
+Fixed the gap noted below as open after P16: `shared_folders.id` is a
+plain, non-`AUTOINCREMENT` SQLite primary key, so an emptied table
+restarts numbering from 1 and a deleted folder's id can be handed to an
+unrelated one later. `folderIdentity.ts`'s registry now also records
+`shared_at` (set once at share time, untouched by refresh) and treats a
+mismatch against the live folder's `shared_at` as a different folder,
+never trusting a bare id match. Mirrors the same pattern already proven
+for standalone files. See CLAUDE.md's "Backend ID Reuse (P17)" note.
+Result: 320 tests / 38 suites, live-reverified on RMX3997.
+
+#### P18 — Stabilization baseline audit
+
+Not a bug-fix milestone — a checkpoint to decide whether V1 is ready to
+leave stabilization for a UI/UX finishing phase. Full backend/Android
+suites re-run clean; a physical-device smoke test re-verified pairing
+persistence, file/folder share+download+Open, duplicate folder names,
+external-deletion detection, Android→desktop upload, notifications, and
+Clear History. No blocker found. Identified (but did not fix, per this
+milestone's explicit scope) two backlog items: `fileIdentity.ts` has the
+same class of id-reuse gap P17 just fixed for folders, and `[QR-DEBUG]`
+debug logging (P8.1) is still present in `android/src/api/client.ts`. Full
+detail in `docs/15_QA_NOTEBOOK.md`'s P18 entry.
+
 ---
 
 # 6. Current Known Open Items
 
-As of P16, the following are the genuinely unresolved or accepted items —
-everything else found during T1–P16 has been fixed and verified. See the
+As of P18, the following are the genuinely unresolved or accepted items —
+everything else found during T1–P18 has been fixed and verified. See the
 named milestone in `docs/15_QA_NOTEBOOK.md` for full detail on any entry.
 
-- **P17 (proposed, not started) — `shared_folder_id` reuse.** If
-  `shared_folders`' auto-increment ids are ever reused (only reachable via
-  a reset/repopulated database, not normal operation), a freshly-shared
-  folder can collide with a stale entry in Android's local
-  `folderIdentity.ts` registry and silently resolve to the wrong on-device
-  directory name. Confirmed live more than once (P14.4, P16) as a
-  workaround-only encounter, never fixed.
+- **`fileIdentity.ts` has the same `shared_files.id` reuse gap P17 just
+  fixed for `folderIdentity.ts`.** `shared_files.shared_at` is already
+  available as the same independent signal; not yet wired in. Reachable
+  only via an unshare-to-empty-then-reshare sequence, not normal use —
+  technical debt, not a blocker (P18).
+- **Debug-only `[QR-DEBUG]` console logging remains in
+  `android/src/api/client.ts`**, first flagged in P8.1 as flooding
+  `logcat` and hampering on-device investigation — still not removed as
+  of P18. Logs full request/response bodies, including pairing secrets,
+  to this device's own log only (not remotely reachable).
 - **Packaging is unimplemented** (T8): no PyInstaller/equivalent backend
   bundle, no Electron installer, no signed release APK. See
   `docs/12_Packaging_Deployment.md`.
@@ -478,9 +506,6 @@ named milestone in `docs/15_QA_NOTEBOOK.md` for full detail on any entry.
   (`pm revoke`, `pm clear`) that would otherwise force that state (P14.2,
   P14.3). A persisted folder-upload SAF grant is also never explicitly
   released (P13) — an accepted trade-off given Android's per-app grant cap.
-- **Debug-only `[QR-DEBUG]` console logging remains in
-  `android/src/api/client.ts`**, first flagged in P8.1 as flooding
-  `logcat` and hampering on-device investigation — never removed.
 - Mixed file+folder concurrent queueing was verified functionally but not
   separately re-run live end-to-end (P13.3) — low-risk, same underlying
   queue for both.

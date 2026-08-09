@@ -1057,6 +1057,104 @@ this point forward is caught.
 
 ---
 
+# Milestone P18 — Stabilization Baseline Audit
+
+**Purpose:** not a bug hunt. A deliberate checkpoint after P1–P17's feature
+work and hardening, to decide whether Relay is ready to leave stabilization
+and enter a UI/UX finishing phase, or whether a genuine blocker remains.
+
+**Automated suites (all green):** backend `pytest -q` — 340 passed, 2
+skipped; `ruff check .` — clean. Android `npx jest` — 38 suites / 320
+tests passed; `npx tsc --noEmit` — clean; `npx eslint .` — 0 errors, 2
+pre-existing `no-void` warnings in `TransferStreamManager.ts` (unchanged
+from P17). Desktop has no automated suite by design (plain HTML/CSS/JS,
+per M14) — validated by launching it directly (see below).
+
+**Architecture/hygiene sweep** (backend, android, desktop — dead code,
+duplicated logic, debug instrumentation, stale docs): layering is
+consistently respected, `backend/README.md` matches the filesystem
+line-for-line, no TODO/FIXME/HACK markers, no committed secrets, no stray
+`print()`/debug prints in the backend. Two real findings:
+
+* **`android/src/api/client.ts`'s `[QR-DEBUG]` logging** (first flagged
+  P8.1, still present) sits in the shared HTTP request wrapper used by
+  *every* API call and logs full request bodies and parsed response
+  envelopes — including pairing responses, which carry the device secret
+  and session token. Never reachable by a remote party (it only ever
+  writes to this device's own `logcat`), but it is genuine leftover
+  diagnostic instrumentation in a shared production code path. Left
+  in place this milestone (not a blocker — see rule below) but flagged as
+  the top technical-debt item for the next cleanup pass.
+* `backend/app/core/config.py`'s `DEBUG: bool = True` setting is read
+  nowhere in `backend/app` — dead config. `android/src/components/
+  PlaceholderScreen.tsx` is unused scaffolding from an early milestone,
+  no longer imported anywhere. Both cosmetic, both safe to delete
+  whenever someone is next in that area.
+
+**The P17-analog question (`fileIdentity.ts`):** investigated directly.
+`shared_files.id` is the same kind of reusable, non-`AUTOINCREMENT` SQLite
+primary key as `shared_folders.id`, and `shared_files.shared_at` (set once
+at share time, already returned to Android in `AvailableFileResponse`) is
+sitting right there as the same independent signal P17 used to fix this
+for folders — but `fileIdentity.ts` never reads it: `resolveLocalFileName`
+takes no `sharedAt` parameter, and `readAllLocalFileNames` has no
+live-filtering equivalent to `folderIdentity.ts`'s
+`readAllReconciledChildren`/`readAllLocalRoots`. Conclusion: **real,
+reproducible via the identical recipe P17 already proved for folders
+(unshare all standalone files, share a new one, SQLite recycles the id),
+not a mere theoretical limitation** — but not a blocker either: it only
+manifests after a specific unshare-to-empty-then-reshare sequence, not
+during normal single-item use, and P17 already built the exact pattern
+this needs. Documented here as the leading technical-debt item; not fixed
+this milestone per the rule below.
+
+**Physical-device smoke test (RMX3997, real hotspot network, real desktop
+app):** pairing survived an app restart with no re-pairing needed
+(session token + device row both persisted correctly); shared a fresh
+file and a fresh nested folder from the desktop via its own backend API
+(the same loopback calls the Electron UI itself makes) and both appeared
+on Android within one screen refresh; downloaded both, "Open" state was
+correct, and the completion notification fired and grouped correctly for
+both, with tap-to-open correctly deep-linking into the app and offering
+the system "Open with" chooser; externally deleted the downloaded
+standalone file via `adb shell rm` and confirmed the row correctly
+reverted to "Download" on next view (P16's fix, live); re-shared a
+second, distinct folder with the same display name (`folderX`) as an
+already-downloaded one and confirmed both rows tracked independent
+Open/Download state with no bleed, and the second download landed
+correctly disambiguated on disk as `folderX (1)` (P13.1/P13.2/P17's fix,
+live); performed a real Android→desktop upload and confirmed the file
+landed on disk in the desktop's configured download directory; exercised
+Clear History and confirmed it cleared the list without touching either
+device's already-downloaded files. Desktop GUI click-through (as opposed
+to API-level verification) was not completed: this machine's window focus
+did not reliably stay on the Electron window during scripted mouse
+clicks, and one blind click landed on an unrelated foreground window
+instead — rather than keep clicking blindly, verification switched to
+calling the backend directly (functionally identical to what the desktop
+UI's own JS client does) plus a static screenshot confirming the desktop
+app's Devices/Pairing/Shared Files/Transfers/Settings tabs render with
+correct live state (the already-paired device, in this case). Fresh QR
+pairing from an unpaired state was not re-exercised live this session
+(existing pairing was reused to test restart-persistence instead); no
+finding depends on it, and it was heavily verified in P14.2 with no
+pairing code changed since.
+
+**Rule applied this milestone:** per the explicit P18 scope, an issue is
+only fixed here if it is a genuine blocker to normal correctness,
+reliability, or data integrity. Neither the `fileIdentity.ts` gap nor the
+`[QR-DEBUG]` logging blocks normal single-item use, so both are recorded
+as backlog items rather than fixed. No application code was changed this
+milestone.
+
+**Conclusion:** no blocker found. Relay is ready to move from
+stabilization into product finishing/UI-UX refinement. `docs/
+14_Testing_Plan.md` and `docs/11_File_Transfer.md` §12 were updated
+alongside this entry — both had fallen out of sync with what P17 and the
+duplicate-file-name handling actually shipped.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:

@@ -1,7 +1,17 @@
 "use strict";
 
 import { api } from "../api/client.js";
-import { emptyState, escapeHtml, formatBytes, formatDateTime, pageHeader, renderError } from "../dom.js";
+import {
+  emptyState,
+  escapeHtml,
+  formatBytes,
+  formatDateTime,
+  formatFileType,
+  loadingState,
+  pageHeader,
+  renderError,
+} from "../dom.js";
+import { buildReceivedItems, markReceivedItemRemoved, resolveReceivedItemPath } from "../receivedFiles.js";
 
 export async function mount(container) {
   await refresh(container);
@@ -9,30 +19,32 @@ export async function mount(container) {
 }
 
 async function refresh(container) {
-  container.innerHTML = "<p>Loading shared files...</p>";
+  container.innerHTML = loadingState("Loading shared files...");
   try {
-    const [{ data: files }, { data: folders }] = await Promise.all([
+    const [{ data: files }, { data: folders }, { data: transfers }, { data: settings }] = await Promise.all([
       api.get("/files"),
       api.get("/folders"),
+      api.get("/transfers"),
+      api.get("/settings"),
     ]);
-    render(container, files, folders);
+    render(container, files, folders, transfers, settings.download_directory);
   } catch (err) {
-    renderError(container, err);
+    renderError(container, err, () => refresh(container));
   }
 }
 
-function render(container, files, folders) {
-  // Folders and standalone files share one list, sorted newest-shared-first,
-  // each row still driven by its own resource (/files/{id} vs
-  // /folders/{id}) — a folder is one item here regardless of how many files
-  // it contains (11_File_Transfer.md: "must not display every contained
-  // file individually").
+function render(container, files, folders, transfers, downloadDirectory) {
+  // Files/folders shared from this desktop, plus files/folders received
+  // from Android (New_Issues.txt §8) - all in one list, sorted
+  // newest-first, so the user manages both from the same place instead of
+  // received items only ever showing up in Transfers.
   const items = [
     ...files.map((file) => ({ kind: "file", ...file })),
     ...folders.map((folder) => ({ kind: "folder", ...folder })),
-  ].sort((a, b) => new Date(b.shared_at) - new Date(a.shared_at));
+    ...buildReceivedItems(transfers),
+  ].sort((a, b) => new Date(itemDate(b)) - new Date(itemDate(a)));
 
-  const rows = items.map((item) => (item.kind === "folder" ? renderFolderRow(item) : renderFileRow(item))).join("");
+  const rows = items.map((item) => renderRow(item)).join("");
 
   const actions = `
     <button id="add-files">Add Files...</button>
@@ -46,7 +58,7 @@ function render(container, files, folders) {
           message: "Add a file or folder to make it available for your paired devices to download.",
         })
       : `<table>
-      <thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Shared</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Source</th><th>Date</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`);
 
@@ -76,14 +88,117 @@ function render(container, files, folders) {
     }
   });
 
+  wireSharedRowActions(container);
+  wireReceivedRowActions(container, items, downloadDirectory);
+}
+
+function itemDate(item) {
+  return item.kind === "received-file" || item.kind === "received-folder" ? item.receivedAt : item.shared_at;
+}
+
+function renderRow(item) {
+  switch (item.kind) {
+    case "file":
+      return renderFileRow(item);
+    case "folder":
+      return renderFolderRow(item);
+    case "received-file":
+      return renderReceivedFileRow(item);
+    case "received-folder":
+      return renderReceivedFolderRow(item);
+    default:
+      return "";
+  }
+}
+
+function renderFileRow(file) {
+  return `
+    <tr data-id="${file.id}" data-path="${escapeHtml(file.file_path)}" data-kind="file">
+      <td>${escapeHtml(file.file_name)}</td>
+      <td>${formatBytes(file.file_size)}</td>
+      <td>${formatFileType(file.file_name)}</td>
+      <td><span class="badge">Shared</span></td>
+      <td>${formatDateTime(file.shared_at)}</td>
+      <td>
+        <div class="row-actions">
+          <button class="show-in-folder">Show in Folder</button>
+          <button class="refresh">Refresh</button>
+          <button class="unshare">Unshare</button>
+          <button class="delete danger">Delete</button>
+        </div>
+      </td>
+    </tr>`;
+}
+
+function renderFolderRow(folder) {
+  return `
+    <tr data-id="${folder.id}" data-path="${escapeHtml(folder.folder_path)}" data-kind="folder">
+      <td>&#128193; ${escapeHtml(folder.folder_name)}</td>
+      <td>${formatBytes(folder.total_size)}</td>
+      <td>${formatFolderType(folder.file_count)}</td>
+      <td><span class="badge">Shared</span></td>
+      <td>${formatDateTime(folder.shared_at)}</td>
+      <td>
+        <div class="row-actions">
+          <button class="show-in-folder">Show in Folder</button>
+          <button class="refresh">Refresh</button>
+          <button class="unshare">Unshare</button>
+          <button class="delete danger">Delete</button>
+        </div>
+      </td>
+    </tr>`;
+}
+
+function renderReceivedFileRow(item) {
+  return `
+    <tr data-received-key="${escapeHtml(item.key)}" data-received-kind="file">
+      <td>${escapeHtml(item.name)}</td>
+      <td>${formatBytes(item.size)}</td>
+      <td>${formatFileType(item.name)}</td>
+      <td><span class="badge">Received</span></td>
+      <td>${formatDateTime(item.receivedAt)}</td>
+      <td>
+        <div class="row-actions">
+          <button class="open">Open</button>
+          <button class="show-in-folder">Show in Folder</button>
+          <button class="delete danger">Delete</button>
+        </div>
+      </td>
+    </tr>`;
+}
+
+function renderReceivedFolderRow(item) {
+  return `
+    <tr data-received-key="${escapeHtml(item.key)}" data-received-kind="folder">
+      <td>&#128193; ${escapeHtml(item.name)}</td>
+      <td>${formatBytes(item.size)}</td>
+      <td>${formatFolderType(item.fileCount)}</td>
+      <td><span class="badge">Received</span></td>
+      <td>${formatDateTime(item.receivedAt)}</td>
+      <td>
+        <div class="row-actions">
+          <button class="show-in-folder">Show in Folder</button>
+          <button class="delete danger">Delete</button>
+        </div>
+      </td>
+    </tr>`;
+}
+
+/** "Folder (10 items)" instead of a bare item count (New_Issues.txt §4). */
+function formatFolderType(fileCount) {
+  return `Folder (${fileCount} item${fileCount === 1 ? "" : "s"})`;
+}
+
+function wireSharedRowActions(container) {
   container.querySelectorAll("tr[data-id]").forEach((row) => {
     const id = Number(row.dataset.id);
-    const path = row.dataset.path;
+    const filePath = row.dataset.path;
     const kind = row.dataset.kind;
     const resource = kind === "folder" ? "folders" : "files";
+    const noun = kind === "folder" ? "folder" : "file";
 
     row.querySelector(".show-in-folder").addEventListener("click", () => {
-      window.relay.showInFolder(path);
+      window.relay.showInFolder(filePath);
     });
 
     row.querySelector(".refresh").addEventListener("click", async () => {
@@ -96,12 +211,24 @@ function render(container, files, folders) {
     });
 
     row.querySelector(".unshare").addEventListener("click", async () => {
-      const confirmMessage =
-        kind === "folder"
-          ? "Stop sharing this folder? It will no longer be available to paired devices."
-          : "Stop sharing this file? It will no longer be available to paired devices.";
-      if (!window.confirm(confirmMessage)) return;
+      if (!window.confirm(`Stop sharing this ${noun}? It will no longer be available to paired devices.`)) return;
       try {
+        await api.del(`/${resource}/${id}`);
+        await refresh(container);
+      } catch (err) {
+        renderError(container, err);
+      }
+    });
+
+    row.querySelector(".delete").addEventListener("click", async () => {
+      if (
+        !window.confirm(
+          `Delete this ${noun} from your computer? This moves it to the Recycle Bin and removes it from Shared Files.`
+        )
+      )
+        return;
+      try {
+        await window.relay.deleteItem(filePath);
         await api.del(`/${resource}/${id}`);
         await refresh(container);
       } catch (err) {
@@ -111,33 +238,49 @@ function render(container, files, folders) {
   });
 }
 
-function renderFileRow(file) {
-  return `
-    <tr data-id="${file.id}" data-path="${escapeHtml(file.file_path)}" data-kind="file">
-      <td>${escapeHtml(file.file_name)}</td>
-      <td>${formatBytes(file.file_size)}</td>
-      <td>${escapeHtml(file.mime_type ?? "-")}</td>
-      <td>${formatDateTime(file.shared_at)}</td>
-      <td>
-        <button class="show-in-folder">Show in Folder</button>
-        <button class="refresh">Refresh</button>
-        <button class="unshare danger">Unshare</button>
-      </td>
-    </tr>`;
-}
+function wireReceivedRowActions(container, items, downloadDirectory) {
+  const receivedByKey = new Map(
+    items.filter((item) => item.kind.startsWith("received-")).map((item) => [item.key, item])
+  );
 
-function renderFolderRow(folder) {
-  const itemCount = `${folder.file_count} item${folder.file_count === 1 ? "" : "s"}`;
-  return `
-    <tr data-id="${folder.id}" data-path="${escapeHtml(folder.folder_path)}" data-kind="folder">
-      <td>&#128193; ${escapeHtml(folder.folder_name)}</td>
-      <td>${formatBytes(folder.total_size)}</td>
-      <td>${itemCount}</td>
-      <td>${formatDateTime(folder.shared_at)}</td>
-      <td>
-        <button class="show-in-folder">Show in Folder</button>
-        <button class="refresh">Refresh</button>
-        <button class="unshare danger">Unshare</button>
-      </td>
-    </tr>`;
+  container.querySelectorAll("tr[data-received-key]").forEach((row) => {
+    const item = receivedByKey.get(row.dataset.receivedKey);
+    if (!item) return;
+    const noun = item.kind === "received-folder" ? "folder" : "file";
+
+    const openButton = row.querySelector(".open");
+    if (openButton) {
+      openButton.addEventListener("click", async () => {
+        try {
+          const path = await resolveReceivedItemPath(downloadDirectory, item);
+          const error = await window.relay.openPath(path);
+          if (error) throw new Error(error);
+        } catch (err) {
+          renderError(container, err);
+        }
+      });
+    }
+
+    row.querySelector(".show-in-folder").addEventListener("click", async () => {
+      const path = await resolveReceivedItemPath(downloadDirectory, item);
+      window.relay.showInFolder(path);
+    });
+
+    row.querySelector(".delete").addEventListener("click", async () => {
+      if (
+        !window.confirm(
+          `Delete this received ${noun} from your computer? This moves it to the Recycle Bin and removes it from Shared Files. The original on the Android device is not affected.`
+        )
+      )
+        return;
+      try {
+        const path = await resolveReceivedItemPath(downloadDirectory, item);
+        await window.relay.deleteItem(path);
+        markReceivedItemRemoved(item.key);
+        await refresh(container);
+      } catch (err) {
+        renderError(container, err);
+      }
+    });
+  });
 }

@@ -1,12 +1,32 @@
 "use strict";
 
 import { api } from "../api/client.js";
-import { emptyState, escapeHtml, formatBytes, pageHeader, renderError } from "../dom.js";
+import { emptyState, escapeHtml, formatBytes, loadingState, pageHeader, renderError } from "../dom.js";
+import { batchFolderName, groupTransfersByBatch } from "../transferGrouping.js";
+import { applyHistoryReset, clearTransferHistory, getHistoryClearedAt, isHistoricalTransfer } from "../transferHistory.js";
 
 const POLL_INTERVAL_MS = 2000;
 const CANCELLABLE_STATUSES = new Set(["in_progress"]);
 
+const STATUS_LABELS = {
+  in_progress: "In progress",
+  completed: "Completed",
+  failed: "Failed",
+  cancelled: "Cancelled",
+};
+
+const STATUS_BADGE_VARIANTS = {
+  in_progress: "badge-progress",
+  completed: "badge-success",
+  failed: "badge-danger",
+  cancelled: "",
+};
+
 export async function mount(container) {
+  // Only the very first load gets the loading placeholder - refresh() also
+  // runs on a 2s poll timer below, and re-showing a loading state on every
+  // poll tick would reset scroll position and flicker the whole table.
+  container.innerHTML = loadingState("Loading transfers...");
   await refresh(container);
   const timer = setInterval(() => refresh(container), POLL_INTERVAL_MS);
   return () => clearInterval(timer);
@@ -17,19 +37,39 @@ async function refresh(container) {
     const { data: transfers } = await api.get("/transfers");
     render(container, transfers);
   } catch (err) {
-    renderError(container, err);
+    renderError(container, err, () => refresh(container));
   }
 }
 
 function render(container, transfers) {
+  const clearedAt = getHistoryClearedAt();
+  const visibleTransfers = applyHistoryReset(transfers, clearedAt);
+  const hasHistoryToClear = visibleTransfers.some(isHistoricalTransfer);
+  const historyWasCleared = clearedAt != null && transfers.length > 0 && visibleTransfers.length === 0;
+
+  const actions = `<button id="clear-history" class="text-button"${hasHistoryToClear ? "" : " disabled"}>Clear History</button>`;
+
   container.innerHTML =
-    pageHeader({ title: "Transfers" }) +
-    (transfers.length === 0
-      ? emptyState({
-          title: "No transfers yet",
-          message: "Files you send or receive with a paired device will show up here.",
-        })
-      : renderTransfersTable(transfers));
+    pageHeader({ title: "Transfers", actions }) +
+    (visibleTransfers.length === 0
+      ? emptyState(
+          historyWasCleared
+            ? {
+                title: "History cleared",
+                message: "Your past transfers are hidden. New transfers you send or receive will show up here.",
+              }
+            : { title: "No transfers yet", message: "Files you send or receive with a paired device will show up here." }
+        )
+      : renderTransfersTable(visibleTransfers));
+
+  const clearHistoryButton = container.querySelector("#clear-history");
+  clearHistoryButton.addEventListener("click", () => {
+    if (!window.confirm("Clear completed, failed, and cancelled transfers from this list? Active transfers stay visible, and nothing is deleted from your files.")) {
+      return;
+    }
+    clearTransferHistory();
+    render(container, transfers);
+  });
 
   container.querySelectorAll("tr[data-transfer-id]").forEach((row) => {
     const transferId = Number(row.dataset.transferId);
@@ -47,34 +87,8 @@ function render(container, transfers) {
   });
 }
 
-/**
- * P13: every Transfer belonging to the same Android folder upload shares a
- * non-null upload_batch_id — group those into one aggregate item instead of
- * rendering N separate rows. An ordinary single-file transfer (the
- * overwhelming majority, upload_batch_id === null) is untouched: it stays
- * exactly the flat row it always was.
- */
-function groupTransfers(transfers) {
-  const batches = new Map();
-  const items = [];
-  for (const transfer of transfers) {
-    if (!transfer.upload_batch_id) {
-      items.push({ kind: "single", transfer });
-      continue;
-    }
-    let group = batches.get(transfer.upload_batch_id);
-    if (!group) {
-      group = { kind: "batch", transfers: [] };
-      batches.set(transfer.upload_batch_id, group);
-      items.push(group);
-    }
-    group.transfers.push(transfer);
-  }
-  return items;
-}
-
 function renderTransfersTable(transfers) {
-  const rows = groupTransfers(transfers)
+  const rows = groupTransfersByBatch(transfers)
     .map((item) => (item.kind === "batch" ? renderBatchRow(item.transfers) : renderTransferRow(item.transfer)))
     .join("");
 
@@ -83,6 +97,13 @@ function renderTransfersTable(transfers) {
       <thead><tr><th>Device</th><th>Direction</th><th>File</th><th>Progress</th><th>Status</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
+}
+
+function statusBadge(status, failureReason) {
+  const label = STATUS_LABELS[status] ?? status;
+  const variant = STATUS_BADGE_VARIANTS[status] ?? "";
+  const badge = `<span class="badge ${variant}">${escapeHtml(label)}</span>`;
+  return failureReason ? `${badge}<div class="status-detail">${escapeHtml(failureReason)}</div>` : badge;
 }
 
 function renderTransferRow(transfer) {
@@ -97,15 +118,13 @@ function renderTransferRow(transfer) {
           <div class="progress-bar"><div class="progress-fill" style="width:${progress}%"></div></div>
           ${progress}% (${formatBytes(transfer.bytes_transferred)} / ${formatBytes(transfer.file_size)})
         </td>
-        <td>${escapeHtml(transfer.status)}${transfer.failure_reason ? `: ${escapeHtml(transfer.failure_reason)}` : ""}</td>
+        <td>${statusBadge(transfer.status, transfer.failure_reason)}</td>
         <td>${canCancel ? '<button class="cancel danger">Cancel</button>' : ""}</td>
       </tr>`;
 }
 
 function renderBatchRow(children) {
-  const folderName = children[0].folder_relative_path
-    ? children[0].folder_relative_path.split("/")[0]
-    : "folder";
+  const folderName = batchFolderName(children);
   const completedCount = children.filter((t) => t.status === "completed").length;
   const totalBytes = children.reduce((sum, t) => sum + t.file_size, 0);
   const transferredBytes = children.reduce((sum, t) => sum + t.bytes_transferred, 0);
@@ -125,7 +144,7 @@ function renderBatchRow(children) {
           <div class="progress-bar"><div class="progress-fill" style="width:${progress}%"></div></div>
           ${progress}% (${formatBytes(transferredBytes)} / ${formatBytes(totalBytes)})
         </td>
-        <td>${escapeHtml(status)}</td>
+        <td>${statusBadge(status)}</td>
         <td></td>
       </tr>`;
 }

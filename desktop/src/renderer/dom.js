@@ -39,8 +39,48 @@ export function formatDateTime(iso) {
   return date ? date.toLocaleString() : "-";
 }
 
-export function renderError(container, err) {
-  container.innerHTML = `<p class="error">${escapeHtml(err.message || String(err))}</p>`;
+/**
+ * Replaces a view's content with a request-failure state, in the same
+ * bounded-card language as emptyState/loadingState instead of a bare red
+ * paragraph. `onRetry`, if given, wires a "Try again" button that re-runs
+ * the view's own refresh — omitted entirely (not just disabled) when no
+ * retry path is available, so callers that don't pass it are unaffected.
+ */
+export function renderError(container, err, onRetry) {
+  const message = escapeHtml(err.message || String(err));
+  container.innerHTML = `
+    <div class="error-state">
+      <p class="error-state-message">${message}</p>
+      ${onRetry ? '<button type="button" id="error-retry">Try again</button>' : ""}
+    </div>`;
+  if (onRetry) {
+    container.querySelector("#error-retry").addEventListener("click", onRetry);
+  }
+}
+
+/**
+ * Replaces a view's content with an in-progress loading state (a small
+ * spinner + message) instead of a bare paragraph, used while a view's
+ * initial data fetch is in flight.
+ */
+export function loadingState(message = "Loading...") {
+  return `
+    <div class="loading-state">
+      <span class="spinner" aria-hidden="true"></span>
+      <p>${escapeHtml(message)}</p>
+    </div>`;
+}
+
+/**
+ * Human-readable file type from a file name's extension (e.g. ".pdf"),
+ * shown to the user instead of a raw MIME type (New_Issues.txt §4) — a
+ * normal user recognizes ".pdf"/".docx" but not "application/pdf". Falls
+ * back to "File" for a name with no extension.
+ */
+export function formatFileType(fileName) {
+  const dotIndex = fileName.lastIndexOf(".");
+  if (dotIndex <= 0 || dotIndex === fileName.length - 1) return "File";
+  return fileName.slice(dotIndex).toLowerCase();
 }
 
 /**

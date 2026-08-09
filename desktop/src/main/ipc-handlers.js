@@ -1,6 +1,7 @@
 "use strict";
 
 const { ipcMain, dialog, shell, app } = require("electron");
+const path = require("node:path");
 const QRCode = require("qrcode");
 
 /**
@@ -45,6 +46,30 @@ function registerIpcHandlers({ backendManager, getMainWindow, quitApp }) {
 
   ipcMain.handle("shell:showInFolder", (_event, filePath) => {
     shell.showItemInFolder(filePath);
+  });
+
+  // New_Issues.txt §8: "Open" for a received file, launched with its
+  // registered default app. shell.openPath resolves to an error string
+  // (never throws) - surfaced to the caller instead of swallowed, since a
+  // silent no-op would look like the button did nothing.
+  ipcMain.handle("shell:openPath", async (_event, targetPath) => {
+    const error = await shell.openPath(targetPath);
+    return error || null;
+  });
+
+  // New_Issues.txt §9: Delete moves the local file/folder to the OS trash
+  // (recoverable) rather than a permanent unlink - the safer default for a
+  // destructive action the user triggers from a list view.
+  ipcMain.handle("shell:deleteItem", async (_event, targetPath) => {
+    await shell.trashItem(targetPath);
+  });
+
+  // Resolves a received item's on-disk path from its download directory and
+  // path segments. Done here (Node's path.join) rather than string
+  // concatenation in the sandboxed renderer, which has no path module and
+  // where naive joining isn't safe across separator styles.
+  ipcMain.handle("fs:resolveDownloadPath", (_event, downloadDirectory, segments) => {
+    return path.join(downloadDirectory, ...segments);
   });
 
   ipcMain.handle("app:getVersion", () => app.getVersion());

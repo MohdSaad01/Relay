@@ -165,6 +165,54 @@ body {
   margin-top: var(--space-5);
 }
 
+/* Loading state: a small spinner + message, in the same bounded-card
+   language as empty-state/error-state instead of a bare paragraph. */
+.loading-state {
+  max-width: 440px;
+  margin: var(--space-7) auto 0;
+  padding: var(--space-6);
+  text-align: center;
+  color: var(--color-text-secondary);
+}
+
+.spinner {
+  display: inline-block;
+  width: 22px;
+  height: 22px;
+  margin-bottom: var(--space-3);
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Error state: same bounded-card treatment as empty-state, with a danger
+   accent, instead of a bare red paragraph. */
+.error-state {
+  max-width: 440px;
+  margin: var(--space-7) auto 0;
+  padding: var(--space-6);
+  text-align: center;
+  background: var(--color-danger-bg);
+  border: 1px solid var(--color-danger-bg);
+  border-radius: var(--radius-md);
+}
+
+.error-state-message {
+  margin: 0;
+  color: var(--color-danger);
+}
+
+.error-state button {
+  margin-top: var(--space-4);
+}
+
 /* Cards: used for the paired-device presentation and anywhere else a
    grouped block of information needs a visible boundary. */
 .card {
@@ -239,6 +287,18 @@ tbody tr:last-child td {
   border-bottom: none;
 }
 
+/* Row actions: a table cell can hold several buttons (a shared/received
+   file's full action set) in less width than the page-level .button-row -
+   a tighter gap and right alignment keeps that from feeling loose, and
+   wrapping to a second line (only on a narrow window) still reads as
+   intentional instead of overflowing. */
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+
 /* Buttons: one consistent shape/size across the app, with primary/danger
    variants layered on top instead of one-off button styling per view. */
 button {
@@ -287,10 +347,6 @@ button.danger:hover {
   color: #fff;
 }
 
-.error {
-  color: var(--color-danger);
-}
-
 .muted {
   color: var(--color-text-muted);
 }
@@ -321,6 +377,36 @@ button.danger:hover {
   height: 6px;
   border-radius: 50%;
   background: var(--color-success);
+}
+
+/* Transfer status badges (New_Issues.txt's "clear transfer states"): a
+   plain-text status is now a colored badge, matching the badge language
+   already used for a device's Paired state/platform. */
+.badge-danger {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+  border-color: var(--color-danger-bg);
+}
+
+.badge-progress {
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+  border-color: var(--color-primary-bg);
+}
+
+.badge-progress::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  animation: pairing-pulse 1.4s ease-in-out infinite;
+}
+
+.status-detail {
+  margin-top: var(--space-1);
+  font-size: 12px;
+  color: var(--color-text-muted);
 }
 
 .pairing-card {

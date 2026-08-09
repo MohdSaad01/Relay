@@ -154,6 +154,44 @@ instruction list, single-column below 720px) — reusable if another Desktop
 flow needs the same "one interactive card, one explanatory card"
 side-by-side shape.
 
+### Desktop Files/Transfers Conventions (P21)
+
+**A backend action with no delete/undo primitive by design (`Transfer` rows
+are permanent history — `docs/13_Database_Design.md` §7/§10,
+`TransferRepository` has no delete method) must not grow one just to make a
+"clear"/"remove" UI feature easier.** Instead, filter what's displayed via a
+client-local marker, exactly as `android/src/transfers/historyReset.ts`
+already does for Android's own Clear History. Desktop's
+`desktop/src/renderer/transferHistory.js` (Transfers "Clear History") and
+`desktop/src/renderer/receivedFiles.js` (removing a received item from
+Shared Files after Delete) both apply this same pattern via `localStorage`
+instead of Android's JSON marker file. Any future "hide history"/"remove
+entry" feature over data the backend deliberately never deletes should
+follow the same shape rather than adding a backend delete route.
+
+A **received file/folder** (an Android upload the desktop accepted) has no
+`SharedFile`/`SharedFolder` row — `TransferStreamService.receive_upload`
+only ever writes bytes and updates the `Transfer` row. Where a view needs
+to present one as if it were shared (Shared Files, P21 §8), derive it from
+`GET /transfers` (`direction === 'receive' && status === 'completed'`,
+grouped into a folder item via `transferGrouping.js`'s shared
+`groupTransfersByBatch`) rather than inventing a backend row for it. Only
+`completed` transfers qualify — an in-progress/queued/failed one stays
+Transfers-only state, never Files state.
+
+`desktop/src/renderer/dom.js`'s `formatFileType(fileName)` (extension,
+e.g. `.pdf`, not a raw MIME type) and a folder's `Folder (N items)` Type
+cell are the standard file-type presentation for any new Desktop file/
+folder list — do not reintroduce a raw `mime_type`/bare item-count display.
+A table row's Source (`Shared`/`Received`, via the existing `.badge`
+component) should be stated explicitly rather than left for the user to
+infer from which action buttons are present.
+
+`app.css`'s `.row-actions` (tight-gap, right-aligned, wraps gracefully) is
+the standard wrapper for a table cell holding more than one or two action
+buttons — use it instead of bare inline buttons when a row's action set
+grows past what fits one line at the app's default window width.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)

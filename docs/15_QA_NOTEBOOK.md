@@ -1377,6 +1377,273 @@ re-attempt it once the physical device is reachable again.
 
 ---
 
+# Milestone P21 — Desktop Files & Transfers UX
+
+**Scope:** `New_Issues.txt` §2 (Transfers "Clear History"), §4 (file/folder
+type presentation), the Desktop-applicable part of §5 (metadata
+consistency), §8 (received files in Shared Files), and §9 (Delete action).
+Explicitly not touched: Settings (§3, including the stale download-directory
+default — investigated, root-caused, deliberately left alone per this
+milestone's own "no Settings changes" boundary), any Android code (§5's
+Android half, §6, §7, §14, §15), and §12 (see "Scope ambiguity" below).
+
+**Requirements read and triaged before implementation** (`New_Issues.txt`
+in full, `docs/15_QA_NOTEBOOK.md`'s P19/P20 entries, then the live app):
+
+- §1.1–1.8, §1.6: already delivered by P19/P20 — verified still intact
+  (regression pass below), not re-touched.
+- §2 Clear History, §4 file-type wording, §8 received files, §9 Delete: in
+  scope, implemented.
+- §5 metadata consistency: partially in scope — see below.
+- §3 Settings, §6 folder-upload wording, §7 file-selection flow, §14/§15
+  Android nav/Clear-History placement: out of scope for this milestone
+  (Settings explicitly excluded; §6/§7/§14/§15 are Android-only, per Rule 4).
+- §12 "Desktop Files Tab — Long-Press/Context Actions": scope ambiguity,
+  resolved as out-of-scope — see below.
+
+**Scope ambiguity — §12.** Its heading says "Desktop Files Tab," but its
+body (downloaded/not-downloaded/downloading-or-queued states, Open/Share/
+Delete/Details vs. Remove/Details) describes browsing *someone else's*
+shared files and deciding whether to download them — a concept that only
+exists on the Android side today (confirmed by reading
+`android/src/screens/files/FilesScreen.tsx`, whose current Open/Details-only
+action set matches the issue's complaint almost exactly) and that current
+Desktop Files couldn't produce even after this milestone's own §8 change:
+a Desktop entry only exists once a receive has fully **completed** (§8's own
+design — see Architecture decisions below), never as
+"not-downloaded"/"downloading"/"queued," so §12's states have no Desktop
+referent. Per this milestone's own instruction ("choose the smallest
+interpretation consistent with the surrounding requirements") and Rule 4
+("Not: Android UI redesign"), §12 is treated as an Android Files-screen
+requirement mislabeled in the source document, and left for a future
+Android UI milestone. Recorded here rather than silently skipped.
+
+**Investigation before implementation (live app, real data):**
+`backend/relay.db` already held one real paired device (RMX3997) and 541
+real `Transfer` rows (a mix of `send`/`receive`, including two real folder
+receives) from prior sessions' physical testing — no synthetic data was
+needed to see the actual §2/§8 problems. Baseline screenshots (Files empty,
+Transfers populated, Devices, Settings) confirmed every issue as described:
+Shared Files showed 0 rows despite real received files existing on disk;
+Transfers had no Clear History control; status was plain lowercase text
+(`completed`); the Type column, when files were shared during testing,
+showed a MIME type/raw item count exactly as quoted in the issue.
+
+**Root causes:**
+- §8/§9: `TransferStreamService.receive_upload` (confirmed by reading it)
+  only ever writes bytes to disk and updates the `Transfer` row — it never
+  creates a `SharedFile`/`SharedFolder` row. There was therefore no backend
+  query the Files view could have used to include received items; this is
+  a real modeling gap in what the *desktop UI* shows, not a backend defect
+  (the backend was never asked to treat a receive as a share).
+- §4: `files.js` rendered `SharedFile.mime_type` directly, and a folder row's
+  Type column was a bare `"{n} items"` string — both literal, unmodified
+  since M10/P13.
+
+**Architecture decisions:**
+- **Received items are derived, not stored.** Per this milestone's explicit
+  instruction not to invent backend state to ease rendering, a "received
+  file" row is computed client-side from `GET /transfers` (`direction ===
+  'receive' && status === 'completed'`, grouped by `upload_batch_id`
+  exactly like the Transfers view already groups folder batches — the
+  grouping logic was extracted into a new shared module,
+  `transferGrouping.js`, instead of duplicated) plus
+  `app_settings.download_directory`. Only `completed` transfers are
+  considered: an in-progress/queued receive is operational state that
+  belongs in Transfers, not a file the user can act on yet, and a
+  failed/cancelled one never produced a file — this sidesteps §12's
+  "downloading/queued" ambiguity entirely by construction, per this
+  milestone's own "do not infer a state from timing" rule.
+- **"Delete" cannot remove a `Transfer` row** — `TransferRepository` has no
+  delete method by design ("transfer rows are never removed by normal
+  operation — they are the transfer history," per its own doc comment and
+  `docs/13_Database_Design.md` §7/§10). So, for a received item, Delete (a)
+  moves the local file/folder to the OS Recycle Bin via a new
+  `shell.trashItem` IPC call (recoverable, not a permanent unlink) and (b)
+  records the item's key in a local-only "removed" marker
+  (`receivedFiles.js`, `localStorage`) that filters it out of future
+  renders — the real `Transfer` row, and Android's own history, are
+  untouched. This is the same shape as "Clear History" below and as
+  Android's own `historyReset.ts`, applied to a second case.
+- **"Clear History" (§2) is client-side only, for the identical reason**:
+  `GET /transfers` has no backend delete/archive operation for either
+  client to call (confirmed by reading `TransferRepository`,
+  `TransferService`, and `app/api/v1/transfers.py` — no delete route
+  exists), and Android already solved this exact problem the same way
+  (`android/src/transfers/historyReset.ts`, whose own doc comment gives the
+  full reasoning). `desktop/src/renderer/transferHistory.js` mirrors that
+  module field-for-field (eligibility rule, UTC-naive-timestamp handling,
+  "in_progress is never hidden regardless of clearedAt"), substituting
+  `localStorage` for Android's JSON marker file since Electron's renderer
+  has no filesystem access of its own and localStorage already persists
+  correctly across app restarts (verified below).
+- **Delete for a *sent* file/folder** (§9's other half) is real: it calls
+  `shell.trashItem` on the local path and then the existing
+  `DELETE /files/{id}` / `DELETE /folders/{id}` (already-existing
+  `unshare_file`/`unshare_folder`, which only ever touched the DB row, never
+  the disk — confirmed by reading `SharedFileService`/`SharedFolderService`).
+  Trash is attempted first; the DB row is only removed after it succeeds,
+  so a failed delete never leaves a dangling entry. This is additive to the
+  existing "Unshare" action (kept, now correctly non-destructive-styled)
+  rather than replacing it — Unshare (keep file, stop sharing) and Delete
+  (remove file, stop sharing) are different user intents.
+- **A new "Source" column** (`Shared` / `Received` badge, reusing the
+  existing `.badge` component) was added rather than folding that
+  distinction into the Name cell, so the table states the item's origin
+  explicitly instead of requiring the user to infer it from which action
+  buttons happen to be present.
+- **§4/§5 file type**: `formatFileType()` (`dom.js`) returns the lowercase
+  extension (`.pdf`, `.txt`) instead of the stored MIME type; a folder's
+  Type cell became `Folder (N items)`. §5's "ordering consistency" concern
+  is Android-specific in its literal form (Android renders inline
+  `size · type` text and had an actual file-vs-folder ordering
+  inconsistency there); Desktop already renders Size and Type as two fixed
+  table columns in the same order for every row kind, so implementing §4 is
+  what full "consistency" reduces to on this side — Android's own inline
+  redesign is out of scope here (Rule 4) and unaffected by this change.
+- **Transfer status badges**: `completed`/`failed`/`cancelled`/`in_progress`
+  became colored `.badge` variants (green/red/neutral/pulsing-blue) instead
+  of plain lowercase text, reusing the badge language P19/P20 already
+  established for device/pairing state rather than inventing a new visual
+  system.
+- **Loading/error states** (`dom.js`'s `renderError`/new `loadingState`):
+  restyled into the same bounded-card language as `emptyState` (P19) instead
+  of a bare paragraph, with an optional "Try again" retry button wired in
+  Files/Transfers (in scope) — the signature stayed backward-compatible so
+  every other view's unchanged `renderError(container, err)` call still
+  works, just with nicer styling, at zero behavior risk to out-of-scope
+  views (Devices/Pairing/Settings).
+- **`.row-actions`** (`app.css`): a table action cell can now hold up to
+  four buttons (a sent file's full set); a tighter flex-wrap layout keeps a
+  forced wrap (only at the default 1100px window width) reading as
+  intentional rather than overflowing, instead of introducing a new
+  "more actions" menu pattern this codebase doesn't otherwise have.
+
+**Files modified:**
+- `desktop/src/renderer/dom.js` — `formatFileType`, `loadingState`,
+  restyled `renderError` (+retry), removed the now-dead `.error` CSS class's
+  only consumer.
+- `desktop/src/renderer/views/files.js` — received items, Source column,
+  Delete (sent + received), Open (received), type/folder-count formatting,
+  loading/error states.
+- `desktop/src/renderer/views/transfers.js` — Clear History, status badges,
+  loading/error states; grouping logic extracted to `transferGrouping.js`.
+- `desktop/src/renderer/transferGrouping.js` (new) — shared batch-grouping,
+  used by both Files and Transfers.
+- `desktop/src/renderer/transferHistory.js` (new) — Clear History marker
+  and filter (mirrors `android/src/transfers/historyReset.ts`).
+- `desktop/src/renderer/receivedFiles.js` (new) — received-item derivation
+  from transfers, removed-item marker, path resolution.
+- `desktop/src/main/ipc-handlers.js` / `desktop/src/preload/preload.js` —
+  three new IPC calls: `shell:openPath`, `shell:deleteItem` (trash),
+  `fs:resolveDownloadPath`.
+- `desktop/styles/app.css` — `.error-state`/`.loading-state`/`.spinner`,
+  `.badge-danger`/`.badge-progress`, `.status-detail`, `.row-actions`;
+  removed the dead `.error` rule.
+
+**Verification performed:**
+- `node --check` (as ES modules for every `import`/`export` renderer file,
+  as CommonJS for the two main-process files) on every file touched or
+  added — clean.
+- Real Electron app, driven via `playwright-core@1.62.1` (`npm install
+  --no-save`, same P19/P20 pattern, not committed) against the project's
+  actual dev `backend/relay.db` (541 real transfers, one real paired
+  device) rather than synthetic fixtures:
+  - Confirmed the CSP `style-src` console warning on `.progress-fill`'s
+    inline `width` is cosmetic only — `getComputedStyle` showed the width
+    genuinely applied (100px/100px at 100%); not a real bug, not touched.
+  - Files: shared a real test file and a real test folder via the actual
+    `POST /files`/`POST /folders` endpoints, confirmed Type/Source/row-
+    actions rendering, then exercised Delete on both a sent file and a real
+    received file (`p144_custom (1).txt`, genuine prior-session data) —
+    confirmed via direct filesystem check that the sent file's original
+    path was empty afterward and the received file was gone from the
+    configured download directory (both trashed, not corrupted/orphaned),
+    and via direct `sqlite3` query that the sent file's `shared_files` row
+    was gone. Reloaded the view and did a full process restart — both
+    removals persisted (backend row genuinely gone; received-item
+    `localStorage` marker survives a real process restart, not just SPA
+    navigation).
+  - Discovered live (not from the issue text): sharing a file individually
+    and then sharing its containing folder raises an unhandled
+    `sqlalchemy.exc.IntegrityError` (`UNIQUE constraint failed:
+    shared_files.file_path`) surfaced to the user as a generic "unexpected
+    error" — a pre-existing backend edge case, unrelated to any P21
+    requirement and not blocking one. **Deferred**, recorded here per this
+    milestone's "record unrelated bugs, don't fix them" rule.
+  - Transfers: clicked Clear History against the real 100-row (pagination
+    limit, pre-existing and unchanged) history — table went to 0 rows,
+    button correctly disabled, "History cleared" empty state shown;
+    navigated away and back (including a real 2s poll tick) and the
+    cleared state held. Reset the marker afterward so the dev profile
+    isn't left showing "History cleared" for its next real use.
+  - Full click-through of all five tabs plus a real mouse-hover nav check,
+    with `pageerror` listeners attached throughout every run — zero
+    uncaught exceptions across every script in this milestone.
+  - All test-created shared_files/shared_folders rows were removed after
+    verification; `shared_files`/`shared_folders` are back to empty (their
+    pre-milestone state), the one real device is untouched.
+- **Regression:** Devices (paired-device card), Pairing (idle state, icon
+  badges), and Settings screens re-screenshotted and visually compared
+  against this milestone's own baseline captures — byte-for-byte identical
+  in layout/content, confirming P19/P20 are unaffected.
+
+**Physical-device verification: attempted, partially completed —
+documented honestly rather than simulated.** RMX3997 was connected via ADB
+(`adb devices`) and the Windows host was confirmed connected to the phone's
+own "samsung" hotspot (`netsh wlan show interfaces`, matching `adb shell ip
+route`'s `10.169.164.0/24` subnet) — genuine physical networking, not
+loopback. The installed Relay app is a Metro-connected debug build; Metro
+was already running from an earlier session, `adb reverse tcp:8081
+tcp:8081` was set up, and the app was relaunched successfully — logcat
+confirmed it made real, correctly-addressed HTTP requests to the desktop's
+real LAN IP (`http://10.169.164.233:8000/api/v1/files`, `/folders`,
+`/transfers`, `/transfers/requests`) on a live ~2s poll loop, and the
+desktop backend's own log confirmed the corresponding `POST /files` (a real
+test share made for this check) succeeded with no server-side error.
+**What could not be confirmed:** the phone's own Shared Files screen never
+progressed past its loading spinner despite these requests visibly
+succeeding — repeated navigation, force-stop/relaunch, and a `logcat`
+search for a JS error or crash all turned up nothing (no `ReactNativeJS`
+error, no `AndroidRuntime` fatal). This reads as a pre-existing Android-side
+rendering issue in this debug build, not a P21 regression: zero Android
+files were touched by this milestone, and the API response shapes Android
+consumes (`GET /files`/`/folders`/`/transfers`) are byte-for-byte unchanged.
+Chasing it further would mean debugging/fixing Android application code,
+which is explicitly out of scope for this milestone (Rule 4) — recorded
+here as a discovered, deferred issue rather than either faked or silently
+dropped. The backend-level round trip (share → real device successfully
+authenticates and requests it over a real LAN) is the strongest evidence
+available this session that the P21 changes don't break the real
+Android-facing contract; full on-device visual confirmation is deferred to
+whenever this debug build (or a release APK) is next working end-to-end.
+
+**Discovered defects (deferred, not fixed — out of P21's scope):**
+1. Sharing a file individually, then sharing its parent folder, throws an
+   unhandled `IntegrityError` surfaced as a generic 500 instead of a clean
+   validation message (backend, `SharedFolderService`/`SharedFileService`).
+2. The installed Android debug build's Shared Files screen never resolves
+   its loading state even though its own network requests succeed — see
+   physical-device section above.
+3. `list_transfers`'s default `limit=100` means Clear History (and the
+   Transfers view generally) only ever sees the newest 100 rows of a
+   longer history; pre-existing, unrelated to this milestone's own logic.
+
+**Remaining limitations:**
+- Desktop's "Details" action (mentioned as one of several *optional*
+  actions in §8/§12) was not implemented — every field it would show
+  (name, size, type, source, date) is already visible directly in the row,
+  and this codebase has no modal/dialog pattern yet to build one from;
+  deferred rather than introducing a new UI primitive for marginal value.
+- "Open" was added only for received files (the literal §8 ask), not for
+  sent/shared files — an intentional, minimal-scope asymmetry, not an
+  oversight.
+- §12 (Android Files-screen actions) and §5's Android half remain
+  unaddressed, per the scope-ambiguity note above — candidates for a future
+  Android UI milestone.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:
@@ -1415,3 +1682,18 @@ A few gotchas worth remembering independent of any single milestone above:
   `patch-package`** (`android/patches/`) — check `docs/upstream/` for the
   full writeup before assuming a library behaves per its own docs; the
   Okio `Source` contract violation (P10) is the current example.
+- **The desktop's `style-src 'self'` CSP logs a console violation for every
+  innerHTML-injected `style="..."` attribute (e.g. the transfer progress
+  bar's `width:N%`), but does not actually strip it** — confirmed via
+  `getComputedStyle` (P21). Treat this specific warning as cosmetic noise,
+  not a real rendering bug, unless a future check shows the style genuinely
+  failing to apply.
+- **A backend action that has no delete/undo primitive by design (a
+  `Transfer` row, per `docs/13_Database_Design.md` §7/§10) means any
+  client-facing "clear"/"remove" feature over that data must be
+  client-local** (a marker filtering what's displayed), never a new backend
+  delete route invented to make the UI simpler. Android's
+  `historyReset.ts` established this for transfer history; P21's
+  `transferHistory.js`/`receivedFiles.js` apply the identical pattern on
+  Desktop, once for the same history and once for a received file's
+  Shared Files entry.

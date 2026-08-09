@@ -12,6 +12,10 @@ contextBridge.exposeInMainWorld("relay", {
   selectDirectory: () => ipcRenderer.invoke("dialog:selectDirectory"),
   selectFolders: () => ipcRenderer.invoke("dialog:selectFolders"),
   showInFolder: (filePath) => ipcRenderer.invoke("shell:showInFolder", filePath),
+  openPath: (targetPath) => ipcRenderer.invoke("shell:openPath", targetPath),
+  deleteItem: (targetPath) => ipcRenderer.invoke("shell:deleteItem", targetPath),
+  resolveDownloadPath: (downloadDirectory, segments) =>
+    ipcRenderer.invoke("fs:resolveDownloadPath", downloadDirectory, segments),
 
   getVersion: () => ipcRenderer.invoke("app:getVersion"),
   getBackendBaseUrl: () => ipcRenderer.invoke("app:getBackendBaseUrl"),

@@ -72,3 +72,14 @@ export function emptyState({ title, message, actionHtml }) {
       ${actionHtml ? `<div class="empty-state-actions">${actionHtml}</div>` : ""}
     </div>`;
 }
+
+/**
+ * A small circular icon badge (an inline SVG on a tinted background),
+ * used to give a status card (pairing step, success/failure result) a
+ * clear focal point instead of leading straight into a heading. `icon`
+ * is a trusted, hand-written inline SVG string (see icons.js) - never
+ * user-controlled input.
+ */
+export function iconBadge({ icon, variant = "primary" }) {
+  return `<div class="icon-badge icon-badge-${variant}">${icon}</div>`;
+}

@@ -133,6 +133,27 @@ lookup failure). This only affects which tab is shown on launch — the
 `showView()` function driving both this and every nav click handler is
 unchanged, so manual navigation is unaffected.
 
+### Desktop Status/Result Cards (P20)
+
+`desktop/src/renderer/dom.js` also exports `iconBadge({ icon, variant })`
+— a small tinted-circle badge wrapping an inline SVG, variants
+`primary`/`success`/`danger`/`neutral` matching the existing badge/button
+color language — and `desktop/src/renderer/icons.js` holds the hand-written
+inline SVGs it's given (no icon-font or icon-library dependency, per the
+finalized plain HTML/CSS/JS desktop stack). Introduced for the Pairing
+view's status cards (idle/waiting/review/success/rejected/expired), each of
+which leads with an `iconBadge` instead of a bare heading. Any new Desktop
+state that represents a single outcome or a "here's what's happening now"
+step — not a list/table view like Devices or Shared Files — should use
+this pattern rather than inventing its own icon or going headerless.
+`app.css` also gained `button.text-button` (a borderless low-emphasis
+button variant, for an action like "Cancel" that sits next to a primary
+action with nothing else competing for attention) and `.pairing-flow` (a
+two-column layout, QR-generation kind of card next to a short numbered
+instruction list, single-column below 720px) — reusable if another Desktop
+flow needs the same "one interactive card, one explanatory card"
+side-by-side shape.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)

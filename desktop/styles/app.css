@@ -340,13 +340,169 @@ button.danger:hover {
   justify-content: center;
 }
 
+.pairing-card h2 {
+  margin: 0 0 var(--space-2);
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.pairing-card p {
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
+.pairing-card p + p {
+  margin-top: var(--space-2);
+}
+
 .qr-code {
-  width: 256px;
-  height: 256px;
+  width: 220px;
+  height: 220px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   padding: var(--space-4);
   background: #fff;
+}
+
+/* Icon badge: a tinted circle behind a small inline SVG, used to give a
+   status card (pairing step, success/failure result) a clear focal point
+   instead of leading straight into a heading. Variants mirror the badge/
+   button color language already established (primary/success/danger),
+   plus a neutral variant for a non-committal state like "expired". */
+.icon-badge {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto var(--space-4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--color-primary-bg);
+  color: var(--color-primary);
+}
+
+.icon-badge svg {
+  width: 26px;
+  height: 26px;
+}
+
+.icon-badge-success {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.icon-badge-danger {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.icon-badge-neutral {
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+}
+
+/* Two-column layout for the "waiting to scan" step: the QR itself next to
+   a short "how to pair" list, so the step uses the available width
+   instead of one small card floating in a mostly-blank page. Stacks to a
+   single column below 720px (the window's minimum practical width for
+   this view). */
+.pairing-flow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--space-5);
+  max-width: 720px;
+  margin: var(--space-6) auto 0;
+}
+
+.pairing-flow .card {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .pairing-flow {
+    flex-direction: column;
+  }
+}
+
+.pairing-instructions h2 {
+  margin: 0 0 var(--space-4);
+  font-size: 15px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.pairing-steps {
+  margin: 0;
+  padding-left: var(--space-5);
+  text-align: left;
+  color: var(--color-text-secondary);
+}
+
+.pairing-steps li {
+  margin-bottom: var(--space-4);
+}
+
+.pairing-steps li:last-child {
+  margin-bottom: 0;
+}
+
+.pairing-steps li strong {
+  display: block;
+  color: var(--color-text);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+/* Waiting status: a pulsing dot rather than a static badge, so the QR
+   step visibly reads as "in progress" instead of looking stalled. */
+.pairing-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-5);
+  padding: var(--space-2) var(--space-3);
+  border-radius: 999px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.pairing-status-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--color-primary);
+  animation: pairing-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pairing-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.7);
+  }
+}
+
+/* Borderless button variant for a low-emphasis action alongside a primary
+   one (e.g. "Cancel" next to a card with no other competing action). */
+button.text-button {
+  border-color: transparent;
+  background: none;
+}
+
+button.text-button:hover {
+  background: var(--color-bg);
+  border-color: transparent;
 }
 
 .progress-bar {

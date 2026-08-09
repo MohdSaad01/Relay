@@ -1255,6 +1255,128 @@ unaddressed by design — next in the UI/UX finishing sequence per
 
 ---
 
+# Milestone P20 — Desktop Pairing & QR UX
+
+**Scope:** `New_Issues.txt` §1.6 (pairing/QR windows and dialogs) and, since
+this milestone owns the Pairing tab specifically, the same page's §1.4
+blandness — idle/waiting/review/decided states. No change to the pairing
+protocol, QR payload, `PairingManager`/`PairingService`, or the Android
+scanner. Explicitly not touched: every other tab, the app icon (§1.7), the
+menu bar (§1.8), and anything outside `desktop/src/renderer/views/pairing.js`
+and its shared CSS/JS dependencies.
+
+**Baseline, inspected live before any change** (real Electron app, driven
+via a disposable `playwright-core` script — see Tooling note): the idle,
+waiting/QR, review, and decided states were all a single small `.pairing-card`
+(P19's existing pattern) centered in an otherwise blank ~1000px-wide page.
+The waiting state's "Waiting for a device to scan..." was a static badge
+pill with no visual indication of being live; there was no way to back out
+of a pairing attempt short of navigating to another tab (which silently
+abandoned the poll without resetting the UI if the user came back); the
+review card ran the device name as plain inline text with no visual
+weight; the decided/success and decided/rejected states used byte-identical
+styling with no color or iconography to distinguish a success from a
+rejection.
+
+**Change:**
+- Added `iconBadge({ icon, variant })` to `dom.js` (a small tinted-circle
+  SVG badge, variants mirroring the existing primary/success/danger/neutral
+  badge language) and `icons.js` (hand-written inline SVGs: QR, device,
+  check, x, clock — no icon-font/library dependency, per the finalized
+  plain HTML/CSS/JS stack). Every pairing-card state now leads with one of
+  these instead of a bare heading.
+- Rewrote every render function in `pairing.js` to use the icon badge and
+  gave the waiting state a two-column `.pairing-flow` layout: the QR card
+  next to a "How to pair" numbered instruction card, using the page's
+  width instead of one small card floating in blank space. Stacks to a
+  single column under 720px (`app.css`).
+- Waiting state's status pill is now a live-looking pulsing dot
+  (`.pairing-status-dot`, CSS `@keyframes`) plus text, and gained an
+  explicit **Cancel** action (`.text-button`, a new borderless button
+  variant) that stops the poll and returns to idle. This is client-side
+  only — no new backend endpoint. The backend has no pairing-attempt
+  cancel/abandon call (confirmed by reading `pairing_service.py`/
+  `pairing.py`); the old, unchanged attempt is simply superseded the next
+  time `POST /pairing/start` runs, same as it already was when a user
+  navigated away mid-wait.
+- Review card now shows the device name as a real heading with a device
+  icon above it and the platform in the same `.badge` component
+  `devices.js` already uses (consistency, not a new pattern).
+- Decided state is now outcome-aware: `renderDecided` takes an
+  `{ icon, variant, title, message }` object instead of a bare message
+  string — a green check badge for a successful pair, a red x badge for a
+  rejection, a neutral clock badge for an expired attempt.
+
+**Verification performed:**
+- `node --check` (as ES modules) on `pairing.js`, `dom.js`, `icons.js` —
+  clean.
+- Real Electron app, driven via `playwright-core@1.62.1` installed with
+  `npm install --no-save` (not committed — `desktop/package.json`/
+  `package-lock.json` are unchanged; confirmed via `git status` before and
+  after) into a `desktop/node_modules/.driver-scratch/` scratch script
+  (also not committed — `node_modules/` is gitignored), following P19's
+  same tooling pattern. Exercised and screenshotted every state:
+  idle → waiting/QR (two-column layout, pulsing status, Cancel) →
+  Cancel → back to idle → waiting → a simulated `POST /pairing/request`
+  (device `Pixel Test Device`, backend-API simulation — no physical
+  scan involved in this step, see below) → review → Approve → success
+  (green check) state; a separate run through to Reject → rejected (red x)
+  state. Console/`pageerror` listeners attached throughout the whole
+  session — zero uncaught exceptions; the only console-level entries were
+  the pre-existing, expected 404s from polling `/pairing/pending` before a
+  request lands (unchanged from before this milestone).
+- Regression: clicked through Devices (paired-device card, still correct
+  after approving the test device and then removing it), Shared Files,
+  Transfers (a real populated history table, unaffected), and Settings —
+  all rendered exactly as before this milestone's CSS/JS changes.
+- Test artifacts cleaned up: the simulated `Pixel Test Device` (id 2) was
+  deleted via `DELETE /devices/2` after the approve-flow screenshot;
+  `backend/relay.db`'s `devices` table was confirmed to hold only the one
+  real paired device (`RMX3997`) both before and after this milestone.
+
+**Physical-device verification: attempted, not completed — documented
+honestly rather than simulated.** A real Android test device (RMX3997,
+same one used throughout this project's history) was connected via ADB at
+the start of this session (`adb devices` listed it) and had the Relay app
+already paired. It disconnected from ADB partway through the session
+(`adb devices` returned empty; `adb kill-server`/`adb start-server` did not
+bring it back) before a fresh QR-scan pairing could be attempted, and was
+not available again before this milestone finished. Separately: even with
+the device connected, genuinely exercising the QR **scanner** (as opposed
+to the API calls a scan triggers) requires physically aiming the phone's
+camera at the desktop screen — the Android pairing flow has no
+gallery/image-based scan fallback (confirmed: no `ImagePicker`/gallery
+code path in `android/src/pairing` or `android/src/screens`) — which is
+outside what this session could perform unattended. Deliberately did
+**not** unpair the real already-paired device to force a fresh scan
+attempt, since doing so without being able to complete the optical scan
+step afterward would have left the project's one physical test device
+broken with no way for this session to fix it. What *was* verified: the
+review/approve/reject/success flow end-to-end against the real,
+unmodified backend via a simulated device request (the same endpoints a
+real scan submits to — `POST /pairing/request` → poll → `POST
+/pairing/approve`/`reject`) — this is backend-API simulation, not physical
+verification, and is labeled as such per this milestone's own instructions
+not to conflate the two. The real paired device's row and session were
+otherwise left completely untouched by this milestone.
+
+**Tooling note:** reused P19's approach (no committed Electron driver
+exists yet) — `playwright-core`'s `_electron` launcher against
+`desktop/node_modules/electron/dist/electron.exe`, this time controlled
+through a small named-pipe server (`driver.mjs`) plus a one-shot client
+(`send.mjs`) instead of a REPL, so individual commands could be issued one
+at a time across tool calls. Neither script is committed.
+
+**Limitations:** the Cancel button stops the desktop from polling and
+resets its own UI, but (as already documented above) the backend's pairing
+attempt itself has no cancel primitive and simply sits until its normal
+expiry — unchanged pre-existing behavior, not a new gap introduced here.
+No fresh physical QR scan was performed this milestone (see above); the
+next Desktop UI/UX milestone or a dedicated verification session should
+re-attempt it once the physical device is reachable again.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:

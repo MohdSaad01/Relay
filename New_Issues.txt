@@ -1,0 +1,693 @@
+# Relay — UI/UX Issues and Required Changes
+
+## Overall Objective
+
+The main objective of these changes is to improve the overall UI/UX of the Relay application.
+
+Currently, both the Desktop and Android applications feel too **bland, empty, and unfinished**, especially in areas where there is little or no content. There is also too much unused white space.
+
+The goal is **not** to add unnecessary images or decorative elements just for the sake of filling space. The UI should instead feel like a polished, professional software product through better:
+
+* Layout
+* Spacing
+* Typography
+* Visual hierarchy
+* Navigation
+* Empty states
+* Interactive states
+* Buttons and controls
+* Dialogs/modals
+* Icons
+* Consistency
+* Information presentation
+
+The UI should remain functional and reasonably minimal, but it should no longer feel like a basic prototype.
+
+---
+
+# 1. Desktop Application
+
+## 1.1 Overall UI — Too Much Empty Space / Too Bland
+
+There is currently too much unused white space throughout the Desktop application.
+
+When opening the application and navigating through tabs such as:
+
+* Devices
+* Pairing
+* Shared Files
+* Transfers
+* Settings
+* Other available sections
+
+many of the pages look extremely empty and bland.
+
+The UI should use the available space more effectively and have a stronger visual hierarchy.
+
+Text should generally be slightly larger where appropriate, and empty states should look intentional and professional rather than looking like placeholder text.
+
+For example, the current Devices empty state is essentially:
+
+> Paired Devices
+> No devices are paired yet. Use the Pairing tab to pair one.
+
+This does not feel like a polished application UI.
+
+The empty states across the application should be redesigned so that they feel like proper application screens rather than simple text placed in an otherwise empty page.
+
+---
+
+## 1.2 Initial Tab / First-Launch Behavior
+
+When the Desktop application is opened for the first time and **no device is paired**, the application should automatically open the **Pairing** tab.
+
+The user should not first land on the Devices tab and then see:
+
+> No devices are paired yet. Use the Pairing tab to pair one.
+
+Instead:
+
+* If no device is paired, automatically open the Pairing tab.
+* The user should ideally not even notice that an automatic navigation decision happened.
+* The application should guide the user directly toward the first necessary action: pairing a device.
+* If a device is already paired/connected, opening on the Devices tab is fine.
+
+However, automatic navigation should **not prevent the user from manually switching back to Devices**.
+
+If the user deliberately opens the Devices tab while no device is connected, that should still work normally and show an appropriate empty state.
+
+---
+
+## 1.3 Devices Tab After Pairing
+
+After a device has been paired, the Devices page currently changes very little visually. It essentially just displays the device as another simple line/item.
+
+This is not sufficient.
+
+After a device is paired, the Devices UI should feel like a complete, polished device-management screen.
+
+The paired device should have a proper visual representation and hierarchy, rather than simply appearing as a single line of text.
+
+The design should make it immediately clear:
+
+* Which device is paired
+* Whether it is currently connected/available
+* Relevant device information
+* What actions are available
+* That the device is an active part of the Relay system
+
+The resulting screen should look complete and intentional.
+
+---
+
+## 1.4 Pairing Tab and Other Tabs
+
+The Pairing tab and the other Desktop tabs are also too bland.
+
+Each page should feel like a real application screen even when there is little content.
+
+The pages should have appropriate visual structure and hierarchy rather than simply displaying a heading and a small amount of text in a large empty area.
+
+This applies both to:
+
+* Empty states
+* Populated states
+
+The UI should continue to look good after content is added. Do not only improve the empty state while leaving the populated state looking basic.
+
+---
+
+## 1.5 Desktop Navigation
+
+The current tab navigation looks outdated.
+
+Currently, the navigation labels appear inside boxed elements.
+
+Instead, the navigation should use a more modern, open design:
+
+* Navigation items should not look like individual boxes.
+* The currently selected tab should be clearly highlighted.
+* Hovering over another tab should provide a visual hover effect.
+* A line/underline underneath the hovered navigation item would be appropriate.
+* The active tab should remain visually distinguishable from inactive tabs.
+
+The navigation should feel closer to a modern professional desktop application rather than a collection of buttons.
+
+---
+
+## 1.6 Pairing / QR Code Windows and Dialogs
+
+The windows/dialogs used during pairing currently look very poor and unfinished.
+
+This includes the UI shown when:
+
+* The QR code is displayed.
+* The user is waiting for pairing.
+* The user receives a pairing approval request.
+* The user chooses to approve or reject pairing.
+
+These dialogs need a substantial visual redesign.
+
+They should:
+
+* Look clean and professional.
+* Have proper spacing.
+* Have clear visual hierarchy.
+* Make the current action/status obvious.
+* Present the QR code properly.
+* Make Approve/Reject actions visually clear.
+* Feel like an integrated part of the Relay application rather than separate/basic windows.
+
+The pairing flow is an important first-use experience, so these screens should receive particular attention.
+
+---
+
+## 1.7 Desktop Application Icon
+
+The Desktop application currently does not have a proper application icon.
+
+Create/design a proper Relay application icon.
+
+The Android application should use a matching or clearly related icon so that both platforms have a consistent Relay identity.
+
+The icons should feel like they belong to the same application/product.
+
+---
+
+## 1.8 Desktop Menu Bar
+
+At the top of the Desktop application there is currently a traditional menu bar containing:
+
+* File
+* Edit
+* View
+* Window
+
+This currently feels unnecessary and visually outdated for the application.
+
+Remove this menu bar if it is not required.
+
+Alternatively, if these options are technically necessary, move them into a hidden/secondary menu that appears when the user interacts with the application icon/name area.
+
+For example:
+
+* Show the Relay application icon.
+* Show "Relay" beside it.
+* When the user hovers/clicks that area, expose the File/Edit/View/Window options.
+
+The main interface should not constantly display these menu items if they are not necessary for normal use.
+
+---
+
+# 2. Desktop Transfers Tab
+
+The Desktop Transfers tab should have a **Clear History** button.
+
+This should allow the user to clear the list/history of completed transfers.
+
+The Android application already has similar functionality, so the Desktop application should provide equivalent functionality for consistency.
+
+---
+
+# 3. Desktop Settings
+
+## 3.1 Remove Session Token Lifetime Setting
+
+The Settings page currently contains:
+
+> Session token lifetime (minutes)
+> 1440
+> Save
+
+This does not appear to be useful to a normal user and exposes an implementation/configuration detail that the user does not need to manage.
+
+Remove this setting from the user-facing Settings UI.
+
+If the underlying setting is required internally, it should remain an internal configuration rather than being exposed as a normal user setting.
+
+---
+
+## 3.2 Download Directory
+
+The Settings page currently shows a Download Directory such as:
+
+> C:\Users\Saad\AppData\Local\Temp\claude\C--Thomas-Encipher-Python-Relay\e3f49749-6d1e-41da-adb2-b5cb18cf7885\scratchpad\live_verify\downloads
+
+with a Browse button.
+
+This path looks like an internal/temporary development or testing path and is not an appropriate default user-facing download directory.
+
+Investigate why this path is being used.
+
+The Download Directory should instead use a sensible user-facing location.
+
+Also verify that the user can change the download directory and that the application continues to work correctly after changing it.
+
+The behavior should be comparable to the functionality already implemented in the Android application, where applicable.
+
+Important:
+
+* Do not simply change the displayed path.
+* Verify the actual download behavior.
+* Verify that received files are saved to the selected directory.
+* Verify that changing the directory does not break transfers.
+* Verify that existing functionality continues to work after changing the directory.
+
+---
+
+# 4. File Type / Metadata Presentation
+
+There is currently an issue with how file and folder types are displayed.
+
+For example, the Desktop Shared Files list currently shows something similar to:
+
+> Name | Size | Type | Shared
+> 📁 p144 | 2.6 GB | 10 items | 8/9/2026, 4:10:46 PM | Show in Folder | Refresh | Unshare
+> sample.txt | 22 B | text/plain | 8/9/2026, 4:09:23 PM | Show in Folder | Refresh | Unshare
+
+The `text/plain` value is a MIME type and is not particularly meaningful to a normal user.
+
+A normal user is more likely to understand:
+
+* `.txt`
+* `.pdf`
+* `.jpg`
+* `.png`
+* `.docx`
+
+or another human-readable file type.
+
+For folders, displaying:
+
+> 10 items
+
+as the "Type" is also not ideal.
+
+Instead, use something meaningful such as:
+
+> Folder (10 items)
+
+or another presentation that clearly communicates that the item is a folder and contains 10 items.
+
+The goal is to make the information understandable to a normal user rather than exposing technical MIME-type terminology.
+
+---
+
+# 5. Metadata Consistency Between Desktop and Android
+
+The same issue exists in the Android application.
+
+For example, a shared file currently appears similar to:
+
+> sample.txt
+> 22 B · text/plain
+
+The question is whether displaying `.txt` is even necessary because the filename already contains the `.txt` extension.
+
+For example:
+
+> sample.txt
+> 22 B · .txt
+
+may be redundant.
+
+Consider whether the best UI would simply be:
+
+> sample.txt
+> 22 B
+
+because the filename already tells the user that it is a TXT file.
+
+For folders, something like:
+
+> p144
+> Folder · 10 items · 2.6 GB
+
+would be understandable.
+
+There is also an inconsistency in the current metadata ordering.
+
+For example:
+
+### File
+
+> 22 B · text/plain
+
+### Folder
+
+> 10 items · 2.6 GB
+
+The file shows:
+
+> Size → Type
+
+while the folder shows:
+
+> Type/Item count → Size
+
+The presentation should be made consistent.
+
+Choose a clear and logical metadata structure and use it consistently for both files and folders across Desktop and Android.
+
+The final design should prioritize what is easiest for a normal user to understand.
+
+---
+
+# 6. Folder Upload Behavior
+
+There is a confusing behavior when selecting a folder for upload.
+
+When the user chooses **Upload a Folder**, the file picker displays an option at the bottom similar to:
+
+> Use this folder
+
+The expectation from that wording is that the **entire selected folder itself** will be uploaded.
+
+However, the current behavior appears to send only the files inside the selected folder rather than preserving/uploading the folder itself.
+
+This needs to be investigated and corrected.
+
+If the UI says:
+
+> Use this folder
+
+then the expected behavior should be:
+
+* Select the folder.
+* Upload the entire folder.
+* Preserve the folder as a folder in the transfer.
+* Do not flatten the folder into only its contents unless that is explicitly intended by the user.
+
+The wording and behavior should match.
+
+---
+
+# 7. File Selection / Upload Flow
+
+The file-selection flow is also somewhat confusing.
+
+For files, the current behavior is:
+
+1. Select one or more files.
+2. Press/select "Select".
+3. The files are then sent/uploaded.
+
+Instead, after the user has finished selecting the files, the bottom section of the picker could present an explicit action such as:
+
+### One file selected
+
+> Upload this file
+
+### Multiple files selected
+
+> Upload these files
+
+This would make the action clearer and more intentional.
+
+The exact UI can be refined as appropriate, but the goal is to make the final action explicit instead of having a generic "Select" action that does not clearly communicate what will happen next.
+
+---
+
+# 8. Received Files Should Also Appear in Shared Files
+
+There is currently an important inconsistency in the Desktop application.
+
+When files/folders are shared **from the Android phone to the Desktop application**, the received items:
+
+* Appear in the Transfers tab.
+* Are downloaded directly into the Downloads directory.
+* But do not appear in the Shared Files tab.
+
+This should be changed.
+
+Received files should also appear in the Shared Files tab so that the user can manage them from the same place as other files.
+
+For received files, provide appropriate actions such as:
+
+* Open
+* Show in Folder
+* Refresh, if applicable
+* Delete
+* Details
+* Any other action that makes sense for a received/local file
+
+The exact available actions can depend on the item's state.
+
+The important requirement is:
+
+**Files received from Android should not disappear from the user's file-management view simply because they were received rather than sent from Desktop.**
+
+The Shared Files UI should provide a consistent way to manage both locally shared/sent files and received files where appropriate.
+
+---
+
+# 9. Delete Action for Shared/Received Files
+
+The Desktop Shared Files interface currently provides actions such as:
+
+> Show in Folder
+> Refresh
+> Unshare
+
+There should also be a **Delete** action.
+
+When the user presses Delete:
+
+* The corresponding local file/folder should be deleted from the Desktop computer's local storage.
+* The corresponding entry should also be removed from the Desktop application's Shared Files list.
+* The user should not be left with an entry pointing to a file that no longer exists.
+
+For files that were originally **sent from Desktop**, deleting them should remove the local copy and the corresponding local application entry.
+
+For files that were **received from Android**, deleting them from the Desktop application should only delete the Desktop's local copy.
+
+It should **not** delete or modify the original file on the Android device.
+
+For example:
+
+> Android → Desktop
+> Android sends `sample.txt`
+> Desktop receives and stores `sample.txt`
+> User presses Delete on Desktop
+> → Desktop copy is deleted
+> → Desktop entry is removed
+> → Original Android file remains completely unaffected
+
+The direction of the transfer must be respected.
+
+---
+
+# 10. Android Application
+
+## 10.1 Overall Android UI
+
+The Android application has a similar problem, although the screen is smaller.
+
+The UI should remain minimal because it is a mobile application, but minimal should not mean bland or unfinished.
+
+Do not simply add random pictures or decorative graphics to fill space.
+
+Instead, use design patterns found in professional mobile applications:
+
+* Better spacing
+* Stronger hierarchy
+* Better typography
+* Proper cards/containers where appropriate
+* Better icons
+* Better empty states
+* Clear action hierarchy
+* Consistent component styling
+* Better visual grouping
+
+The Android application should feel like a professional product while still remaining clean and minimal.
+
+---
+
+## 10.2 Unpaired Android State
+
+The current Android behavior when no device is paired is good.
+
+When the device has not been paired, the application presents a single focused screen that guides the user toward pairing.
+
+Keep this general behavior.
+
+The user should not be presented with unnecessary tabs/features before pairing has been completed.
+
+This is one part of the current Android UX that should be preserved.
+
+---
+
+# 11. Android UI After Pairing
+
+After pairing, the Android application is already reasonably good visually and does not require a complete redesign.
+
+The main requirement here is **refinement rather than replacement**.
+
+Improve the existing UI where necessary while preserving the parts that already work well.
+
+---
+
+# 12. Desktop Files Tab — Long-Press / Context Actions
+
+There is currently an issue with the actions available when interacting with files in the Files tab.
+
+For downloaded files, the current actions only appear to include:
+
+* Open
+* Details
+
+The actions should depend on the current state of the item.
+
+### Downloaded files
+
+Downloaded files should have:
+
+* Open
+* Share
+* Delete
+* Details
+
+### Files that have not been downloaded
+
+These should have:
+
+* Remove
+* Details
+
+"Remove" should remove the entry from the application rather than deleting a local downloaded file, because the file has not been downloaded.
+
+### Files currently downloading or queued
+
+These should have:
+
+* Remove
+* Details
+
+The exact behavior should remain appropriate to the current transfer state.
+
+The important point is that the user should have useful actions available for every file state instead of only seeing Open/Details.
+
+---
+
+
+# 13. Android Application Icon
+
+The Android application currently does not have a proper application icon.
+
+Create a proper Relay icon.
+
+The Desktop application should use the same visual identity so that the Desktop and Android versions clearly belong to the same product.
+
+---
+
+# 14. Android Bottom Navigation Icons
+
+The Android navigation currently has placeholders/icons for:
+
+* Files
+* Transfers
+* Settings
+
+These currently look like simple rectangles/placeholders and do not look polished.
+
+Refine these navigation icons and their surrounding UI.
+
+The navigation should use proper, recognizable icons and a professional active/inactive state.
+
+The selected tab should be clearly identifiable without making the navigation visually heavy.
+
+---
+
+# 15. Android Transfers — Clear History Button
+
+The Android Transfers screen currently has the **Clear History** button on the lower-right side, below the Upload a Folder option.
+
+The functionality itself is fine.
+
+Only the **location** should be changed.
+
+Move **Clear History** into the header section.
+
+The desired layout is conceptually:
+
+> Transfers                         Clear History
+> ─────────────────────────────────────────────
+> Upload a file
+> Upload a folder
+
+In other words:
+
+* "Transfers" remains on the left side of the header.
+* "Clear History" should be positioned on the opposite/right side of the same header.
+* It should appear above the content area containing "Upload a file" and "Upload a folder".
+* Do not otherwise change the Clear History functionality.
+
+Everything else about this area can remain as it currently works unless needed for visual consistency.
+
+---
+
+# 16. General Design Requirement
+
+The most important requirement across both applications is:
+
+**Relay should no longer look like a basic prototype.**
+
+The application already has the underlying functionality, so the next goal is to make the frontend feel complete and professional.
+
+Do not solve the problem simply by adding more content, images, or decorative elements.
+
+Instead, focus on:
+
+* Professional visual hierarchy
+* Appropriate use of whitespace
+* Consistent spacing
+* Better typography
+* Modern navigation
+* Meaningful empty states
+* Better cards and containers where appropriate
+* Proper icons
+* Clear action buttons
+* Consistent metadata
+* Good dialogs/modals
+* Clear transfer states
+* Consistent Desktop/Android design language
+* Good handling of both empty and populated states
+
+The UI should look good **before and after data is present**.
+
+---
+
+# 17. UI Inspection Before Implementation
+
+Before making any UI/UX changes, **Claude should first run the application and inspect the actual interface using screenshots**. Do not rely only on the written descriptions in this document.
+
+For each relevant issue:
+
+1. Open the affected screen/state in the application.
+2. Take screenshots and visually inspect the current UI.
+3. Understand what the user is referring to and identify the actual UI/UX problem from the screenshot and the written requirement.
+4. Determine the appropriate professional UI/UX solution rather than blindly applying the literal wording of the request.
+5. Implement the changes.
+6. Run the application again and take new screenshots to verify the result.
+7. Compare the result against the original issue and make further refinements if the UI still looks incomplete, inconsistent, or unprofessional.
+
+The screenshots should be used to **understand the user's intent and validate the implementation**, not simply as documentation. The goal is to make the requested changes while preserving the existing functionality and producing a polished final UI.
+
+
+---
+
+# 18. Important Implementation Principle
+
+Do not blindly change existing functionality while making these UI changes.
+
+For every UI/UX change:
+
+1. Verify that the UI accurately represents the underlying state.
+2. Check both empty and populated states.
+3. Check both Desktop and Android where the same concept exists.
+4. Keep the design consistent across platforms.
+5. Do not expose internal implementation details to normal users.
+6. Do not introduce unnecessary visual elements merely to fill empty space.
+7. Where a requested behavior is ambiguous, inspect the current implementation and choose the behavior that best matches the stated user expectation rather than silently removing functionality.
+
+The final result should feel like a **polished, coherent Relay application**, not simply the current UI with larger text or additional colors.

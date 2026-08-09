@@ -204,6 +204,92 @@ describe('resolveLocalFolderRoot (P13.2, Issue 1)', () => {
     expect(localRoot).toBe('test (1)');
   });
 
+  // P17: reproduces the exact collision confirmed live on RMX3997 — a
+  // shared_folder_id reused (after the owning row was deleted and SQLite's
+  // plain INTEGER PRIMARY KEY rowid recycled) for a completely different
+  // logical folder. Without sharedAt-aware invalidation, this call would
+  // have returned the stale 'test' root — the old, already-downloaded
+  // folder's physical directory — and a fresh download of the *new* folder
+  // would silently land inside it, exactly like the pre-fix physical
+  // reproduction (docs/15_QA_NOTEBOOK.md's P17 entry) did.
+  describe('shared_folder_id reuse (P17)', () => {
+    test('a mismatched sharedAt invalidates the stale entry and resolves a fresh root', async () => {
+      mockReadFile.mockResolvedValue(
+        JSON.stringify({
+          '1': { localRoot: 'test', sharedAt: '2026-01-01T00:00:00', reconciledChildren: { 'A.txt': 17 } },
+        }),
+      );
+      // The old folder's physical directory is still on disk (it was never
+      // deleted) — the fresh resolution must still avoid colliding with it.
+      mockExists.mockImplementation((path: string) => Promise.resolve(path.endsWith('/test')));
+
+      const localRoot = await resolveLocalFolderRoot(1, 'test', '2026-02-02T00:00:00');
+
+      expect(localRoot).toBe('test (1)');
+      expect(mockWriteFile).toHaveBeenCalledWith(
+        expect.any(String),
+        JSON.stringify({ '1': { localRoot: 'test (1)', sharedAt: '2026-02-02T00:00:00' } }),
+        'utf8',
+      );
+    });
+
+    test('a mismatched sharedAt drops the old reconciliation record, not just the root', async () => {
+      mockReadFile.mockResolvedValue(
+        JSON.stringify({
+          '1': { localRoot: 'test', sharedAt: '2026-01-01T00:00:00', reconciledChildren: { 'A.txt': 17 } },
+        }),
+      );
+      mockExists.mockResolvedValue(false); // the old physical folder no longer exists either
+
+      await resolveLocalFolderRoot(1, 'test', '2026-02-02T00:00:00');
+
+      const written = JSON.parse(mockWriteFile.mock.calls[mockWriteFile.mock.calls.length - 1][1]);
+      expect(written['1']).toEqual({ localRoot: 'test', sharedAt: '2026-02-02T00:00:00' });
+    });
+
+    test('a matching sharedAt is a normal cache hit — no invalidation, no filesystem check', async () => {
+      mockReadFile.mockResolvedValue(
+        JSON.stringify({ '1': { localRoot: 'test', sharedAt: '2026-01-01T00:00:00' } }),
+      );
+
+      const localRoot = await resolveLocalFolderRoot(1, 'test', '2026-01-01T00:00:00');
+
+      expect(localRoot).toBe('test');
+      expect(mockExists).not.toHaveBeenCalled();
+      expect(mockWriteFile).not.toHaveBeenCalled();
+    });
+
+    test('a legacy entry with no recorded sharedAt is trusted, not invalidated, and gets backfilled', async () => {
+      mockReadFile.mockResolvedValue(JSON.stringify({ '1': { localRoot: 'test' } }));
+
+      const localRoot = await resolveLocalFolderRoot(1, 'test', '2026-02-02T00:00:00');
+
+      expect(localRoot).toBe('test');
+      expect(mockExists).not.toHaveBeenCalled();
+      expect(mockWriteFile).toHaveBeenCalledWith(
+        expect.any(String),
+        JSON.stringify({ '1': { localRoot: 'test', sharedAt: '2026-02-02T00:00:00' } }),
+        'utf8',
+      );
+    });
+
+    // TransferStreamManager's own call sites never pass sharedAt (a Transfer
+    // response carries no such field) — this must keep behaving exactly like
+    // the pre-P17 cheap read-through, since FilesScreen already validated
+    // (and if necessary invalidated) this id moments earlier in the same
+    // download flow.
+    test('omitting sharedAt never invalidates, matching the pre-P17 read-through', async () => {
+      mockReadFile.mockResolvedValue(
+        JSON.stringify({ '1': { localRoot: 'test', sharedAt: '2026-01-01T00:00:00' } }),
+      );
+
+      const localRoot = await resolveLocalFolderRoot(1, 'test');
+
+      expect(localRoot).toBe('test');
+      expect(mockWriteFile).not.toHaveBeenCalled();
+    });
+  });
+
   describe('under a custom SAF download location (P14.3)', () => {
     const treeUri = 'content://com.android.externalstorage.documents/tree/primary%3APhotos';
 
@@ -294,14 +380,55 @@ describe('readAllReconciledChildren (P13.2, Issue 2)', () => {
       }),
     );
 
-    const all = await readAllReconciledChildren();
+    const all = await readAllReconciledChildren([]);
 
     expect(all).toEqual({ 1: { 'a.txt': 100 } });
   });
 
   test('empty object when no registry file exists yet', async () => {
-    const all = await readAllReconciledChildren();
+    const all = await readAllReconciledChildren([]);
     expect(all).toEqual({});
+  });
+
+  // P17: the core collision this milestone fixed. shared_folder_id 1 used to
+  // belong to a folder shared at "2026-01-01T00:00:00", which is long gone —
+  // the id has since been reused (SQLite reuses a plain INTEGER PRIMARY KEY
+  // rowid once the table empties) for an unrelated folder shared later. The
+  // stale reconciledChildren record must not read back as if it already
+  // described the new folder — a freshly-shared folder that happens to
+  // reuse an old id must start from "never downloaded", not "already done".
+  test('omits a reconciled record whose sharedAt disagrees with the live folder now holding that id', async () => {
+    mockReadFile.mockResolvedValue(
+      JSON.stringify({
+        '1': { localRoot: 'test', sharedAt: '2026-01-01T00:00:00', reconciledChildren: { 'A.txt': 17 } },
+      }),
+    );
+
+    const all = await readAllReconciledChildren([{ id: 1, shared_at: '2026-02-02T00:00:00' }]);
+
+    expect(all).toEqual({});
+  });
+
+  test('keeps a reconciled record whose sharedAt matches the live folder', async () => {
+    mockReadFile.mockResolvedValue(
+      JSON.stringify({
+        '1': { localRoot: 'test', sharedAt: '2026-01-01T00:00:00', reconciledChildren: { 'A.txt': 17 } },
+      }),
+    );
+
+    const all = await readAllReconciledChildren([{ id: 1, shared_at: '2026-01-01T00:00:00' }]);
+
+    expect(all).toEqual({ 1: { 'A.txt': 17 } });
+  });
+
+  test('keeps a legacy record with no recorded sharedAt (nothing to compare it against)', async () => {
+    mockReadFile.mockResolvedValue(
+      JSON.stringify({ '1': { localRoot: 'test', reconciledChildren: { 'A.txt': 17 } } }),
+    );
+
+    const all = await readAllReconciledChildren([{ id: 1, shared_at: '2026-02-02T00:00:00' }]);
+
+    expect(all).toEqual({ 1: { 'A.txt': 17 } });
   });
 });
 
@@ -314,13 +441,26 @@ describe('readAllLocalRoots (P13.3)', () => {
       }),
     );
 
-    const all = await readAllLocalRoots();
+    const all = await readAllLocalRoots([]);
 
     expect(all).toEqual({ 1: 'test', 2: 'Alpha' });
   });
 
   test('empty object when no registry file exists yet', async () => {
-    const all = await readAllLocalRoots();
+    const all = await readAllLocalRoots([]);
+    expect(all).toEqual({});
+  });
+
+  // P17: the read-side half of the same collision — a folder row must not
+  // report a physical root (and therefore offer "Open") that actually
+  // belongs to a different, already-deleted folder that once held this id.
+  test('omits a localRoot whose sharedAt disagrees with the live folder now holding that id', async () => {
+    mockReadFile.mockResolvedValue(
+      JSON.stringify({ '1': { localRoot: 'test', sharedAt: '2026-01-01T00:00:00' } }),
+    );
+
+    const all = await readAllLocalRoots([{ id: 1, shared_at: '2026-02-02T00:00:00' }]);
+
     expect(all).toEqual({});
   });
 });

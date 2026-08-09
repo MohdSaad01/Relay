@@ -469,7 +469,7 @@ export function FilesScreen() {
       });
       try {
         const children = await getFolderFiles(folder.id);
-        const localRoot = await resolveLocalFolderRoot(folder.id, folder.folder_name);
+        const localRoot = await resolveLocalFolderRoot(folder.id, folder.folder_name, folder.shared_at);
         if (children.length === 0) {
           // Empty folder: nothing to stream, so nothing would otherwise ever
           // run for it — see ensureEmptyFolderStaged's own doc comment for
@@ -552,8 +552,11 @@ export function FilesScreen() {
       // resolved to on-device, not its raw shared display name — the two
       // only ever differ once a same-named folder conflict has actually
       // been resolved (see folderIdentity.ts), so this is a cheap
-      // read-through the rest of the time.
-      const localRoot = await resolveLocalFolderRoot(folder.id, folder.folder_name);
+      // read-through the rest of the time. P17: passing folder.shared_at
+      // lets this call detect (and recover from) folder.id having been
+      // reused for a different logical folder since the mapping was last
+      // resolved.
+      const localRoot = await resolveLocalFolderRoot(folder.id, folder.folder_name, folder.shared_at);
       await openDownloadedFolder(localRoot);
     } catch {
       // Open is offered optimistically (see canOpen below), so a failure
@@ -563,7 +566,7 @@ export function FilesScreen() {
       // Problem 1). Re-verifying lets the row recover to a re-downloadable
       // 'idle' state instead of staying stuck offering an "Open" that will
       // keep failing.
-      const localRoot = await resolveLocalFolderRoot(folder.id, folder.folder_name).catch(() => null);
+      const localRoot = await resolveLocalFolderRoot(folder.id, folder.folder_name, folder.shared_at).catch(() => null);
       if (localRoot) {
         verifyFolderExists(localRoot);
       }

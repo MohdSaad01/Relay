@@ -90,6 +90,30 @@ code (existence checks, Open, notifications, reconciliation) must resolve
 through the appropriate id-keyed registry, not `file_name`/`folder_name`
 directly.
 
+### Backend ID Reuse (P17)
+
+A backend integer primary key (`shared_folders.id`, `shared_files.id`, and
+any other plain SQLite `INTEGER PRIMARY KEY` without `AUTOINCREMENT`) is
+**not** durable external identity — it is only guaranteed unique while its
+row exists. Once every row in a table is deleted, SQLite restarts
+numbering from 1, so a deleted folder/file's id can be handed to an
+entirely unrelated one later (confirmed live: P17). This mirrors
+`docs/13_Database_Design.md`'s existing `devices.device_identifier`
+precedent — the primary key is an internal implementation detail, not a
+stable identity contract — and is not something Version 1 should "fix" at
+the database layer (no `AUTOINCREMENT`, no UUID column) without a proven
+need; the reuse itself is normal SQLite behavior, not a defect.
+
+Any Android-local state keyed by one of these ids and expected to survive
+across the id's reuse (`folderIdentity.ts`'s on-device registry is the
+current example) must validate the id against an independent signal the
+backend already provides — `shared_at` for `shared_folders`, set once at
+row creation and left untouched by an in-place refresh — before trusting a
+cached entry. Do not derive that signal from a display name
+(`folder_name`/`file_name`); two different logical items can legitimately
+share one, which is exactly the ambiguity P13.2/P13.3/P16 already had to
+solve for the *display* layer and must not be reintroduced here.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)

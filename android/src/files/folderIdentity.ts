@@ -68,6 +68,25 @@ const REGISTRY_PATH = `${ReactNativeBlobUtil.fs.dirs.DocumentDir}/relay-folder-r
 
 interface RegistryEntry {
   localRoot: string;
+  /**
+   * The owning SharedFolder's `shared_at` (P17) at the moment this entry was
+   * resolved — a proxy for "which logical folder this shared_folder_id
+   * actually pointed to", since the id itself is only unique while that
+   * row exists: SQLite's plain `INTEGER PRIMARY KEY` (no AUTOINCREMENT,
+   * confirmed against backend/relay.db's schema — no sqlite_sequence table)
+   * reuses a rowid once the table empties, so a folder deleted and later
+   * replaced by an unrelated one can resolve to the exact same
+   * shared_folder_id. `shared_at` is set once at row creation
+   * (SharedFolderService.share_folder) and never touched by a refresh of
+   * the same still-shared path, so two different logical folders that ever
+   * share an id are guaranteed to carry different `sharedAt` values, while
+   * re-sharing the same live folder keeps the same one. Absent on an entry
+   * written before this field existed (legacy/cold-start — see
+   * resolveLocalFolderRoot) or one TransferStreamManager created without a
+   * live folder object on hand; such an entry is trusted at face value
+   * rather than invalidated, since there is nothing to compare it against.
+   */
+  sharedAt?: string;
   reconciledChildren?: Record<string, number>;
 }
 
@@ -194,16 +213,46 @@ function withRegistryLock<T>(fn: (registry: Registry) => Promise<T>): Promise<T>
  * coordinate a single "resolve once" moment themselves — whichever call
  * actually runs first for a given id wins and every later call (for that
  * same id, immediately or across app restarts) just reads its answer back.
+ *
+ * `sharedAt` (P17) is the owning SharedFolder's current `shared_at`, when
+ * the caller has it — FilesScreen's handleFolderDownload/handleOpenFolder
+ * always do, since both hold the live `AvailableFolderResponse`. When an
+ * existing entry's own recorded `sharedAt` is present and disagrees with
+ * it, `sharedFolderId` has been reused for a different logical folder (see
+ * RegistryEntry's own doc comment) — the stale entry (localRoot *and*
+ * reconciledChildren) is discarded before resolving a fresh root, so the
+ * new folder never inherits the old one's physical directory or
+ * reconciliation snapshot. TransferStreamManager's own two call sites omit
+ * `sharedAt` (a Transfer response carries no such field) and so never
+ * invalidate — safe because they only ever run after the same download's
+ * FilesScreen call already resolved (and, if necessary, invalidated) this
+ * exact id moments earlier in the same flow; see TransferStreamManager's
+ * own doc comment on that ordering.
  */
-export function resolveLocalFolderRoot(sharedFolderId: number, rawFolderName: string): Promise<string> {
+export function resolveLocalFolderRoot(
+  sharedFolderId: number,
+  rawFolderName: string,
+  sharedAt?: string,
+): Promise<string> {
   return withRegistryLock(async registry => {
     const key = String(sharedFolderId);
     const existing = registry[key];
-    if (existing) {
+    const isStale = existing != null && sharedAt != null && existing.sharedAt != null && existing.sharedAt !== sharedAt;
+    if (existing && !isStale) {
+      if (sharedAt != null && existing.sharedAt == null) {
+        // Backfill a legacy/cold-start entry now that its identity is known,
+        // rather than leaving it permanently unverifiable.
+        registry[key] = { ...existing, sharedAt };
+        await writeRegistry(registry);
+      }
       return existing.localRoot;
     }
+    // No entry yet, or a stale one (reused id — P17): drop any stale entry
+    // first so its old localRoot doesn't count as "reserved" against the
+    // fresh name below, only an on-device stat can still block reusing it.
+    delete registry[key];
     const localRoot = await findAvailableRootName(registry, rawFolderName);
-    registry[key] = { ...registry[key], localRoot };
+    registry[key] = { localRoot, sharedAt };
     await writeRegistry(registry);
     return localRoot;
   });
@@ -249,19 +298,51 @@ export async function markFolderReconciled(
   });
 }
 
+/** A shared folder as currently listed by the backend — enough to tell whether a registry entry still belongs to it (P17). */
+export interface LiveFolder {
+  id: number;
+  shared_at: string;
+}
+
+/**
+ * True when `entry` can be trusted as still describing `liveSharedAt` — P17.
+ * An entry with no recorded `sharedAt` (legacy/cold-start, see
+ * RegistryEntry's own doc comment) is trusted, same as
+ * resolveLocalFolderRoot's own handling; one whose recorded `sharedAt`
+ * actively disagrees with the folder currently holding this id belongs to a
+ * different, already-gone logical folder and must not be surfaced.
+ */
+function matchesLiveFolder(entry: RegistryEntry, liveSharedAt: string | undefined): boolean {
+  return entry.sharedAt == null || liveSharedAt == null || entry.sharedAt === liveSharedAt;
+}
+
 /**
  * Every shared folder's reconciled-children record in one read, keyed by
  * shared_folder_id — for useFolderReconciliation.ts to load in bulk on
  * FilesScreen's existing poll tick, rather than one file read per folder.
  * Folders with no reconciliation record yet (never downloaded) are simply
  * absent from the result.
+ *
+ * `liveFolders` (P17) is the currently-shared folder list, each with the
+ * `shared_at` its id was created with. A registry entry whose own recorded
+ * `sharedAt` disagrees with the live folder now holding that id is a
+ * leftover from a different, already-unshared folder that happened to reuse
+ * the id (RegistryEntry's own doc comment) — omitted here so a freshly
+ * created folder can never read back as already-reconciled just because an
+ * unrelated, deleted folder once occupied the same id. This is what closes
+ * the gap resolveLocalFolderRoot's own write-time invalidation only closes
+ * from the *next* download onward: this filter protects every read in
+ * between, including the very first render of a reused id before the user
+ * has tapped anything.
  */
-export function readAllReconciledChildren(): Promise<Record<number, Record<string, number>>> {
+export function readAllReconciledChildren(liveFolders: LiveFolder[]): Promise<Record<number, Record<string, number>>> {
   return withRegistryLock(async registry => {
+    const liveSharedAtById = new Map(liveFolders.map(f => [f.id, f.shared_at]));
     const result: Record<number, Record<string, number>> = {};
     for (const [key, entry] of Object.entries(registry)) {
-      if (entry.reconciledChildren) {
-        result[Number(key)] = entry.reconciledChildren;
+      const id = Number(key);
+      if (entry.reconciledChildren && matchesLiveFolder(entry, liveSharedAtById.get(id))) {
+        result[id] = entry.reconciledChildren;
       }
     }
     return result;
@@ -277,13 +358,20 @@ export function readAllReconciledChildren(): Promise<Record<number, Record<strin
  * whose root has been resolved but not yet reconciled, is still included as
  * long as `localRoot` is set — that's exactly the identifier needed to check
  * existence, independent of reconciliation state.
+ *
+ * `liveFolders` (P17): see readAllReconciledChildren's own doc comment —
+ * same filtering, so a reused id's stale localRoot (pointing at a different,
+ * already-deleted folder's physical directory) is never handed back as if
+ * it belonged to the folder currently holding that id.
  */
-export function readAllLocalRoots(): Promise<Record<number, string>> {
+export function readAllLocalRoots(liveFolders: LiveFolder[]): Promise<Record<number, string>> {
   return withRegistryLock(async registry => {
+    const liveSharedAtById = new Map(liveFolders.map(f => [f.id, f.shared_at]));
     const result: Record<number, string> = {};
     for (const [key, entry] of Object.entries(registry)) {
-      if (entry.localRoot) {
-        result[Number(key)] = entry.localRoot;
+      const id = Number(key);
+      if (entry.localRoot && matchesLiveFolder(entry, liveSharedAtById.get(id))) {
+        result[id] = entry.localRoot;
       }
     }
     return result;

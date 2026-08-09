@@ -923,6 +923,140 @@ local test state, not fixed.
 
 ---
 
+# Milestone P17 — `shared_folder_id` Reuse / Folder Identity Collision
+
+**Problem (from P14.4, re-confirmed in P16):** `folderIdentity.ts`'s
+on-device registry (`relay-folder-registry.json`) is keyed by the bare
+`shared_folder_id`. `shared_folders.id` is a plain SQLite
+`INTEGER PRIMARY KEY` with no `AUTOINCREMENT` keyword (confirmed against
+`backend/relay.db`'s own schema — no `sqlite_sequence` table exists), so
+once every row is deleted the next `INSERT` restarts numbering from 1: the
+id is unique only while its row exists, not forever. A folder deleted and
+later replaced by an unrelated one can therefore be handed the exact same
+`shared_folder_id` its predecessor had.
+
+**Baseline / lifecycle established (Phase 1, before any code change):**
+inspected `backend/app/models/shared_folder.py`,
+`shared_folder_service.py`, and `shared_folder_repository.py`. Deletion is
+a hard `db.delete()` (`unshare_folder`), never a soft-delete or tombstone.
+Re-sharing an *already-shared, still-existing* path is an update-in-place
+(`share_folder`'s `get_by_path` branch) — same row, same id, and
+critically `shared_at` (set once at creation, `utc_now()`) is left
+untouched by that path. Only a genuinely new row (a fresh path, or the
+same path re-shared *after* being unshared) gets a fresh `shared_at`. This
+makes `(id, shared_at)` a reliable proxy for "this exact row's lifetime,"
+without any backend change — `AvailableFolderResponse.shared_at` was
+already returned to Android.
+
+**Exact physical reproduction (RMX3997, USB + LAN, real backend, real
+APK):**
+1. Shared `test/A.txt` as Folder A (`POST /folders``id=1`,
+   `shared_at=2026-08-09T07:50:08`). Downloaded it on-device. Registry:
+   `{"1":{"localRoot":"test","reconciledChildren":{"A.txt":17}}}`.
+   Filesystem: `Download/Relay/test/A.txt`.
+2. Unshared Folder A (`DELETE /folders/1`) — `shared_folders` now empty.
+3. Shared a **different** folder, same display name `test`, different
+   content (`test_b/test/B.txt`, 71 bytes) — backend returned
+   `id=1` again (confirmed: SQLite recycled the rowid),
+   `shared_at=2026-08-09T08:20:09` (different from Folder A's).
+4. Row correctly still read "Download" (not a premature "Open") — the
+   per-child `deriveDownloadStatus` gate (keyed by the *file's own*
+   `shared_file_id`, a different id space) happened to mask the collision
+   here. Tapped Download anyway.
+5. **Confirmed defect:** registry became
+   `{"1":{"localRoot":"test","reconciledChildren":{"B.txt":71}}}` — B.txt
+   streamed into `Download/Relay/test/`, the *same physical directory*
+   still holding Folder A's leftover `A.txt`. `adb shell ls` confirmed
+   both files coexisting in one directory; tapping "Open" on Folder B's
+   row opened a DocumentsUI listing containing both `A.txt` and `B.txt`.
+   Physical isolation (a hard P17 invariant) was violated — not merely a
+   stale label.
+
+**Architecture decision — Android-side fix (Option B), not a backend
+change.** `docs/13_Database_Design.md` already establishes the relevant
+precedent for this codebase: `devices.device_identifier` (a
+client-generated UUID) is the *stable external identity*, while "the
+primary key stays a plain internal integer." `shared_folders.id` was never
+meant to be durable external identity either — forcing it to be (an
+`AUTOINCREMENT` keyword, a UUID column, a global sequence) would be a
+schema change disproportionate to the actual defect (CLAUDE.md Rules 1–3),
+and the backend already exposes everything needed to close the gap:
+`shared_at`.
+
+**Fix (`android/src/files/folderIdentity.ts`):**
+* `RegistryEntry` gains an optional `sharedAt` field.
+* `resolveLocalFolderRoot(id, rawName, sharedAt?)` — `sharedAt` is new and
+  optional. When provided (both `FilesScreen.tsx` call sites always have
+  the live `AvailableFolderResponse`) and an existing entry's own recorded
+  `sharedAt` disagrees, the id has been reused for a different logical
+  folder: the stale entry (`localRoot` **and** `reconciledChildren`) is
+  dropped before resolving a fresh root, so the old id's former localRoot
+  no longer counts as "reserved" — only a genuine on-device collision
+  (the old physical directory still present) still forces a `(1)` suffix.
+  A legacy entry with no recorded `sharedAt` (pre-P17 data, or written by
+  a caller that omitted it) is trusted, not invalidated, and backfilled.
+* `readAllLocalRoots`/`readAllReconciledChildren` now take the currently
+  shared `LiveFolder[]` (`{id, shared_at}`) and omit any entry whose
+  recorded `sharedAt` disagrees with the live folder now holding that id.
+  This closes the *read* side of the gap — a reused id must never read
+  back as "already downloaded" on the very first render, before the user
+  taps anything. `useFolderReconciliation.ts` (already handed the live
+  `folders` list) supplies this for free.
+* `TransferStreamManager.ts`'s two call sites deliberately still omit
+  `sharedAt` (a `Transfer` response carries no such field) — safe because
+  they only ever run after `FilesScreen`'s own call already
+  resolved/invalidated this exact id moments earlier in the same
+  user-initiated download flow; unchanged, pre-P17 read-through behavior.
+* No backend, database, or transfer-protocol change.
+
+**Physical re-verification (RMX3997, exact pre-fix sequence repeated on a
+cleared registry + cleared backend tables):**
+
+| Test | Result |
+|---|---|
+| Folder A shared, downloaded | Registry gained `sharedAt`; `Download/Relay/test/A.txt` |
+| Folder A unshared, Folder B shared (id reused, same display name `test`) | Row read "Download", not "Open" |
+| Folder B downloaded | Registry: `{"1":{"localRoot":"test (1)",sharedAt:B's,reconciledChildren:{"B.txt":71}}}` — fresh root, old entry dropped |
+| Physical isolation | `test/` still holds only `A.txt`; `test (1)/` holds only `B.txt` — verified via `adb shell cat` on both |
+| Open | Opened `test (1)/`, listing only `B.txt` (DocumentsUI, confirmed via screenshot) |
+| App restart (force-stop + relaunch) | Row still "Open", registry entry unchanged |
+| External deletion of `test (1)/` | Row correctly reverted to "Download" |
+| Re-download | Returned to "Open", same `test (1)` root reused, no drift to `(2)` |
+| Standalone file regression (P16) | `A.txt` shared/downloaded independently, landed correctly, unaffected |
+| Clear History (P14.4) | Not re-exercised via UI this session (navigation issue, unrelated to this fix); verified by code inspection — `historyReset.ts` never imports `folderIdentity.ts` — and its own dedicated test suite (`historyReset.test.ts`) still passes unmodified |
+
+**Not physically re-spot-checked this session (relies on existing/new
+automated coverage only):** duplicate-name suffixing beyond `(1)` (covered
+by `folderIdentity.test.ts`'s existing `(2)` test, unmodified), the P14.3
+custom SAF download location (covered by its existing describe block,
+unmodified, still passing), nested folder content, and the folder-complete
+notification's tap target. None of these paths were touched by the fix —
+`findAvailableRootName`, `DownloadLocationManager`, and
+`downloadNotification.ts` are all unmodified.
+
+**Automated tests:** `folderIdentity.test.ts` gained a `shared_folder_id
+reuse (P17)` describe block (mismatched/matching/legacy `sharedAt`,
+`TransferStreamManager`'s omitted-`sharedAt` path) plus new cases for
+`readAllReconciledChildren`/`readAllLocalRoots`'s live-folder filtering.
+`useFolderReconciliation.test.tsx` updated to drive the hook with real
+`AvailableFolderResponse` objects (`{id, shared_at}`) instead of an opaque
+poll key, plus a new pin that the live set is actually passed through.
+`npx jest` (320/320), `npx tsc --noEmit`, `npx eslint src __tests__` (0
+errors, 2 pre-existing unrelated warnings in `TransferStreamManager.ts`)
+all clean. No backend files changed — `pytest`/`ruff` not re-run.
+
+**Limitation, documented rather than solved:** a registry entry written
+*before* this fix shipped has no recorded `sharedAt` and is trusted at
+face value the first time it's read after the update (there is nothing to
+compare it against) — the same class of limitation P16's own entry
+documents for its pre-fix `Transfer` rows. If that legacy entry already
+described a folder whose id was reused pre-fix, it is "blessed" as correct
+going forward rather than retroactively detected. Only affects installs
+that already hit this exact collision before updating; every id-reuse from
+this point forward is caught.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:
@@ -932,6 +1066,12 @@ A few gotchas worth remembering independent of any single milestone above:
   files, `folderIdentity.ts` for folders) — never through
   `file_name`/`folder_name` alone. Established by P3/P13.2/P16 the hard
   way.
+- **A backend integer primary key is not durable external identity** — a
+  plain SQLite `INTEGER PRIMARY KEY` (no `AUTOINCREMENT`) is reused once
+  its table empties, so any id-keyed local state that must survive across
+  a row's deletion-and-replacement needs an independent signal alongside
+  the id (P17 uses `shared_at`, the same role `devices.device_identifier`
+  already plays for pairing per `docs/13_Database_Design.md`).
 - **`TestClient`'s in-process ASGI transport cannot simulate a real
   dropped TCP connection** — anything about client-disconnect handling
   needs a real `uvicorn` process and a raw socket (see P8).

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { AvailableFolderResponse } from '../api/types';
 import { readAllLocalRoots, readAllReconciledChildren } from './folderIdentity';
 
 type ReconciliationMap = Record<number, Record<string, number>>;
@@ -28,14 +29,22 @@ type LocalRootMap = Record<number, string>;
  * TransferStreamManager subscription) just wrote a fresh record and wants
  * the row to reflect it immediately, rather than waiting out the rest of
  * that poll interval.
+ *
+ * `folders` (P17) is also handed to folderIdentity.ts's read functions as
+ * the live `{id, shared_at}` set they filter stale entries against — a
+ * shared_folder_id reused by a different logical folder (see
+ * folderIdentity.ts's RegistryEntry doc comment) must never read back as
+ * that new folder's own reconciled/localRoot state just because an
+ * unrelated, already-deleted folder previously held the same id.
  */
-export function useFolderReconciliation(pollKey: unknown) {
+export function useFolderReconciliation(folders: AvailableFolderResponse[]) {
   const [map, setMap] = useState<ReconciliationMap>({});
   const [localRootMap, setLocalRootMap] = useState<LocalRootMap>({});
 
   const refresh = useCallback(() => {
     let cancelled = false;
-    Promise.all([readAllReconciledChildren(), readAllLocalRoots()])
+    const liveFolders = folders.map(folder => ({ id: folder.id, shared_at: folder.shared_at }));
+    Promise.all([readAllReconciledChildren(liveFolders), readAllLocalRoots(liveFolders)])
       .then(([reconciled, localRoots]) => {
         if (!cancelled) {
           setMap(reconciled);
@@ -46,9 +55,9 @@ export function useFolderReconciliation(pollKey: unknown) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [folders]);
 
-  useEffect(() => refresh(), [pollKey, refresh]);
+  useEffect(() => refresh(), [folders, refresh]);
 
   return { reconciledByFolderId: map, localRootByFolderId: localRootMap, refresh };
 }

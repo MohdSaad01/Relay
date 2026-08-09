@@ -1,7 +1,7 @@
 "use strict";
 
 import { api } from "../api/client.js";
-import { escapeHtml, formatDateTime, renderError } from "../dom.js";
+import { emptyState, escapeHtml, formatDateTime, pageHeader, renderError } from "../dom.js";
 
 export async function mount(container) {
   await refresh(container);
@@ -19,60 +19,69 @@ async function refresh(container) {
 }
 
 function render(container, devices) {
+  container.innerHTML = pageHeader({ title: "Devices" });
+
   if (devices.length === 0) {
-    container.innerHTML = "<h2>Paired Devices</h2><p>No devices are paired yet. Use the Pairing tab to pair one.</p>";
+    container.insertAdjacentHTML(
+      "beforeend",
+      emptyState({
+        title: "No devices paired yet",
+        message: "Pair your Android phone with Relay to start sending and receiving files over your local network.",
+        actionHtml: '<button class="primary" id="go-to-pairing">Go to Pairing</button>',
+      })
+    );
+    container.querySelector("#go-to-pairing").addEventListener("click", () => {
+      document.querySelector('#nav button[data-view="pairing"]').click();
+    });
     return;
   }
 
-  const rows = devices
-    .map(
-      (device) => `
-      <tr data-id="${device.id}">
-        <td>${escapeHtml(device.device_name)}</td>
-        <td>${escapeHtml(device.platform)}</td>
-        <td>${formatDateTime(device.paired_at)}</td>
-        <td>${formatDateTime(device.last_seen_at)}</td>
-        <td>
-          <button class="rename">Rename</button>
-          <button class="remove danger">Remove</button>
-        </td>
-      </tr>`
-    )
-    .join("");
+  const cards = devices.map((device) => renderDeviceCard(device)).join("");
+  container.insertAdjacentHTML("beforeend", cards);
 
-  container.innerHTML = `
-    <h2>Paired Devices</h2>
-    <table>
-      <thead>
-        <tr><th>Name</th><th>Platform</th><th>Paired</th><th>Last Seen</th><th></th></tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
-  `;
+  devices.forEach((device) => {
+    const card = container.querySelector(`[data-id="${device.id}"]`);
 
-  container.querySelectorAll("tr[data-id]").forEach((row) => {
-    const id = Number(row.dataset.id);
-
-    row.querySelector(".rename").addEventListener("click", async () => {
-      const currentName = devices.find((d) => d.id === id)?.device_name ?? "";
-      const name = window.prompt("Rename device", currentName);
-      if (!name || name === currentName) return;
+    card.querySelector(".rename").addEventListener("click", async () => {
+      const name = window.prompt("Rename device", device.device_name);
+      if (!name || name === device.device_name) return;
       try {
-        await api.patch(`/devices/${id}`, { device_name: name });
+        await api.patch(`/devices/${device.id}`, { device_name: name });
         await refresh(container);
       } catch (err) {
         renderError(container, err);
       }
     });
 
-    row.querySelector(".remove").addEventListener("click", async () => {
+    card.querySelector(".remove").addEventListener("click", async () => {
       if (!window.confirm("Unpair this device? It will need to pair again to reconnect.")) return;
       try {
-        await api.del(`/devices/${id}`);
+        await api.del(`/devices/${device.id}`);
         await refresh(container);
       } catch (err) {
         renderError(container, err);
       }
     });
   });
+}
+
+function renderDeviceCard(device) {
+  return `
+    <div class="card device-card" data-id="${device.id}">
+      <div class="device-card-info">
+        <div class="device-card-title">
+          <span class="device-name">${escapeHtml(device.device_name)}</span>
+          <span class="badge badge-success">Paired</span>
+        </div>
+        <div class="device-card-meta">
+          <span class="badge">${escapeHtml(device.platform)}</span>
+          <span class="muted">Paired ${formatDateTime(device.paired_at)}</span>
+          <span class="muted">Last seen ${formatDateTime(device.last_seen_at)}</span>
+        </div>
+      </div>
+      <div class="device-card-actions">
+        <button class="rename">Rename</button>
+        <button class="remove danger">Remove</button>
+      </div>
+    </div>`;
 }

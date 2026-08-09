@@ -1,7 +1,7 @@
 "use strict";
 
 import { api, ApiError } from "../api/client.js";
-import { escapeHtml, renderError, parseApiDateTime } from "../dom.js";
+import { emptyState, escapeHtml, pageHeader, renderError, parseApiDateTime } from "../dom.js";
 
 const POLL_INTERVAL_MS = 1500;
 
@@ -21,11 +21,13 @@ export async function mount(container) {
 }
 
 function renderIdle(controller) {
-  controller.container.innerHTML = `
-    <h2>Pair a Device</h2>
-    <p>Start a pairing attempt, then scan the QR code from the Relay Android app.</p>
-    <button id="start-pairing">Start Pairing</button>
-  `;
+  controller.container.innerHTML =
+    pageHeader({ title: "Pairing", subtitle: "Connect a new Android device to this computer." }) +
+    emptyState({
+      title: "Ready to pair a device",
+      message: "Start a pairing attempt, then scan the QR code from the Relay Android app.",
+      actionHtml: '<button class="primary" id="start-pairing">Start Pairing</button>',
+    });
   controller.container
     .querySelector("#start-pairing")
     .addEventListener("click", () => startPairing(controller));
@@ -33,7 +35,7 @@ function renderIdle(controller) {
 
 async function startPairing(controller) {
   const { container } = controller;
-  container.innerHTML = "<p>Starting pairing attempt...</p>";
+  container.innerHTML = pageHeader({ title: "Pairing" }) + "<p>Starting pairing attempt...</p>";
   try {
     const { data } = await api.post("/pairing/start");
     controller.token = data.qr.pairing_token;
@@ -51,11 +53,13 @@ async function startPairing(controller) {
 
 function renderWaiting(container, qrDataUrl, expiresAt) {
   container.innerHTML = `
-    <h2>Pair a Device</h2>
-    <img class="qr-code" src="${qrDataUrl}" alt="Pairing QR code" />
-    <p>Scan this code from the Relay Android app.</p>
-    <p class="muted">Expires at ${parseApiDateTime(expiresAt).toLocaleTimeString()}</p>
-    <p id="pairing-status">Waiting for a device to scan...</p>
+    ${pageHeader({ title: "Pairing" })}
+    <div class="card pairing-card">
+      <img class="qr-code" src="${qrDataUrl}" alt="Pairing QR code" />
+      <p>Scan this code from the Relay Android app.</p>
+      <p class="muted">Expires at ${parseApiDateTime(expiresAt).toLocaleTimeString()}</p>
+      <p id="pairing-status" class="badge">Waiting for a device to scan...</p>
+    </div>
   `;
 }
 
@@ -86,11 +90,13 @@ async function pollPending(controller) {
 function renderExpired(controller) {
   controller.token = null;
   controller.expiresAt = null;
-  controller.container.innerHTML = `
-    <h2>Pair a Device</h2>
-    <p>This pairing attempt expired before a device scanned it.</p>
-    <button id="start-pairing">Start New Pairing</button>
-  `;
+  controller.container.innerHTML =
+    pageHeader({ title: "Pairing" }) +
+    emptyState({
+      title: "Pairing attempt expired",
+      message: "This pairing attempt expired before a device scanned it.",
+      actionHtml: '<button class="primary" id="start-pairing">Start New Pairing</button>',
+    });
   controller.container
     .querySelector("#start-pairing")
     .addEventListener("click", () => startPairing(controller));
@@ -99,11 +105,15 @@ function renderExpired(controller) {
 function renderReview(controller, pending) {
   const { container, token } = controller;
   container.innerHTML = `
-    <h2>Pairing Request</h2>
-    <p><strong>${escapeHtml(pending.device_name)}</strong> (${escapeHtml(pending.platform)}) wants to pair.</p>
-    <p class="muted">Device ID: ${escapeHtml(pending.device_identifier)}</p>
-    <button id="approve">Approve</button>
-    <button id="reject" class="danger">Reject</button>
+    ${pageHeader({ title: "Pairing Request" })}
+    <div class="card pairing-card">
+      <p><strong>${escapeHtml(pending.device_name)}</strong> (${escapeHtml(pending.platform)}) wants to pair.</p>
+      <p class="muted">Device ID: ${escapeHtml(pending.device_identifier)}</p>
+      <div class="button-row">
+        <button class="primary" id="approve">Approve</button>
+        <button id="reject" class="danger">Reject</button>
+      </div>
+    </div>
   `;
 
   container.querySelector("#approve").addEventListener("click", async () => {
@@ -127,11 +137,13 @@ function renderReview(controller, pending) {
 
 function renderDecided(controller, message) {
   controller.token = null;
-  controller.container.innerHTML = `
-    <h2>Pairing Request</h2>
-    <p>${escapeHtml(message)}</p>
-    <button id="start-pairing">Start New Pairing</button>
-  `;
+  controller.container.innerHTML =
+    pageHeader({ title: "Pairing Request" }) +
+    emptyState({
+      title: message,
+      message: "You can start another pairing attempt whenever you're ready.",
+      actionHtml: '<button class="primary" id="start-pairing">Start New Pairing</button>',
+    });
   controller.container
     .querySelector("#start-pairing")
     .addEventListener("click", () => startPairing(controller));

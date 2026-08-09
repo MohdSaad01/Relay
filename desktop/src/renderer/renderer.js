@@ -1,5 +1,6 @@
 "use strict";
 
+import { api } from "./api/client.js";
 import * as devices from "./views/devices.js";
 import * as pairing from "./views/pairing.js";
 import * as files from "./views/files.js";
@@ -38,4 +39,20 @@ window.relay.getBackendStatus().then((state) => {
   backendStateEl.textContent = state;
 });
 
-showView("devices");
+/**
+ * P19: land on Pairing instead of Devices when nothing is paired yet, so the
+ * user isn't shown an empty Devices screen only to be told to go pair a
+ * device. Manual navigation is unaffected - this only picks the tab shown
+ * on startup. Any lookup failure (e.g. backend not ready yet) falls back to
+ * the previous default of Devices rather than guessing.
+ */
+async function determineInitialView() {
+  try {
+    const { data: pairedDevices } = await api.get("/devices");
+    return pairedDevices.length === 0 ? "pairing" : "devices";
+  } catch {
+    return "devices";
+  }
+}
+
+determineInitialView().then(showView);

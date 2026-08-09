@@ -64,6 +64,7 @@ function createMainWindow() {
     width: 1100,
     height: 720,
     show: false,
+    backgroundColor: "#f6f7f9",
     icon: ICON_PATH,
     webPreferences: {
       preload: PRELOAD_PATH,

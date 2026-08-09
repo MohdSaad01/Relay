@@ -1155,6 +1155,106 @@ duplicate-file-name handling actually shipped.
 
 ---
 
+# Milestone P19 — Desktop Foundation & Navigation
+
+**Scope:** `New_Issues.txt` §1.1–1.5 only — overall visual foundation,
+empty states, first-launch tab behavior, the Devices page, and navigation.
+Explicitly not touched: pairing/QR dialog redesign (§1.6), app icon
+(§1.7), menu bar (§1.8), Clear History (§2), Settings field changes (§3),
+file-type/metadata wording (§4/§5), upload flow (§6/§7), received-files-in-
+Shared-Files (§8), delete action (§9) — all deferred to later milestones
+per the written scope boundary.
+
+**Baseline, inspected live before any change:** launched the real Electron
+app (see Tooling note below) and screenshotted every reachable state.
+Confirmed the issue descriptions matched reality: nav was five bordered/
+filled buttons in a row; every view was a bare `<h2>` + a paragraph with
+the rest of a 1100×720 window left blank; the Devices empty state was
+exactly the two-line placeholder text quoted in the issue; a paired device
+rendered as one plain table row with no visual weight; the app always
+opened on Devices regardless of pairing state.
+
+**Change:** Added two small shared primitives to `dom.js`
+(`pageHeader()`, `emptyState()`) and used them from all five views instead
+of each hand-rolling its own heading/placeholder markup. Reworked
+`app.css` with a small CSS-variable token set (spacing/color/radius) and
+consistent card/table/button/badge styling. Nav is now open text with a
+color + bottom-underline indicator for hover/active instead of bordered
+buttons — no markup change, CSS only. `renderer.js` now calls `GET
+/devices` before choosing the startup tab: 0 paired devices → Pairing, ≥1
+→ Devices (falls back to the old default of Devices on any lookup
+failure). Manual tab switching is untouched — it's the same `showView`
+used by both the automatic call and the nav click handlers. Devices got a
+real empty state (heading, explanation, a "Go to Pairing" button that
+clicks the real nav item — no invented navigation path) and a card per
+paired device (name, platform badge, a "Paired" status badge, paired/last-
+seen dates, Rename/Remove).
+
+**Deliberate design decision — no fabricated "online/offline" status.**
+§1.3 asks the Devices page to show "whether it is currently connected/
+available." The backend has no live connection tracking (confirmed by
+reading `app/schemas/device.py` — `DeviceResponse` has only
+`last_seen_at`, updated solely when that device authenticates against
+`/files` or `/transfers`, per `AuthService`). Rather than invent a fake
+live indicator the app can't actually back up, the card shows the real
+`last_seen_at` timestamp and a "Paired" badge (true or the row wouldn't
+exist) — honest about what Relay actually knows.
+
+**Defect found and fixed during live (screenshot) verification:** the
+first post-change screenshot showed the active nav item's underline
+rendered as a short rounded arc instead of a straight line. Root cause:
+the generic `button { border-radius: var(--radius-sm); }` rule still
+applied to nav buttons (only `background`/`border`/`padding` were
+overridden for `#nav button`), so the element's own corner radius bent the
+`border-bottom` indicator at both ends. Fixed with an explicit
+`border-radius: 0` on `#nav button`. Would not have been caught without
+an actual screenshot — the CSS looked correct on inspection.
+
+**Verification performed:**
+- Automated: no desktop lint/test suite exists (same finding as P18,
+  by design — plain HTML/CSS/JS, per M14). Ran `node --check` against
+  every modified `.js` file (syntax only).
+- Live functional: launched the real Electron app twice from a cold
+  process start — once with a paired device (opened on Devices), once
+  with none (opened on Pairing) — confirming the startup-routing decision
+  reflects actual app restarts, not just an in-page reload. Manually
+  clicked Devices while unpaired and confirmed the empty state still
+  renders correctly (automatic navigation doesn't block manual nav).
+  Clicked through every tab (Devices → Pairing → Shared Files →
+  Transfers → Settings) with a `window.onerror`/`unhandledrejection`
+  listener attached — zero errors. Screenshotted every required state
+  (Devices empty/paired, Pairing idle/QR/review/decided, Shared Files
+  empty/populated, Transfers populated, Settings, nav active state, and a
+  real-mouse-move hover state) and compared each against its baseline
+  screenshot.
+- The full pairing handshake (start → Android submits → desktop
+  approves) was exercised for real against the loopback backend API —
+  the same endpoints the Android app and the desktop UI itself call —
+  since no physical/emulated Android device was available in this
+  environment. Test devices (`device_identifier`
+  `test-android-device-00{1,2}`) and a test shared file/folder used only
+  to populate the Shared Files screenshot were removed afterward; the dev
+  `relay.db` is unchanged from before this milestone.
+
+**Tooling note:** no project skill existed for driving the Electron app.
+Since this is a native Windows environment with a real display (not a
+headless container), the app was driven directly rather than under
+`xvfb` — `playwright-core`'s `_electron` launcher against
+`desktop/node_modules/electron/dist/electron.exe`, controlled through a
+disposable REPL script (`scratchpad/driver.mjs`, not committed to the
+repo) fed commands over a named pipe. Recommend `/run-skill-generator` if
+Desktop UI work becomes frequent enough to justify a committed driver.
+
+**Limitations:** `last_seen_at` shows "-" for a device that has never
+made an authenticated request since pairing (accurate, not a bug — the
+Android app in this session was simulated via direct API calls, which
+don't include the authenticated calls that update it). The QR/pairing
+dialog visual redesign, app icon, and menu bar (§1.6-1.8) remain
+unaddressed by design — next in the UI/UX finishing sequence per
+`New_Issues.txt`.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:

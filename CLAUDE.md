@@ -114,6 +114,25 @@ cached entry. Do not derive that signal from a display name
 share one, which is exactly the ambiguity P13.2/P13.3/P16 already had to
 solve for the *display* layer and must not be reintroduced here.
 
+### Desktop UI Foundation (P19)
+
+`desktop/src/renderer/dom.js` now exports two shared markup helpers,
+`pageHeader({ title, subtitle, actions })` and `emptyState({ title,
+message, actionHtml })`, and `desktop/styles/app.css` defines a small
+design-token set (`--color-*`, `--space-*`, `--radius-*`) plus
+`.card`/`.badge`/`.button-row`/button-variant (`primary`/`danger`) classes.
+Every view in `desktop/src/renderer/views/` uses these instead of each
+hand-rolling its own `<h2>`/placeholder markup or one-off inline styles —
+new Desktop views and states should do the same rather than reintroducing
+the pre-P19 pattern of duplicated per-view heading/empty-state HTML.
+
+`renderer.js`'s startup tab is no longer hardcoded to `"devices"`: it
+calls `GET /devices` once before the first `showView()` and opens Pairing
+when nothing is paired, Devices otherwise (falling back to Devices on any
+lookup failure). This only affects which tab is shown on launch — the
+`showView()` function driving both this and every nav click handler is
+unchanged, so manual navigation is unaffected.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)

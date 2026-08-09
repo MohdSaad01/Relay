@@ -42,3 +42,33 @@ export function formatDateTime(iso) {
 export function renderError(container, err) {
   container.innerHTML = `<p class="error">${escapeHtml(err.message || String(err))}</p>`;
 }
+
+/**
+ * Consistent page title + optional subtitle + optional right-aligned actions,
+ * used at the top of every view instead of each one hand-rolling its own
+ * heading markup.
+ */
+export function pageHeader({ title, subtitle, actions }) {
+  return `
+    <header class="page-header">
+      <div class="page-header-text">
+        <h1>${escapeHtml(title)}</h1>
+        ${subtitle ? `<p class="page-subtitle">${escapeHtml(subtitle)}</p>` : ""}
+      </div>
+      ${actions ? `<div class="page-header-actions">${actions}</div>` : ""}
+    </header>`;
+}
+
+/**
+ * Consistent "nothing here yet" presentation, used instead of a lone
+ * paragraph so empty views read as intentional screens rather than
+ * placeholder text.
+ */
+export function emptyState({ title, message, actionHtml }) {
+  return `
+    <div class="empty-state">
+      <h2>${escapeHtml(title)}</h2>
+      <p>${escapeHtml(message)}</p>
+      ${actionHtml ? `<div class="empty-state-actions">${actionHtml}</div>` : ""}
+    </div>`;
+}

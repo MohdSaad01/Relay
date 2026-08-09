@@ -1,7 +1,7 @@
 "use strict";
 
 import { api } from "../api/client.js";
-import { escapeHtml, renderError } from "../dom.js";
+import { escapeHtml, pageHeader, renderError } from "../dom.js";
 
 export async function mount(container) {
   await refresh(container);
@@ -20,18 +20,20 @@ async function refresh(container) {
 
 function render(container, settings) {
   container.innerHTML = `
-    <h2>Settings</h2>
-    <form id="settings-form">
+    ${pageHeader({ title: "Settings" })}
+    <form id="settings-form" class="card">
       <label>
         Device display name
         <input type="text" name="device_display_name" value="${escapeHtml(settings.device_display_name)}" />
       </label>
       <label>
         Download directory
-        <input type="text" name="download_directory" value="${escapeHtml(settings.download_directory)}" readonly />
-        <button type="button" id="browse-directory">Browse...</button>
+        <div class="field-row">
+          <input type="text" name="download_directory" value="${escapeHtml(settings.download_directory)}" readonly />
+          <button type="button" id="browse-directory">Browse...</button>
+        </div>
       </label>
-      <label>
+      <label class="checkbox-label">
         <input type="checkbox" name="discovery_enabled" ${settings.discovery_enabled ? "checked" : ""} />
         Discoverable on the local network
       </label>
@@ -39,8 +41,10 @@ function render(container, settings) {
         Session token lifetime (minutes)
         <input type="number" name="session_token_lifetime_minutes" min="1" value="${settings.session_token_lifetime_minutes}" />
       </label>
-      <button type="submit">Save</button>
-      <span id="save-status"></span>
+      <div class="button-row">
+        <button type="submit" class="primary">Save</button>
+        <span id="save-status" class="muted"></span>
+      </div>
     </form>
   `;
 

@@ -1,7 +1,7 @@
 "use strict";
 
 import { api } from "../api/client.js";
-import { escapeHtml, formatBytes, renderError } from "../dom.js";
+import { emptyState, escapeHtml, formatBytes, pageHeader, renderError } from "../dom.js";
 
 const POLL_INTERVAL_MS = 2000;
 const CANCELLABLE_STATUSES = new Set(["in_progress"]);
@@ -22,10 +22,14 @@ async function refresh(container) {
 }
 
 function render(container, transfers) {
-  container.innerHTML = `
-    <h2>Transfers</h2>
-    ${transfers.length === 0 ? "<p>No transfers yet.</p>" : renderTransfersTable(transfers)}
-  `;
+  container.innerHTML =
+    pageHeader({ title: "Transfers" }) +
+    (transfers.length === 0
+      ? emptyState({
+          title: "No transfers yet",
+          message: "Files you send or receive with a paired device will show up here.",
+        })
+      : renderTransfersTable(transfers));
 
   container.querySelectorAll("tr[data-transfer-id]").forEach((row) => {
     const transferId = Number(row.dataset.transferId);

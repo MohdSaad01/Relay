@@ -1,7 +1,7 @@
 "use strict";
 
 import { api } from "../api/client.js";
-import { escapeHtml, formatBytes, formatDateTime, renderError } from "../dom.js";
+import { emptyState, escapeHtml, formatBytes, formatDateTime, pageHeader, renderError } from "../dom.js";
 
 export async function mount(container) {
   await refresh(container);
@@ -34,19 +34,21 @@ function render(container, files, folders) {
 
   const rows = items.map((item) => (item.kind === "folder" ? renderFolderRow(item) : renderFileRow(item))).join("");
 
-  container.innerHTML = `
-    <h2>Shared Files</h2>
+  const actions = `
     <button id="add-files">Add Files...</button>
-    <button id="add-folders">Add Folder...</button>
-    ${
-      items.length === 0
-        ? "<p>No files are shared yet.</p>"
-        : `<table>
+    <button id="add-folders">Add Folder...</button>`;
+
+  container.innerHTML =
+    pageHeader({ title: "Shared Files", subtitle: "Files and folders available to your paired devices.", actions }) +
+    (items.length === 0
+      ? emptyState({
+          title: "Nothing shared yet",
+          message: "Add a file or folder to make it available for your paired devices to download.",
+        })
+      : `<table>
       <thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Shared</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
-    </table>`
-    }
-  `;
+    </table>`);
 
   container.querySelector("#add-files").addEventListener("click", async () => {
     const paths = await window.relay.selectFiles();

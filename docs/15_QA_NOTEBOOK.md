@@ -1943,6 +1943,231 @@ mask.
 
 ---
 
+# Milestone P22 — Android Files Screen & File Actions UX
+
+**Scope:** `New_Issues.txt`'s Android Files-screen requirements P21 had
+explicitly deferred: §12 ("Desktop Files Tab — Long-Press/Context Actions,"
+resolved during P21 as actually describing Android's own Files screen — see
+P21's own "Scope ambiguity" note) and §5's Android half (file/folder
+metadata line consistency). Explicitly not touched: Android Settings,
+Android navigation/bottom-nav icons (§14), Transfer History placement (§15),
+Desktop, backend business logic, or any other Android UI area.
+
+**Requirements read and triaged before implementation** (`New_Issues.txt` in
+full, P21's own QA entry, then the live app on RMX3997):
+- §12: a downloaded file needs Open/Share/Delete/Details; a downloaded
+  folder needs Open/Delete/Details (no Share — see Architecture decisions);
+  a not-yet-downloaded or downloading/queued file or folder needs
+  Remove/Details, with Remove's actual behavior left to "whatever is
+  appropriate to the current transfer state" per the issue's own wording.
+- §5 (Android half): drop the redundant raw MIME type from a file's meta
+  line (the file's own name/extension already conveys type) and make a
+  file's and a folder's meta-line ordering consistent.
+- Section 11 of this milestone's own instructions required first
+  determining whether P21's documented "Files screen never leaves its
+  loading spinner" issue still reproduces, before doing anything else.
+
+**Reproduction (Section 11):** did not reproduce. A clean `adb`
+force-stop + relaunch against a live backend (with one real shared file and
+one real shared folder) rendered the populated Files list correctly on the
+first attempt — screenshotted before any code was touched. The prior
+session's own report already treated this as "possibly a stale debug-build
+artifact, not conclusively an Android code defect" rather than a hard
+regression; whatever it was, it was not present in this session's build and
+is not this milestone's to explain further.
+
+**Investigation before implementation:** read `FilesScreen.tsx`,
+`FileActionMenu.tsx` (P14.1), `downloadActions.ts`, `downloadExistence.ts`,
+`downloadStatus.ts`/`folderDownloadStatus.ts`, `fileIdentity.ts`/
+`folderIdentity.ts`, and the Transfers tab's own existing per-transfer
+Cancel action (`TransferProgressDetail.handleCancel`) to find the exact
+active-vs-queued cancel pattern to reuse. Confirmed live via baseline
+screenshots that the long-press menu offered only Open/Details for every
+row regardless of state, and that a file's meta line read `55 B ·
+text/plain` while a folder's read `2 items · 22 B` (reversed order,
+matching the issue text exactly).
+
+**Architecture decisions:**
+- **"Share" required a new native dependency; user chose `react-native-share`
+  over a hand-written native module.** Confirmed by reading
+  `node_modules/react-native/Libraries/Share/Share.js` (drops `url` on
+  Android) and `react-native-blob-util`'s own Android implementation (only
+  `ACTION_VIEW`, never `ACTION_SEND`) that neither existing dependency can
+  do this. `react-native-share`'s own native module calls
+  `startActivityForResult` against the real foreground `Activity`
+  (`getCurrentActivity()`), avoiding the `FLAG_ACTIVITY_NEW_TASK` crash
+  `react-native-blob-util`'s `actionViewIntent` had to work around (P9.1) by
+  omitting a chooser title — confirmed live, Share works with no equivalent
+  workaround needed.
+- **Share is file-only, not offered for folders.** No single-file-shaped
+  `ACTION_SEND` maps cleanly onto "share a whole directory," and this
+  codebase already treats file-only vs. folder-only actions as an
+  intentional split rather than forcing one to fit the other.
+- **Share does not support a custom SAF download location (P14.3).**
+  `react-native-share`'s own `RNSharePathUtil.compatUriFromFile` mishandles
+  an already-`content://` URL (re-parses it as a bare path before
+  rewrapping, losing the scheme) — a confirmed third-party limitation, not
+  fixable without patching `node_modules`. `shareDownloadedFile` detects
+  this case and rejects with a plain "not available to share" instead of
+  invoking a broken share.
+- **"Delete" is local-only, direction-blind by construction.** Android's
+  Files screen only ever lists items it can *download* (desktop → Android);
+  there is no "received" concept to disambiguate the way Desktop's own P21
+  Delete had to. Deleting a file/folder here always means "remove my local
+  downloaded copy" — the desktop's `SharedFile`/`SharedFolder` row is never
+  touched, matching how the backend's shared-file model was already
+  designed (Android has no ownership over a share's existence). Reuses the
+  existing `deleteDownloadedPath` (already recursive for a directory, per
+  `fs.unlink`/`safUnlink`'s own native behavior — confirmed by reading
+  `ReactNativeBlobUtilFS.java`'s `deleteRecursive`) rather than adding a new
+  low-level primitive. Confirmed with a real confirmation dialog (mirroring
+  `TransferListScreen`'s own Clear History `Alert.alert` pattern) since,
+  unlike Clear History, this discards actual bytes.
+- **"Remove" behavior is genuinely bifurcated by state, exactly as the
+  issue's own wording allows ("appropriate to the current transfer
+  state").** An idle/failed row has nothing backend-side to act on — Remove
+  dismisses it from this screen via a new client-local marker
+  (`removedItems.ts`), the same shape as Desktop's own P21
+  `receivedFiles.js`/Android's own `historyReset.ts` precedent for "the
+  backend has no delete primitive for this, so don't invent one." A
+  pending/in_progress row is genuinely operational — Remove cancels it via
+  byte-for-byte the same active-vs-not branch
+  `TransferProgressDetail.handleCancel` already uses for the Transfers tab's
+  own Cancel button (`TransferStreamManager.isActive`/`cancelActive()` vs.
+  a plain `cancelTransfer()` call), reused rather than reinvented. A
+  folder's Remove during `in_progress` loops every child currently
+  pending/in_progress and cancels each the same way — a child already
+  `completed` is left alone, so a partially-downloaded folder correctly
+  falls back to a re-downloadable `idle` state (existing retry logic in
+  `handleFolderDownload` already only re-fetches what's missing).
+- **`removedItems.ts` applies the P17 `shared_at` guard even though the
+  pre-existing `fileIdentity.ts` registry doesn't.** `fileIdentity.ts`
+  predates P17 and was left as its own documented, accepted gap; this is
+  new code written after P17 was established, so it follows the convention
+  `folderIdentity.ts` set: store the dismissed item's `shared_at` alongside
+  the dismissal, and only honor it while the live item's own `shared_at`
+  still matches — otherwise a reused id (a folder/file unshared and later
+  replaced by an unrelated share that happens to land on the same reused
+  SQLite rowid) would incorrectly inherit an old dismissal. Verified live
+  (see below), not just unit-tested.
+- **§5 metadata**: new `metadataFormat.ts` — `fileMetaLine` returns size
+  only (no MIME type: a file's own extension already conveys type to a
+  normal user, and repeating `text/plain` next to `sample.txt` is exactly
+  the redundancy the issue called out); `folderMetaLine` returns `Folder ·
+  N items · size`. Reused by `FileRow`/`FolderRow`, the long-press menu's
+  subtitle, and (for the file case) the Details alert — one formatter, not
+  four call sites each re-deriving the string.
+- **A destructive-styled Delete action.** `FileActionMenuAction` gained an
+  optional `destructive` flag (red label, matching
+  `TransferProgressDetail`'s own `dangerButtonText` color) applied only to
+  Delete, not Remove — Remove never discards content the way Delete does
+  (it either dismisses a still-shared item or cancels a download, neither
+  destroys anything).
+
+**Files modified/created:**
+- `android/src/files/metadataFormat.ts` (new) — `fileMetaLine`/`folderMetaLine`.
+- `android/src/files/removedItems.ts` (new) — the P22 "Remove" dismissal
+  registry (JSON file, mutex-guarded, mirrors `folderIdentity.ts`'s shape).
+- `android/src/files/useRemovedItems.ts` (new) — React hook wrapping it,
+  mirrors `useFolderReconciliation.ts`'s shape.
+- `android/src/files/downloadActions.ts` — added `shareDownloadedFile`;
+  updated its own doc comment (previously documented Share as
+  investigated-and-rejected — now implemented).
+- `android/src/components/FileActionMenu.tsx` — `destructive` flag on
+  `FileActionMenuAction`.
+- `android/src/screens/files/FilesScreen.tsx` — per-state menu action lists
+  for both files and folders; `handleShareFile`/`handleDeleteFile`/
+  `handleRemoveFile` and their folder equivalents; removed-item filtering on
+  the merged list; meta-line rendering switched to `metadataFormat.ts`.
+- `android/package.json`/`package-lock.json` — added `react-native-share`
+  (`^12.3.1`).
+- `android/__mocks__/react-native-share.js` (new) — manual Jest mock,
+  matching the existing `__mocks__/react-native-blob-util.js` pattern (a
+  TurboModule only registered in a real native binary).
+- New/extended tests: `__tests__/files/metadataFormat.test.ts` (new),
+  `__tests__/files/removedItems.test.ts` (new, including a P17 id-reuse
+  regression test), `__tests__/files/downloadActions.test.ts` (extended
+  with `shareDownloadedFile` coverage, including the custom-SAF-mode
+  rejection case).
+
+**Automated verification:** `npx tsc --noEmit` clean; `npx eslint` clean on
+every touched/added file (two pre-existing `no-void` warnings in
+`TransferStreamManager.ts`, a file this milestone did not touch); `npx
+jest` — 42/42 suites, 357/357 tests passing, including all newly added
+cases.
+
+**Physical-device verification (RMX3997, `69DADENFONAIOZS4`):** a full
+native rebuild (`gradlew app:installDebug`, ~11 minutes, no CMake/path
+issues this time) was required to link `react-native-share`'s TurboModule;
+installed and driven against the real dev backend over the phone's own
+hotspot (`10.169.164.233:8000`), not loopback. Verified live, with
+before/after screenshots and direct `adb shell ls`/backend `GET`
+cross-checks at each step:
+- §5: a real shared file rendered `55 B` (no MIME type); a real shared
+  folder rendered `Folder · 2 items · 22 B`.
+- §12 downloaded file: long-press menu showed Open/Share/Delete (red)/
+  Details. Share opened Android's real `ACTION_SEND` chooser (WhatsApp,
+  Instagram, Chrome, etc. — the *content*, not an "Open with" dialog,
+  confirming this is genuinely a different intent than Open). Delete
+  removed the file from `/storage/emulated/0/Download/Relay/` (confirmed via
+  `adb shell ls`) and the row reverted to "Download."
+- §12 downloaded folder: menu showed Open/Delete (no Share)/Details.
+  Delete recursively removed the folder's on-device directory (confirmed
+  empty via `adb shell ls`) and the row reverted to "Download."
+- §12 not-yet-downloaded file/folder: menu showed Remove/Details. Remove
+  hid the row immediately, survived a full app force-stop + relaunch
+  (registry file persisted), and the backend confirmed the item was still
+  genuinely shared (`GET /files`/`/folders` unchanged) — a purely local
+  dismissal, not an unshare.
+- P17 regression check (not in the original requirement text, verified
+  because `removedItems.ts` claims to handle it): unshared, then re-shared,
+  the same folder (`DELETE /folders/1` then `POST /folders`, SQLite reused
+  id `1` with a new `shared_at`) — the folder correctly reappeared instead
+  of staying hidden under the old dismissal.
+- §12 downloading/queued file: shared a 1.6 GB file, tapped Download, and
+  tapped Remove mid-stream (confirmed genuinely in-progress via the
+  "Downloading..." button label and a direct `GET /transfers` poll showing
+  partial `bytes_transferred`). The backend's own `Transfer` row moved to
+  `status: "cancelled"` at ~620 MB transferred, and the row reverted to
+  "Download." (A 60 MB file was tried first and completed before the
+  cancel tap could land — local hotspot throughput made it too fast to
+  reliably catch mid-transfer; the 1.6 GB file gave a reliable multi-second
+  window instead.)
+- Regression: Transfers tab (including the just-cancelled transfer showing
+  "Cancelled") and Settings tab both re-screenshotted and confirmed
+  unaffected; pairing state, download queue, and notifications were not
+  disturbed by the native rebuild.
+
+**Discovered but out of scope (deferred, not fixed):**
+1. `api/client.ts` contains leftover `[QR-DEBUG]` `console.log`/`console.error`
+   statements (confirmed still present, unrelated to any P22 file) — noise
+   in test/logcat output, not a defect this milestone introduced or was
+   asked to clean up.
+2. A folder's Remove-during-`in_progress` multi-child cancel loop was code
+   reviewed against the single-file case it mirrors and is covered by unit
+   tests exercising the underlying `cancelTransfer`/`TransferStreamManager`
+   calls, but was not itself exercised live with more than one child
+   in-flight simultaneously (this app's own one-active-stream-at-a-time
+   design, per `TransferStreamManager`'s doc comment, means only one child
+   is ever genuinely streaming regardless of folder size — the multi-child
+   case mainly exercises the "cancel several backend-pending rows" branch,
+   which the live single-file test already covers end-to-end). Worth a
+   dedicated live pass in a future milestone that specifically stresses
+   folder cancellation.
+
+**Remaining limitations:**
+- Share is unavailable (with a clear in-app message, not a silent failure)
+  when the download location is a custom SAF folder (P14.3) — a
+  `react-native-share` library limitation, not something fixable from this
+  codebase without patching `node_modules`.
+- `removedItems.ts`'s dismissal, like every other private-storage registry
+  in this pipeline (`fileIdentity.ts`, `folderIdentity.ts`,
+  `historyReset.ts`), is lost on app reinstall — an accepted, narrow edge
+  case consistent with this app's existing persistence precedent, not a new
+  gap introduced here.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:

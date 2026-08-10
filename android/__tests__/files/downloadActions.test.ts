@@ -1,7 +1,8 @@
 import { Platform } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
+import Share from 'react-native-share';
 import * as SafX from 'react-native-saf-x';
-import { openDownloadedFile, openDownloadedFolder } from '../../src/files/downloadActions';
+import { openDownloadedFile, openDownloadedFolder, shareDownloadedFile } from '../../src/files/downloadActions';
 import { DownloadLocationManager } from '../../src/settings/DownloadLocationManager';
 
 let versionSpy: jest.SpyInstance;
@@ -68,6 +69,45 @@ describe('openDownloadedFolder', () => {
     (ReactNativeBlobUtil.android.actionViewIntent as jest.Mock).mockRejectedValueOnce(new Error('No activity found'));
 
     await expect(openDownloadedFolder('University Notes')).rejects.toThrow('No activity found');
+  });
+});
+
+// P22 (New_Issues.txt §12)
+describe('shareDownloadedFile', () => {
+  test('shares the file at its resolved on-device path as a file:// URL', async () => {
+    await shareDownloadedFile('report.pdf', 'application/pdf');
+
+    expect(Share.open).toHaveBeenCalledWith({
+      url: 'file:///mock/downloads/Relay/report.pdf',
+      type: 'application/pdf',
+      filename: 'report.pdf',
+      failOnCancel: false,
+    });
+  });
+
+  test('falls back to a generic MIME type when the shared file has none', async () => {
+    await shareDownloadedFile('report.pdf', null);
+
+    expect(Share.open).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'application/octet-stream' }),
+    );
+  });
+
+  test('propagates a rejection when no app can handle the share', async () => {
+    (Share.open as jest.Mock).mockRejectedValueOnce(new Error('No activity found'));
+
+    await expect(shareDownloadedFile('report.pdf', 'application/pdf')).rejects.toThrow('No activity found');
+  });
+
+  test('rejects rather than sharing a broken URL when the download location is a custom SAF tree', async () => {
+    const treeUri = 'content://com.android.externalstorage.documents/tree/primary%3APhotos';
+    await DownloadLocationManager.setLocation({ mode: 'custom', treeUri, displayName: 'Photos' });
+    (SafX.stat as jest.Mock).mockResolvedValueOnce({ uri: `${treeUri}/report.pdf` });
+
+    await expect(shareDownloadedFile('report.pdf', 'application/pdf')).rejects.toThrow(/not available to share/);
+    expect(Share.open).not.toHaveBeenCalled();
+
+    await DownloadLocationManager.resetToDefault();
   });
 });
 

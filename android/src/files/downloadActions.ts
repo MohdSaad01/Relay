@@ -17,18 +17,27 @@
  * conversion (FileProvider) a raw file:// path can no longer cross to
  * another app on modern Android.
  *
- * Deliberately not implemented: a true "Share" action (Android's
- * ACTION_SEND, e.g. handing the file to a messaging app). Investigated and
- * found unsupported by anything already in this codebase -- React Native's
- * built-in Share module discards its `url` field entirely on Android (see
- * node_modules/react-native/Libraries/Share/Share.js: only `title`/
- * `message` are passed to the native side), and react-native-blob-util only
- * exposes actionViewIntent (ACTION_VIEW, "open with", not "share to").
- * Adding real sharing would mean a new native dependency, which is outside
- * this UX-polish milestone's scope (CLAUDE.md Rule 2).
+ * "Share" (P22, New_Issues.txt §12 — Android's ACTION_SEND, handing the file
+ * to another app) is a different intent shape neither of the above covers:
+ * investigated and confirmed unsupported by anything already in this
+ * codebase — React Native's built-in Share module discards its `url` field
+ * entirely on Android (node_modules/react-native/Libraries/Share/Share.js:
+ * only `title`/`message` reach the native side), and react-native-blob-util
+ * only exposes actionViewIntent (ACTION_VIEW, "open with," not "share to").
+ * `react-native-share` was added for this one purpose (CLAUDE.md Rule 2 —
+ * the alternative was writing and maintaining our own ACTION_SEND intent/
+ * FileProvider code); its own native module resolves `file://` paths via its
+ * bundled FileProvider and calls `startActivityForResult` against the actual
+ * foreground `Activity` (`reactContext.getCurrentActivity()`), so it doesn't
+ * need the `isNewTask` flag react-native-blob-util's actionViewIntent has to
+ * work around above (that library calls `startActivity` on the bare
+ * `ReactApplicationContext` instead — see this file's own actionViewIntent
+ * doc comment for the crash that caused, and docs/15_QA_NOTEBOOK.md's
+ * Milestone P9.1 entry).
  */
 
 import ReactNativeBlobUtil from 'react-native-blob-util';
+import Share from 'react-native-share';
 import { downloadedFilePath, downloadedFolderContentUri } from './downloadExistence';
 
 const DEFAULT_MIME_TYPE = 'application/octet-stream';
@@ -96,4 +105,37 @@ export async function openDownloadedFolder(folderName: string): Promise<void> {
     throw new Error('This folder is not available to open.');
   }
   await ReactNativeBlobUtil.android.actionViewIntent(folderUri, DIRECTORY_MIME_TYPE, undefined);
+}
+
+/**
+ * "Share" action (P22, New_Issues.txt §12) for a completed file download —
+ * hands the file to another installed app (messaging, email, ...) via
+ * Android's ACTION_SEND, offered only for files (not folders: there is no
+ * single-file-shaped intent for "share a whole directory," and this
+ * codebase already keeps file-only vs. folder-only actions intentionally
+ * separate rather than forcing one to fit the other — see FilesScreen's own
+ * per-kind menu-action lists).
+ *
+ * `downloadedFilePath` returns a bare filesystem path in the default
+ * (MediaStore) download location, or a `content://` URI in a custom SAF
+ * location (P14.3). Only the former is handed to Share.open here:
+ * react-native-share's own URL handling (RNSharePathUtil.compatUriFromFile)
+ * re-wraps a `file://` path through its bundled FileProvider correctly, but
+ * mishandles an already-`content://` URL (it re-parses it as a bare file
+ * path before rewrapping, silently losing the `content://` scheme) — a
+ * confirmed library limitation, not something this codebase can fix without
+ * patching node_modules. A custom-SAF-mode file's Share action reports that
+ * plainly instead of invoking a broken share.
+ */
+export async function shareDownloadedFile(fileName: string, mimeType: string | null): Promise<void> {
+  const path = await downloadedFilePath(fileName);
+  if (path.startsWith('content://')) {
+    throw new Error('This file is not available to share.');
+  }
+  await Share.open({
+    url: `file://${path}`,
+    type: mimeType || DEFAULT_MIME_TYPE,
+    filename: fileName,
+    failOnCancel: false,
+  });
 }

@@ -26,6 +26,7 @@
     "react-native-saf-x": "^2.2.3",
     "react-native-safe-area-context": "^5.5.2",
     "react-native-screens": "^4.26.2",
+    "react-native-share": "^12.3.1",
     "react-native-udp": "^4.1.7"
   },
   "devDependencies": {

@@ -18,6 +18,19 @@ export interface FileActionMenuAction {
   key: string;
   label: string;
   onPress: () => void;
+  /**
+   * P22: renders this action's label in the same danger color
+   * TransferProgressDetail's own Cancel button already uses
+   * (detailStyles.dangerButtonText's `#dc2626`) — a destructive action
+   * (Delete) should read as visually distinct from a neutral one (Open,
+   * Share, Details), matching New_Issues.txt §16's "clear action buttons"/
+   * "clear action hierarchy" goal. "Remove" is deliberately not marked
+   * destructive: it either dismisses a not-yet-downloaded row (nothing is
+   * destroyed — the item is still shared and can be re-shown) or cancels an
+   * in-flight download, neither of which discards content the way Delete
+   * does.
+   */
+  destructive?: boolean;
 }
 
 interface FileActionMenuProps {
@@ -55,7 +68,7 @@ export function FileActionMenu({ visible, title, subtitle, actions, onClose }: F
               accessibilityRole="button"
               accessibilityLabel={action.label}
             >
-              <Text style={styles.actionLabel}>{action.label}</Text>
+              <Text style={[styles.actionLabel, action.destructive && styles.actionLabelDestructive]}>{action.label}</Text>
             </Pressable>
           ))}
         </Pressable>
@@ -97,5 +110,10 @@ const styles = StyleSheet.create({
   actionLabel: {
     fontSize: 16,
     color: '#2563eb',
+  },
+  // Matches TransferProgressDetail's own dangerButtonText color — see
+  // FileActionMenuAction.destructive's own doc comment.
+  actionLabelDestructive: {
+    color: '#dc2626',
   },
 });

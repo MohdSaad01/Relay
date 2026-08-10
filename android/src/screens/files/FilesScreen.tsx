@@ -15,16 +15,18 @@ import { useSharedFolders } from '../../files/useSharedFolders';
 import { useFolderFilesMap } from '../../files/useFolderFilesMap';
 import { useFolderReconciliation } from '../../files/useFolderReconciliation';
 import { useFileIdentity } from '../../files/useFileIdentity';
+import { useRemovedItems } from '../../files/useRemovedItems';
 import { deriveDownloadStatus, FileDownloadStatus, latestSendTransferId } from '../../files/downloadStatus';
 import { deriveFolderDownloadStatus, FolderDownloadStatus, isFolderChildReconciled } from '../../files/folderDownloadStatus';
 import { useDownloadExistence } from '../../files/useDownloadExistence';
 import { deleteDownloadedPath, downloadedFileExists } from '../../files/downloadExistence';
 import { markFolderReconciled, resolveLocalFolderRoot } from '../../files/folderIdentity';
-import { openDownloadedFile, openDownloadedFolder } from '../../files/downloadActions';
+import { openDownloadedFile, openDownloadedFolder, shareDownloadedFile } from '../../files/downloadActions';
+import { fileMetaLine, folderMetaLine } from '../../files/metadataFormat';
 import { useTransferRequests } from '../../transfers/useTransferRequests';
 import { useTransfers } from '../../transfers/useTransfers';
 import { getFolderFiles } from '../../api/endpoints/folders';
-import { getTransfer, proposeTransfer } from '../../api/endpoints/transfers';
+import { cancelTransfer, getTransfer, proposeTransfer } from '../../api/endpoints/transfers';
 import { ApiError } from '../../api/client';
 import {
   AvailableFileResponse,
@@ -254,6 +256,7 @@ export function FilesScreen() {
   const folderFilesMap = useFolderFilesMap(folders);
   const { reconciledByFolderId, localRootByFolderId, refresh: refreshReconciliation } = useFolderReconciliation(folders);
   const { localNameByFileId, refresh: refreshFileIdentity } = useFileIdentity(files);
+  const { removedFileIds, removedFolderIds, removeFile, removeFolder } = useRemovedItems(files, folders);
   const { requests, refresh: refreshRequests } = useTransferRequests();
   const { transfers, refresh: refreshTransfers } = useTransfers();
   const { existence, verify } = useDownloadExistence();
@@ -480,18 +483,96 @@ export function FilesScreen() {
 
   // P14.1: the long-press menu's Details action for a file — surfaces only
   // metadata Relay already has (no new backend/API call), matching the
-  // milestone's "use-existing-system" scope.
+  // milestone's "use-existing-system" scope. P22: no longer shows the raw
+  // MIME type — see metadataFormat.ts's own doc comment for why that's
+  // redundant with a file's own extension for a normal user.
   const handleFileDetails = useCallback((file: AvailableFileResponse, state: { status: FileDownloadStatus; queued: boolean }) => {
     Alert.alert(
       file.file_name,
       [
         `Size: ${formatFileSize(file.file_size)}`,
-        `Type: ${file.mime_type ?? 'Unknown'}`,
         `Shared: ${new Date(file.shared_at).toLocaleString()}`,
         `Status: ${describeStatus(state.status.kind, state.queued)}`,
       ].join('\n'),
     );
   }, []);
+
+  // P22 (New_Issues.txt §12): "Share" for a completed file download — hands
+  // it to another app via shareDownloadedFile's ACTION_SEND. See that
+  // function's own doc comment for why this is file-only, not offered for
+  // folders.
+  const handleShareFile = useCallback(
+    async (file: AvailableFileResponse) => {
+      try {
+        await shareDownloadedFile(localFileName(file, localNameByFileId), file.mime_type);
+      } catch (err) {
+        Alert.alert('Could not share this file', err instanceof Error ? err.message : 'Please try again.');
+      }
+    },
+    [localNameByFileId],
+  );
+
+  // P22: "Delete" for a completed file download — removes the on-device
+  // copy only (the shared_files row on the desktop, and the desktop's own
+  // local copy, are untouched; Android never owned that decision — see
+  // CLAUDE.md's Desktop Files/Transfers Conventions precedent for the same
+  // send/receive-direction distinction applied the other way on Desktop).
+  // Re-verifies existence afterward so the row immediately downgrades to a
+  // re-downloadable 'idle' state instead of waiting for the next poll tick,
+  // matching handleOpen's own re-verify-on-failure precedent.
+  const handleDeleteFile = useCallback(
+    (file: AvailableFileResponse) => {
+      Alert.alert(
+        'Delete file?',
+        `"${file.file_name}" will be removed from this device. You can download it again from the desktop.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: async () => {
+              const name = localFileName(file, localNameByFileId);
+              await deleteDownloadedPath(name);
+              await verify(name);
+            },
+          },
+        ],
+      );
+    },
+    [localNameByFileId, verify],
+  );
+
+  // P22: "Remove" for a file with no downloaded content of its own — its
+  // exact behavior depends on the row's current state (New_Issues.txt §12's
+  // own "appropriate to the current transfer state" instruction): a
+  // pending/in_progress download is genuinely operational, so Remove cancels
+  // it (byte-for-byte the same active-vs-not branch
+  // TransferProgressDetail.handleCancel already uses for the Transfers tab's
+  // own Cancel action — reused rather than reinvented); an idle or failed
+  // row has nothing running to cancel, so Remove instead dismisses the row
+  // from this screen via removedItems.ts's local marker.
+  const handleRemoveFile = useCallback(
+    async (file: AvailableFileResponse, status: FileDownloadStatus) => {
+      if (status.kind === 'pending' || status.kind === 'in_progress') {
+        const transferId = latestSendTransferId(file.id, transfers);
+        try {
+          if (transferId != null) {
+            if (TransferStreamManager.isActive(transferId)) {
+              await TransferStreamManager.cancelActive();
+            } else {
+              await cancelTransfer(transferId);
+            }
+          }
+          await Promise.all([refreshRequests(), refreshTransfers()]);
+        } catch (err) {
+          Alert.alert('Could not remove this download', err instanceof ApiError ? err.message : 'Please try again.');
+        }
+        return;
+      }
+      await removeFile(file);
+    },
+    [transfers, refreshRequests, refreshTransfers, removeFile],
+  );
 
   /**
    * Enumerates a shared folder's children (GET /folders/{id}/files, always
@@ -681,6 +762,71 @@ export function FilesScreen() {
     [],
   );
 
+  // P22: "Delete" for a completed folder download — mirrors handleDeleteFile
+  // exactly, deleting the folder's resolved on-device root directory
+  // (folderIdentity.ts's localRoot) recursively via the same
+  // deleteDownloadedPath used for a single file's relative path (its
+  // underlying fs.unlink/safUnlink both already delete a directory
+  // recursively — see downloadExistence.ts).
+  const handleDeleteFolder = useCallback(
+    (folder: AvailableFolderResponse) => {
+      Alert.alert(
+        'Delete folder?',
+        `"${folder.folder_name}" and everything inside it will be removed from this device. You can download it again from the desktop.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: async () => {
+              const localRoot = await resolveLocalFolderRoot(folder.id, folder.folder_name, folder.shared_at);
+              await deleteDownloadedPath(localRoot);
+              await verifyFolderExists(localRoot);
+            },
+          },
+        ],
+      );
+    },
+    [verifyFolderExists],
+  );
+
+  // P22: "Remove" for a folder with no downloaded content of its own —
+  // mirrors handleRemoveFile's per-state branch exactly. An in_progress
+  // folder cancels every child currently pending/in_progress (not just the
+  // one actively streaming — the rest are genuinely queued behind it, see
+  // TransferStreamManager's own doc comment on its FIFO), each via the same
+  // active-vs-not branch as a single file's Remove; an idle or failed folder
+  // instead dismisses the row via removedItems.ts.
+  const handleRemoveFolder = useCallback(
+    async (folder: AvailableFolderResponse, children: AvailableFolderFileResponse[], status: FolderDownloadStatus) => {
+      if (status.kind === 'in_progress') {
+        try {
+          for (const child of children) {
+            const childStatus = deriveDownloadStatus(child.id, requests, transfers);
+            if (childStatus.kind !== 'pending' && childStatus.kind !== 'in_progress') {
+              continue;
+            }
+            const transferId = latestSendTransferId(child.id, transfers);
+            if (transferId == null) {
+              continue;
+            }
+            if (TransferStreamManager.isActive(transferId)) {
+              await TransferStreamManager.cancelActive();
+            } else {
+              await cancelTransfer(transferId);
+            }
+          }
+          await Promise.all([refreshRequests(), refreshTransfers()]);
+        } catch (err) {
+          Alert.alert('Could not remove this download', err instanceof ApiError ? err.message : 'Please try again.');
+        }
+        return;
+      }
+      await removeFolder(folder);
+    },
+    [requests, transfers, refreshRequests, refreshTransfers, removeFolder],
+  );
+
   if (loading || foldersLoading) {
     return (
       <View style={styles.center}>
@@ -689,9 +835,13 @@ export function FilesScreen() {
     );
   }
 
+  // P22: a locally "Removed" (removedItems.ts) file/folder is filtered out
+  // of the list entirely — see useRemovedItems's own doc comment for why
+  // this is a client-local dismissal rather than anything the backend
+  // knows about.
   const items: SharedItem[] = [
-    ...files.map(file => ({ kind: 'file' as const, data: file })),
-    ...folders.map(folder => ({ kind: 'folder' as const, data: folder })),
+    ...files.filter(file => !removedFileIds.has(file.id)).map(file => ({ kind: 'file' as const, data: file })),
+    ...folders.filter(folder => !removedFolderIds.has(folder.id)).map(folder => ({ kind: 'folder' as const, data: folder })),
   ].sort((a, b) => new Date(b.data.shared_at).getTime() - new Date(a.data.shared_at).getTime());
 
   // P14.1: resolves the long-press menu's content from the *current* files/
@@ -710,15 +860,31 @@ export function FilesScreen() {
   let menuSubtitle: string | undefined;
   let menuActions: FileActionMenuAction[] = [];
 
+  // P22 (New_Issues.txt §12): a row's action set depends on its current
+  // state — computeFileRowState/computeFolderRowState are the same
+  // always-current derivation FileRow/FolderRow render from (see their own
+  // doc comment on why the menu reads off these live instead of a snapshot
+  // taken at long-press time), so the menu can't go stale while it's open.
+  // 'completed': Open, Share (file only), Delete, Details. Any other state
+  // ('idle'/'pending'/'in_progress'/'failed'): Remove, Details — Remove's
+  // own behavior (cancel vs. dismiss) is decided per-state inside
+  // handleRemoveFile/handleRemoveFolder, not here.
   if (menuFile) {
     const fileState = computeFileRowState(menuFile, requests, transfers, existence, localNameByFileId);
     const canOpen = fileState.status.kind === 'completed';
     menuTitle = menuFile.file_name;
-    menuSubtitle = `${formatFileSize(menuFile.file_size)}${menuFile.mime_type ? ` · ${menuFile.mime_type}` : ''}`;
-    menuActions = [
-      ...(canOpen ? [{ key: 'open', label: 'Open', onPress: () => { closeMenu(); handleOpen(menuFile); } }] : []),
-      { key: 'details', label: 'Details', onPress: () => { closeMenu(); handleFileDetails(menuFile, fileState); } },
-    ];
+    menuSubtitle = fileMetaLine(menuFile);
+    menuActions = canOpen
+      ? [
+          { key: 'open', label: 'Open', onPress: () => { closeMenu(); handleOpen(menuFile); } },
+          { key: 'share', label: 'Share', onPress: () => { closeMenu(); handleShareFile(menuFile); } },
+          { key: 'delete', label: 'Delete', destructive: true, onPress: () => { closeMenu(); handleDeleteFile(menuFile); } },
+          { key: 'details', label: 'Details', onPress: () => { closeMenu(); handleFileDetails(menuFile, fileState); } },
+        ]
+      : [
+          { key: 'remove', label: 'Remove', onPress: () => { closeMenu(); handleRemoveFile(menuFile, fileState.status); } },
+          { key: 'details', label: 'Details', onPress: () => { closeMenu(); handleFileDetails(menuFile, fileState); } },
+        ];
   } else if (menuFolder) {
     const children = folderFilesMap[menuFolder.id] ?? [];
     const folderState = computeFolderRowState(
@@ -730,19 +896,21 @@ export function FilesScreen() {
     );
     const canOpen = folderState.status.kind === 'completed';
     menuTitle = `\u{1F4C1} ${menuFolder.folder_name}`;
-    const itemLabel = `${menuFolder.file_count} item${menuFolder.file_count === 1 ? '' : 's'}`;
-    menuSubtitle = `${itemLabel} · ${formatFileSize(menuFolder.total_size)}`;
-    menuActions = [
-      ...(canOpen ? [{ key: 'open', label: 'Open', onPress: () => { closeMenu(); handleOpenFolder(menuFolder); } }] : []),
-      {
-        key: 'details',
-        label: 'Details',
-        onPress: () => {
-          closeMenu();
-          handleFolderDetails(menuFolder, folderState);
-        },
-      },
-    ];
+    menuSubtitle = folderMetaLine(menuFolder);
+    menuActions = canOpen
+      ? [
+          { key: 'open', label: 'Open', onPress: () => { closeMenu(); handleOpenFolder(menuFolder); } },
+          { key: 'delete', label: 'Delete', destructive: true, onPress: () => { closeMenu(); handleDeleteFolder(menuFolder); } },
+          { key: 'details', label: 'Details', onPress: () => { closeMenu(); handleFolderDetails(menuFolder, folderState); } },
+        ]
+      : [
+          {
+            key: 'remove',
+            label: 'Remove',
+            onPress: () => { closeMenu(); handleRemoveFolder(menuFolder, children, folderState.status); },
+          },
+          { key: 'details', label: 'Details', onPress: () => { closeMenu(); handleFolderDetails(menuFolder, folderState); } },
+        ];
   }
 
   return (
@@ -924,10 +1092,7 @@ function FileRow({
         <Text style={styles.name} numberOfLines={1}>
           {file.file_name}
         </Text>
-        <Text style={styles.meta}>
-          {formatFileSize(file.file_size)}
-          {file.mime_type ? ` · ${file.mime_type}` : ''}
-        </Text>
+        <Text style={styles.meta}>{fileMetaLine(file)}</Text>
         {errorMessage && <Text style={styles.rowError}>{errorMessage}</Text>}
       </View>
       {canOpen ? (
@@ -965,7 +1130,6 @@ function FolderRow({
   onLongPress: () => void;
 }) {
   const disabled = requesting || status.kind === 'in_progress';
-  const itemLabel = `${folder.file_count} item${folder.file_count === 1 ? '' : 's'}`;
   // P13.1 (Issue 2): a fully-downloaded folder offers "Open" exactly like a
   // completed file's canOpen/onOpen (FileRow above) — status.kind only ever
   // reports 'completed' once every child has (deriveFolderDownloadStatus).
@@ -987,9 +1151,7 @@ function FolderRow({
         <Text style={styles.name} numberOfLines={1}>
           {'\u{1F4C1}'} {folder.folder_name}
         </Text>
-        <Text style={styles.meta}>
-          {itemLabel} · {formatFileSize(folder.total_size)}
-        </Text>
+        <Text style={styles.meta}>{folderMetaLine(folder)}</Text>
         {errorMessage && <Text style={styles.rowError}>{errorMessage}</Text>}
       </View>
       {canOpen ? (

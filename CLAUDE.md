@@ -229,6 +229,70 @@ must instead *present* those child transfers as one user-level operation:
   `transferGrouping.js`/`renderBatchRow` precedent (P21) for the same
   underlying data.
 
+### Android Files Screen File-Action Conventions (P22)
+
+The Android Files screen's long-press action menu (`FileActionMenu.tsx`,
+P14.1) is state-dependent, not a fixed list: `FilesScreen.tsx` derives a
+different action set per row depending on `computeFileRowState`/
+`computeFolderRowState`'s current status, always read live (never a
+snapshot taken when the menu opened) — see those functions' own doc
+comments. A `completed` row offers Open/Share (file only)/Delete/Details;
+any other state (idle/pending/in_progress/failed) offers Remove/Details.
+Any new file-row action must fit this same per-state shape rather than
+being unconditionally offered.
+
+**"Remove" is not one operation** — it means whatever is correct for the
+row's current backend state, decided inside `handleRemoveFile`/
+`handleRemoveFolder`, not by the menu construction itself:
+- idle/failed (nothing backend-side to act on): dismisses the row from this
+  screen via `removedItems.ts`'s local marker. This is *not* an unshare —
+  the item stays shared on the desktop and reappears if the same
+  `shared_file_id`/`shared_folder_id` is legitimately reused by a later
+  share (the dismissal is gated on the item's `shared_at`, per the P17
+  precedent below).
+- pending/in_progress (a genuinely operational download): cancels it, using
+  the identical active-vs-queued branch `TransferProgressDetail.handleCancel`
+  already uses for the Transfers tab's own per-transfer Cancel action
+  (`TransferStreamManager.isActive`/`cancelActive()` vs. a plain
+  `cancelTransfer()` call). Any future "cancel this download" affordance
+  should reuse this same branch rather than re-deriving it.
+
+**New id-keyed local state must apply the P17 `shared_at` guard**, even
+where an older registry in this codebase (`fileIdentity.ts`) predates that
+convention and was left as an accepted gap. `removedItems.ts` is the
+current reference: it stores the dismissed item's `shared_at` alongside the
+dismissal and only honors it while the live item's own `shared_at` still
+matches, so a reused `shared_file_id`/`shared_folder_id` never inherits a
+dismissal that belonged to a different, already-gone logical item.
+
+**"Delete" (downloaded content only) is always local-only and
+direction-blind on this screen** — Android's Files screen only ever lists
+items it can download (desktop → Android), so unlike Desktop's own Delete
+(P21, which has to distinguish a sent vs. received item), there is no
+"which direction" question here: Delete always means "remove my local
+downloaded copy," never touches the desktop's `SharedFile`/`SharedFolder`
+row, and always confirms via `Alert.alert` first (it discards actual
+bytes, unlike Remove).
+
+**A file's meta line never shows a raw MIME type** — `metadataFormat.ts`'s
+`fileMetaLine`/`folderMetaLine` are the shared source for this (row
+rendering, the long-press menu's subtitle, and the file Details alert all
+read from the same two functions rather than each re-deriving the string).
+A file's own name/extension already conveys its type to a normal user;
+repeating the MIME type is redundant. A folder's line leads with an
+explicit `Folder ·` label instead, since a folder's name carries no such
+information.
+
+**Real Android `ACTION_SEND` sharing requires `react-native-share`** — RN's
+own `Share` module drops its `url` field on Android, and
+`react-native-blob-util` (already a dependency, used for `ACTION_VIEW`
+"Open") only exposes `actionViewIntent`, never `ACTION_SEND`. Its own
+`RNSharePathUtil.compatUriFromFile` mishandles an already-`content://` URL
+(used only when the download location is a custom SAF folder, P14.3) — a
+confirmed library limitation; `downloadActions.ts`'s `shareDownloadedFile`
+detects this and rejects with a plain message instead of invoking a broken
+share.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)

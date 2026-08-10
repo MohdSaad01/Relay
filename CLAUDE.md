@@ -349,6 +349,34 @@ Relay visual identity in the codebase — Desktop has no equivalent icon
 file yet (tracked under Packaging & Deployment); if one is added later, it
 should reuse this same glyph/color rather than inventing a new mark.
 
+### Android Discovery & QR Pairing UX (P24)
+
+**A discovered-but-unpaired item on Android is a tappable card, not a bare
+list row** — `screens/discovery/DiscoveryScreen.tsx`'s discovered-device
+row pairs an icon badge (`components/icons.tsx`'s `DesktopIcon`, tinted
+circle, same stroke-icon language as the P23 tab icons) with a
+`#f5f5f5`/`borderRadius: 12` card, mirroring the card convention
+`SettingsScreen.tsx` already established (P23) rather than a new one. Any
+future Android list of selectable-but-not-yet-connected items should follow
+this same icon-badge-plus-card shape instead of a flat bordered row.
+
+**Tapping a discovered device and the dedicated "Scan QR to Pair" button
+must always resolve to the exact same `QrScanScreen` instance/behavior** —
+never a second scanner or a duplicated pairing implementation. A tapped
+device is only ever passed through as an optional route param
+(`QrScan`'s `device`), used solely for `qrPayload.ts`'s
+`matchesSelectedDesktop` best-effort mismatch check; it must never branch
+into different scanning/pairing code. This was already established by
+`9c84f4d`/P14.2 and confirmed unchanged in P24 — preserve it in any future
+pairing-entry-point work.
+
+**Discovery structurally cannot show an "already paired" row** —
+`RootNavigator.tsx` swaps the entire root stack to `MainTabs` the instant
+pairing succeeds, so `DiscoveryScreen` never renders while a session
+exists. Do not add paired-state handling to the discovered-device row; the
+correct fix for any future "why doesn't this distinguish paired devices"
+question is this structural fact, not new UI.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)

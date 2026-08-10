@@ -56,6 +56,23 @@ export function TransferIcon({ color, size }: IconProps) {
   );
 }
 
+/** Discovered-device row: a desktop monitor, for a discovered desktop. */
+export function DesktopIcon({ color, size }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M4 5.5C4 4.67 4.67 4 5.5 4H18.5C19.33 4 20 4.67 20 5.5V13.5C20 14.33 19.33 15 18.5 15H5.5C4.67 15 4 14.33 4 13.5V5.5Z"
+        stroke={color}
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <Line x1="9" y1="19" x2="15" y2="19" stroke={color} strokeWidth={2} strokeLinecap="round" />
+      <Line x1="12" y1="15" x2="12" y2="19" stroke={color} strokeWidth={2} strokeLinecap="round" />
+    </Svg>
+  );
+}
+
 /** Settings tab: three preference sliders. */
 export function SlidersIcon({ color, size }: IconProps) {
   return (

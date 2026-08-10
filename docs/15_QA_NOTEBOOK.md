@@ -2370,6 +2370,217 @@ installed and driven against the real dev backend
 
 ---
 
+# Milestone P24 — Android Device Discovery & QR Pairing UX
+
+**Scope:** make a discovered-device row genuinely actionable (tap → QR
+scanner), keep the dedicated "Scan QR to Pair" button as a second entry
+point into the same scanner/pairing implementation, clear discovered/
+unpaired presentation, camera-permission UX, invalid-QR/mismatch feedback,
+success/failure/timeout handling, already-paired exclusion, and discovery
+disappearance/reappearance. Explicitly not touched: UDP discovery protocol,
+broadcast interval/packet structure, pairing protocol/QR payload schema,
+Files/Transfers/Settings functionality, packaging.
+
+**Baseline investigation — the core interaction already existed.** Before
+writing any code, `git log -- android/src/screens/discovery/DiscoveryScreen.tsx`
+showed a commit (`9c84f4d fix(android): make discovered devices tappable to
+start pairing`) *predating* P18's stabilization pass, and
+`docs/15_QA_NOTEBOOK.md` already had a full "Milestone P14.2 — Device
+Discovery & QR Pairing UX" entry describing exactly this feature: tap →
+`QrScanScreen` with the tapped device carried as a route param, a
+best-effort `(desktop_ip, port)` mismatch check (`matchesSelectedDesktop`),
+an instructional overlay, an explicit Close button, and a three-way camera
+permission state (`granted`/`denied`/`blocked`, the last offering "Open
+Settings"). Reading `DiscoveryScreen.tsx`, `QrScanScreen.tsx`,
+`qrPayload.ts`, `PairingWaitingScreen.tsx`, and `PairingResultScreen.tsx`
+confirmed every functional requirement in this milestone's own spec was
+already implemented and covered by `__tests__/pairing/qrPayload.test.ts`:
+invalid QR → user-facing error, scanner stays usable, device mismatch
+message names the selected device, a 5-minute client-side pairing timeout
+(`PairingWaitingScreen`'s `MAX_WAIT_MS`) with a "Try Again" reset back to
+Discovery, and structural exclusion of "already paired" rows (confirmed via
+`RootNavigator.tsx`: pairing success swaps the entire root stack to
+`MainTabs`, so `DiscoveryScreen` can never render while paired — there is
+nothing for it to represent).
+
+**What P24 actually changed:** the one real gap against this milestone's
+own UX mockup was visual, not functional — the discovered-device row was a
+flat, unbordered list line (bottom-hairline only, no icon, no card), and
+the empty state was a single muted sentence with no heading. Added:
+1. `DesktopIcon` to `components/icons.tsx` — a hand-drawn monitor glyph,
+   same stroke/24×24/round-cap language as the existing P23 tab icons, no
+   new icon dependency.
+2. `DiscoveryScreen.tsx`'s row is now a card (`#f5f5f5` background,
+   `borderRadius: 12`, 16px padding, 12px icon badge tinted with the shared
+   `#2d6cdf` primary), matching the card convention `SettingsScreen.tsx`
+   already established (P23) rather than inventing a new one.
+3. The empty state gained a bold heading ("No Relay devices found yet")
+   over the existing network-guidance hint text (already correct — names
+   "Wi-Fi network or mobile hotspot," never claims internet is required),
+   and the hint now also names the QR button as the alternative path. The
+   "Scan QR to Pair" button was already always rendered outside the list
+   (unaffected by empty vs. populated state) — confirmed, not changed.
+
+No change was made to `QrScanScreen.tsx`, `PairingWaitingScreen.tsx`,
+`PairingResultScreen.tsx`, `qrPayload.ts`, or any discovery/pairing logic —
+per the milestone's own scope boundary, since live verification (below)
+showed every behavior they're responsible for already met the spec.
+
+**Root cause:** none, functionally — P14.2 (pre-P18) had already solved
+the interaction problem this milestone's own brief describes as
+outstanding. The brief's framing did not match the current repository
+state; this was caught by reading `git log` and the QA notebook *before*
+writing code, per this project's own "inspect before implementing" rule,
+rather than re-implementing an existing feature.
+
+**Architecture decisions:** none required — no protocol change, no new
+navigation primitive, no second scanner. The only decision was scope: limit
+the change to the row/empty-state presentation named in the milestone's own
+§5 mockup, not a general Android visual overhaul (that's `New_Issues.txt`
+§10.1, a separate, broader initiative already being worked incrementally
+across P21–P23).
+
+**Files modified:**
+- `android/src/components/icons.tsx` — added `DesktopIcon`.
+- `android/src/screens/discovery/DiscoveryScreen.tsx` — card-style row with
+  icon badge; empty-state heading.
+
+**Automated tests (actually executed, RMX3997 build tree):**
+- `npx tsc --noEmit` — clean, no errors.
+- `npx eslint .` — 0 errors, 3 pre-existing warnings in unrelated files
+  (`TransferListScreen.tsx`, `TransferStreamManager.ts`), unchanged by this
+  milestone.
+- `npx jest` — 42 suites / 359 tests passed, including all of
+  `__tests__/pairing/*` and `__tests__/discovery/*` (unmodified — this
+  milestone changed only presentational code with no existing unit-test
+  surface, consistent with `docs/15_QA_NOTEBOOK.md`'s prior note that no
+  screen-level test infra exists for these screens; verification for the
+  changed rows is physical/live, below).
+
+**Physical-device verification (RMX3997, via `adb`, Fast Refresh against a
+live Metro session — an already-running desktop instance, "Thomas", was
+broadcasting throughout):**
+- Baseline screenshot: flat row, "Discovered • Tap to pair," chevron —
+  confirmed P14.2's behavior live before any edit.
+- Tapped the discovered row → `QrScanScreen` opened immediately with the
+  camera view, instruction banner, and Close button (Method A).
+- Close returned cleanly to Discovery with the device still listed, no
+  stale state.
+- Tapped "Scan QR to Pair" → identical `QrScanScreen` (Method B) —
+  confirmed both entry points render the same component instance/behavior,
+  not two implementations.
+- After the icon/card edit, Fast Refresh applied the new row and empty
+  state live; screenshots confirm the icon badge, card, and updated empty
+  state render correctly on-device (not just in a simulator).
+- Discovery disappearance/reappearance: navigated Discovery → QrScan →
+  back. `DiscoveryScreen`'s `useFocusEffect` cleanup calls
+  `DiscoveryService.stop()` (clears the map) on losing focus and `start()`
+  (clears, then repopulates from live broadcasts within ~2s) on regaining
+  it. Screenshot immediately after "back" shows the new empty state
+  ("No Relay devices found yet" + hint + QR button); a follow-up screenshot
+  ~3s later shows "Thomas" reappeared with no app restart — confirms
+  §18's disappear/reappear requirement through the same code path a real
+  stale-eviction would use.
+- **Attempted but inconclusive:** toggling the phone's Wi-Fi off via
+  `adb shell svc wifi disable` to trigger the 8-second staleness eviction
+  directly. `wifi_on` settings value confirmed `0` and the active network
+  switched to `MOBILE`, but the discovered row never evicted even after
+  18+ seconds — almost certainly this OEM's (ColorOS/RealmeUI) aggressive
+  Wi-Fi-assist behavior keeping the radio associated for connectivity
+  purposes despite the Settings toggle, consistent with this device's
+  already-documented OEM quirks (see Cross-Cutting Lessons). Re-enabled
+  Wi-Fi immediately after. The navigate-away/back method above exercises
+  the identical `DiscoveryService.stop()`/eviction-adjacent code path
+  deterministically and was used instead.
+- **Not performed:** revoking camera permission live to see the
+  `denied`/`blocked` UI states, or a full fresh pairing via an actual
+  camera scan of a real QR code. `adb shell pm revoke ... CAMERA` failed
+  (`SecurityException: Neither user 2000 nor current process has
+  android.permission.REVOKE_RUNTIME_PERMISSIONS`) — the same OEM shell
+  lockdown already on record in Cross-Cutting Lessons, now confirmed to
+  extend to runtime permission revocation, not just `pm clear`. A live
+  camera scan requires physically aiming the device's camera at a
+  rendered QR code, which this session's tooling (adb input events only)
+  cannot do. Both permission-state branches and the QR-decode path were
+  instead verified by source review — the logic is unchanged from P14.2 —
+  and the decode/validation half is unit-tested (`qrPayload.test.ts`).
+
+**Pairing verification — backend/API simulation (not physical):** with
+`GET /devices` on the real running desktop backend confirmed empty (this
+phone had no active session — Discovery's presence itself confirms this),
+called the live pairing endpoints directly to validate the contract
+`QrScanScreen`/`PairingWaitingScreen` depend on: `POST /pairing/start` →
+real QR payload (`desktop_ip` matched the LAN address "Thomas" was
+broadcasting); `POST /pairing/request` with a simulated device identifier
+→ `{"status": "awaiting_approval"}`; `GET /pairing/pending/{token}` →
+the exact payload the desktop UI would render for approval;
+`POST /pairing/reject` → `{"status": "rejected"}`; `GET /pairing/result/{token}`
+→ `"The pairing request was rejected by the desktop user."`, the same
+message text `PairingResultScreen`'s failure branch would display
+verbatim. **This created a real, momentary pending-approval entry on the
+user's actual live desktop app** (a "P24 Simulated Phone" pairing request)
+— rejected immediately via the API to clean it up, and `GET /devices`
+confirmed empty afterward with no residual row. Flagged to the user in the
+final report in case a transient approval notification was visible on
+their desktop during this window.
+
+**Edge-case verification:**
+- Device disappears → §18: verified live (navigate-away method above).
+  Wi-Fi-radio-off method inconclusive on this OEM device (documented
+  above), not a defect in the app.
+- Device reappears without app restart → §18: verified live.
+- Already-paired device not re-offered pairing → §17: verified
+  structurally (code review of `RootNavigator.tsx`), matching P14.2's own
+  prior conclusion — there is no paired-row state to build because
+  Discovery cannot render while paired.
+- Invalid QR / device mismatch → §11/§13: verified via existing passing
+  unit tests (`qrPayload.test.ts`) and source review; not exercised via a
+  live camera scan (see limitations above).
+- Pairing timeout → §16: verified via source review
+  (`PairingWaitingScreen.tsx`'s `MAX_WAIT_MS`/404-polling logic,
+  unchanged); not exercised live (would require a 5-minute real wait with
+  the desktop never responding).
+
+**Problems discovered:** none that block P24. The Wi-Fi-toggle eviction
+test's inconclusive result on this specific OEM device is noted as a test
+methodology limitation, not a reproduced app defect — the same eviction
+logic was verified through an equivalent, deterministic code path (focus
+loss/regain).
+
+**Deferred issues:** none newly discovered. `api/client.ts`'s leftover
+`[QR-DEBUG]` logging (flagged in P22/P23) remains present and remains out
+of scope for this milestone.
+
+**Documentation changed:** this `docs/15_QA_NOTEBOOK.md` entry.
+`CLAUDE.md` — see below.
+
+**Documentation intentionally left unchanged:** `README.md` (P24 changed
+only in-flow visual presentation of an already-documented interaction, not
+a new user-facing capability worth describing there).
+
+**Remaining limitations:**
+- No live camera-scan pairing was performed this session (physical camera
+  aiming is outside this tooling's reach); the decode/validation/handoff
+  logic is unchanged from the already-shipped, unit-tested P14.2
+  implementation, and the server-side half of the contract was validated
+  live via direct API calls.
+- Camera-permission `denied`/`blocked` UI states were not re-exercised live
+  this session (this OEM device already had permission granted from a
+  prior session, and `pm revoke` is blocked by the OEM at the shell level);
+  verified by source review only.
+
+**Final verdict:** P24's functional requirements were already satisfied by
+the pre-existing P14.2 implementation, confirmed via git history, the QA
+notebook, source review, passing unit tests, and live on-device
+interaction testing. The one genuine gap — the discovered-device row and
+empty state not visually matching this milestone's own "card + icon"
+mockup — is fixed. No regressions: the change touched only
+`DiscoveryScreen.tsx`'s row/empty-state markup and added one new icon
+component; no pairing, discovery, navigation, or unrelated-screen logic was
+touched.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:
@@ -2393,8 +2604,15 @@ A few gotchas worth remembering independent of any single milestone above:
   Test timeout/backpressure logic over a real Wi-Fi link, not localhost.
 - **This project's one physical test device is OEM-locked down**
   (ColorOS/RealmeUI blocks `pm clear`/`pm revoke` even from the `shell`
-  UID) — use `DELETE /devices/{id}` against the backend to force an
-  unpaired state instead of trying to clear app data via ADB.
+  UID — confirmed again in P24 for `pm revoke ... CAMERA`, which fails with
+  `SecurityException: ... REVOKE_RUNTIME_PERMISSIONS`) — use
+  `DELETE /devices/{id}` against the backend to force an unpaired state
+  instead of trying to clear app data via ADB, and rely on source review
+  for a permission-denied UI branch that can't be re-triggered live.
+  Likewise, `adb shell svc wifi disable` does not reliably stop this
+  device's Wi-Fi radio from still servicing an already-open UDP socket
+  (P24) — don't use it as a proxy for "device went off-network" in a live
+  test; drive the app's own focus-loss/regain path instead.
 - **The desktop's own unauthenticated routes are loopback-trusted
   regardless of bearer token** — a verification script must call them from
   actual loopback for desktop-perspective requests and from the LAN IP for

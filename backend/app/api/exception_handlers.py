@@ -1,7 +1,7 @@
 """Centralized mapping from Service Layer exceptions to HTTP responses.
 
 Keeps route handlers free of repeated try/except blocks (05_API_Design.md
-§17: "keep controllers thin"). Registered on the FastAPI app in main.py.
+§14: "keep controllers thin"). Registered on the FastAPI app in main.py.
 """
 
 import logging

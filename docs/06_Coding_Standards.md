@@ -1,274 +1,178 @@
-# Coding Standards
+# Coding Standards & Development Workflow
 
-Version: 1.0
+Version: 1.0 — consolidated from the former `06_Coding_Standards.md` and
+`07_Development_Workflow.md`, which overlapped heavily (testing, Git
+practice, review checklist, error handling).
 
 ---
 
 # 1. Purpose
 
-This document defines the coding standards for the Relay project.
-
-All generated code should follow these guidelines to ensure consistency, readability, maintainability, and long-term scalability.
+Defines coding standards and the development process for Relay, so all
+generated code and workflow stay consistent, readable, maintainable, and
+scalable long-term. The objective is also to prevent large, unreviewed
+AI-generated changes.
 
 ---
 
 # 2. General Principles
 
-Code should be:
-
-* Readable
-* Simple
-* Consistent
-* Modular
-* Testable
-* Easy to debug
-
-Prefer clarity over cleverness.
+Code should be readable, simple, consistent, modular, testable, and easy
+to debug. Prefer clarity over cleverness.
 
 ---
 
 # 3. Naming Conventions
 
-## Variables
-
-Use descriptive `snake_case` names.
-
-Good examples:
-
-```python
-device_name
-transfer_progress
-shared_files
-```
-
-Avoid:
-
-```python
-x
-tmp
-data1
-```
+* **Variables:** descriptive `snake_case` (`device_name`,
+  `transfer_progress`) — never `x`, `tmp`, `data1`.
+* **Functions:** name describes exactly what it does (`discover_devices()`,
+  `validate_pairing()`).
+* **Classes:** `PascalCase` (`TransferService`, `DeviceRepository`).
+* **Constants:** `UPPER_CASE` (`MAX_FILE_SIZE`, `DEFAULT_PORT`).
 
 ---
 
-## Functions
+# 4. File & Function Design
 
-Function names should describe exactly what they do.
-
-Examples:
-
-```python
-discover_devices()
-start_transfer()
-validate_pairing()
-```
+Each file has a single responsibility; split a file that becomes hard to
+navigate. Functions perform one task, are easy to understand, return
+predictable results, and avoid hidden side effects — break large
+functions into smaller ones.
 
 ---
 
-## Classes
+# 5. Documentation
 
-Use `PascalCase`.
-
-Examples:
-
-```python
-TransferService
-DeviceManager
-FileRepository
-```
+Public classes and functions include docstrings; complex logic is
+explained when necessary. Avoid comments that merely repeat what the code
+already says.
 
 ---
 
-## Constants
+# 6. Error Handling
 
-Use `UPPER_CASE`.
-
-Examples:
-
-```python
-MAX_FILE_SIZE
-DEFAULT_PORT
-API_VERSION
-```
+Never silently ignore exceptions (no bare `except: pass`). Catch specific
+exceptions, log unexpected errors, and return meaningful messages that
+never expose internal implementation details.
 
 ---
 
-# 4. File Organization
+# 7. Type Hints & Formatting
 
-Each file should have a single responsibility.
-
-Avoid large files with unrelated functionality.
-
-If a file becomes difficult to navigate, consider splitting it into smaller modules.
-
----
-
-# 5. Function Design
-
-Functions should:
-
-* Perform one task
-* Be easy to understand
-* Return predictable results
-* Avoid hidden side effects
-
-Large functions should be broken into smaller ones.
+All public functions use Python type hints
+(`def get_device(device_id: str) -> Device:`). Python code follows PEP 8
+and Ruff formatting, four-space indentation. Imports are grouped standard
+library → third-party → local, no wildcard imports.
 
 ---
 
-# 6. Documentation
+# 8. Logging
 
-Public classes and functions should include docstrings.
-
-Complex logic should be explained when necessary.
-
-Avoid comments that merely repeat what the code already says.
+Use the Python `logging` module. Log startup/shutdown, pairing events,
+transfer events, errors, and warnings. Never log passwords, security
+tokens, or sensitive user information.
 
 ---
 
-# 7. Error Handling
+# 9. Duplication & Dependencies
 
-Never silently ignore exceptions.
-
-Avoid:
-
-```python
-try:
-    ...
-except:
-    pass
-```
-
-Instead:
-
-* Catch specific exceptions
-* Log unexpected errors
-* Return meaningful messages
+Reuse or extend existing functionality instead of duplicating logic.
+Before introducing a new dependency, explain why it's needed, what problem
+it solves, alternatives considered, and the trade-offs — avoid unnecessary
+packages.
 
 ---
 
-# 8. Type Hints
+# 10. Testing
 
-All public functions should use Python type hints.
-
-Example:
-
-```python
-def get_device(device_id: str) -> Device:
-```
+New features include appropriate tests; bug fixes include tests when
+practical. Do not merge untested features. If automated tests are added,
+they must pass before a milestone is considered complete.
 
 ---
 
-# 9. Logging
+# 11. Development Philosophy & Milestone Workflow
 
-Use the Python logging module.
+Relay is developed incrementally. Every milestone solves one problem, is
+independently testable, is reviewed before continuing, and ends in a
+stable state — never build multiple major features in one iteration, and
+never begin the next milestone automatically.
 
-Log:
-
-* Startup
-* Shutdown
-* Pairing events
-* Transfer events
-* Errors
-* Warnings
-
-Do not log:
-
-* Passwords
-* Security tokens
-* Sensitive user information
+Each milestone follows the same process: understand the objective →
+inspect the current project structure → implement only the requested
+milestone → explain every created/modified file → provide run instructions
+→ provide a testing checklist → recommend a Git commit message → stop.
 
 ---
 
-# 10. Code Duplication
+# 12. Git Workflow
 
-Avoid duplicate logic.
-
-If functionality already exists, reuse or extend it.
-
----
-
-# 11. Imports
-
-Group imports in this order:
-
-1. Standard library
-2. Third-party packages
-3. Local project imports
-
-Avoid wildcard imports.
+Work in small, focused commits — each representing one logical unit of
+work, avoiding unrelated changes in the same commit. After every
+milestone: review the generated code, verify the project builds, run
+available tests, check documentation is still accurate, and confirm the
+milestone's objectives were achieved before continuing.
 
 ---
 
-# 12. Formatting
+# 13. Documentation Workflow
 
-Python code should follow:
-
-* PEP 8
-* Ruff formatting
-* Four-space indentation
-* Maximum practical readability
+Documentation is part of the project. Whenever architecture, APIs, or
+major implementation details change, update the relevant document, avoid
+leaving it outdated, and keep examples synchronized with the code.
 
 ---
 
-# 13. Testing
+# 14. Introducing New Technologies & Refactoring
 
-New features should include appropriate tests.
-
-Bug fixes should include tests when practical.
-
-Do not merge untested features.
-
----
-
-# 14. Dependencies
-
-Before introducing a new dependency, Claude Code should explain:
-
-* Why it is needed
-* What problem it solves
-* Possible alternatives
-* Trade-offs
-
-Avoid unnecessary packages.
+No significant dependency is introduced without explaining why it's
+needed, what alternatives exist, and its disadvantages. Refactoring
+happens only when it provides a clear benefit (readability, reduced
+duplication, maintainability, performance) and should not change
+observable behavior unless explicitly intended.
 
 ---
 
-# 15. Git Practices
+# 15. Error Resolution
 
-Each milestone should result in:
-
-* Clean code
-* Passing tests
-* Updated documentation
-* A logical Git commit
-
-Avoid unrelated changes in the same commit.
+When an error occurs: identify the root cause, explain it, propose a
+solution, apply the smallest reasonable fix, and verify it. Avoid
+rewriting large sections of working code to solve an isolated issue.
 
 ---
 
-# 16. Review Checklist
+# 16. Communication
 
-Before considering work complete, verify:
-
-* Naming is consistent.
-* Code is readable.
-* No duplicate logic exists.
-* Errors are handled correctly.
-* Types are defined.
-* Documentation is updated.
-* Tests pass.
-* The project builds successfully.
+Claude Code should clearly explain significant decisions, warn about
+potential risks, state assumptions explicitly, and ask for clarification
+when requirements are ambiguous rather than guessing.
 
 ---
 
-# 17. Rules for Claude Code
+# 17. Review Checklist
 
-Claude Code should:
+Before considering work complete, verify: naming is consistent; code is
+readable; no duplicate logic exists; errors are handled correctly; types
+are defined; documentation is updated; tests pass; the project builds
+successfully.
+
+---
+
+# 18. Rules for Claude Code
 
 * Prefer modifying existing code over creating duplicate implementations.
-* Explain significant architectural decisions.
+* Explain significant architectural decisions and their trade-offs.
 * Keep commits focused on a single milestone.
 * Avoid introducing unnecessary abstractions.
 * Preserve consistency with the existing project structure.
-* Ask for clarification instead of making major assumptions when requirements are ambiguous.
+* Ask for clarification instead of making major assumptions when
+  requirements are ambiguous.
+
+---
+
+# 19. Long-Term Goal
+
+The objective is not only a working application, but a maintainable,
+well-documented, production-quality codebase that can keep evolving
+without major architectural changes.

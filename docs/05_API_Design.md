@@ -1,255 +1,136 @@
 # API Design
 
-Version: 1.0
+Version: 1.0 — condensed. Sections 1–7 keep their original numbering
+because `backend/README.md` cross-references them (§5, §7) directly.
 
 ---
 
 # 1. Purpose
 
-This document defines the API design standards for Relay.
-
-All backend endpoints should follow these conventions unless explicitly approved otherwise.
+This document defines the API design standards for Relay. All backend
+endpoints should follow these conventions unless explicitly approved
+otherwise.
 
 ---
 
 # 2. Design Principles
 
-The API should be:
-
-* Simple
-* Consistent
-* Predictable
-* RESTful
-* Easy to document
-* Easy to extend
+The API should be simple, consistent, predictable, RESTful, and easy to
+document and extend.
 
 ---
 
 # 3. Base URL
 
-During development:
-
-```
-http://localhost:8000
-```
-
-When accessed by another device on the local network:
-
-```
-http://<desktop-ip>:8000
-```
+Development: `http://localhost:8000`. From another device on the local
+network: `http://<desktop-ip>:8000`.
 
 ---
 
 # 4. API Versioning
 
-All endpoints should begin with:
-
-```
-/api/v1
-```
-
-Example:
-
-```
-/api/v1/files
-```
+All endpoints begin with `/api/v1` (e.g. `/api/v1/files`).
 
 ---
 
 # 5. Content Type
 
-Requests and responses should use:
-
-```
-application/json
-```
-
-File transfers should use appropriate streaming responses.
+Requests and responses use `application/json`. File transfers use
+streaming responses instead (`GET /transfers/{id}/download` returns the
+raw byte stream, not the JSON envelope below — see
+`backend/README.md`'s "Transfer API").
 
 ---
 
 # 6. Response Format
 
-Successful responses should follow a consistent structure.
-
-Example:
+Every successful response uses the shared `ApiResponse` envelope
+(`app/schemas/common.py`):
 
 ```json
-{
-    "success": true,
-    "message": "Operation completed successfully.",
-    "data": {}
-}
+{ "success": true, "message": "Operation completed successfully.", "data": {} }
 ```
 
----
-
-Errors should follow the same format.
-
-Example:
+Errors follow the same shape, with `data` set to `null`:
 
 ```json
-{
-    "success": false,
-    "message": "Device not found.",
-    "errors": []
-}
+{ "success": false, "message": "Device not found.", "data": null }
 ```
 
 ---
 
 # 7. HTTP Status Codes
 
-Use standard HTTP status codes.
-
-Examples:
-
-| Code | Meaning               |
-| ---- | --------------------- |
-| 200  | Success               |
-| 201  | Created               |
-| 204  | No Content            |
-| 400  | Bad Request           |
-| 401  | Unauthorized          |
-| 403  | Forbidden             |
-| 404  | Not Found             |
-| 409  | Conflict              |
-| 422  | Validation Error      |
-| 500  | Internal Server Error |
+Standard codes are used throughout: `200` Success, `201` Created, `204` No
+Content, `400` Bad Request, `401` Unauthorized, `403` Forbidden, `404` Not
+Found, `409` Conflict, `422` Validation Error, `500` Internal Server
+Error. `DELETE` endpoints return `204 No Content` with an empty body,
+per HTTP semantics.
 
 ---
 
 # 8. Endpoint Naming
 
-Use nouns instead of verbs.
-
-Good:
-
-```
-/devices
-/files
-/transfers
-/settings
-```
-
-Avoid:
-
-```
-/getFiles
-/uploadFile
-/downloadNow
-```
+Use nouns, not verbs: `/devices`, `/files`, `/transfers`, `/settings` —
+never `/getFiles`, `/uploadFile`, `/downloadNow`.
 
 ---
 
 # 9. Authentication
 
-Version 1 uses trusted device pairing.
-
-Protected endpoints should verify that the requesting device has been paired and authorized.
-
-No online user accounts are required.
-
----
-
-# 10. File Transfers
-
-Large files should be streamed.
-
-The backend should avoid loading entire files into memory.
-
-Transfer progress should be available to connected clients.
+Version 1 uses trusted device pairing. Protected endpoints verify that the
+requesting device has been paired and authorized via a `DeviceSession`
+bearer token; no online user accounts exist. See `docs/10_Security.md`
+and `backend/README.md`'s authentication sections for the concrete rules
+per resource (which routes are loopback-only vs. session-token-gated).
 
 ---
 
-# 11. WebSocket Usage
+# 10. File Transfers & Real-Time Updates
 
-WebSockets should be used only for real-time communication.
-
-Examples:
-
-* Transfer progress
-* Connection status
-* Device events
-* Live notifications
-
-Normal CRUD operations should remain REST endpoints.
+Large files are streamed; the backend never loads an entire file into
+memory. **Version 1 has no WebSocket layer** — an earlier design
+considered WebSockets for transfer progress and other real-time events,
+but the actual implementation covers this need by having clients poll
+`GET /transfers/{id}` instead (`docs/11_File_Transfer.md` §9, §16). A
+WebSocket layer remains a possible future addition if a real-time need
+that polling can't satisfy ever arises, but nothing in Version 1 requires
+one — do not add one speculatively.
 
 ---
 
-# 12. Validation
+# 11. Validation & Error Handling
 
-All request data must be validated using Pydantic models.
-
-Invalid requests should return clear validation errors.
-
----
-
-# 13. Error Handling
-
-Error messages should:
-
-* Explain the problem
-* Avoid exposing internal implementation details
-* Remain consistent across endpoints
-
-Unexpected exceptions should be logged.
+All request data is validated using Pydantic models; invalid requests
+return clear validation errors. Error messages explain the problem,
+avoid exposing internal implementation details, and stay consistent
+across endpoints. Unexpected exceptions are logged. The backend
+centralizes this in one exception-to-HTTP mapping layer
+(`app/api/exception_handlers.py`) rather than per-route try/except — see
+`docs/02_Architecture.md` §9.
 
 ---
 
-# 14. Logging
+# 12. Logging & Documentation
 
-Every API request should be logged during development.
-
-Logs should include:
-
-* Timestamp
-* Endpoint
-* Method
-* Response status
-* Processing time
-
-Sensitive information should never be logged.
+Every API request is logged during development (timestamp, endpoint,
+method, response status, processing time — never sensitive information).
+FastAPI's automatic OpenAPI documentation (Swagger UI, ReDoc) stays
+enabled during development and may be restricted in production.
 
 ---
 
-# 15. API Documentation
+# 13. Future Expansion
 
-FastAPI's automatic OpenAPI documentation should remain enabled during development.
-
-The project should expose:
-
-* Swagger UI
-* ReDoc
-
-These may be disabled or restricted in production if needed.
+The API should be extensible without breaking existing clients. Potential
+future additions: folder synchronization, clipboard sharing, multiple
+desktop devices, remote relay support, end-to-end encryption.
 
 ---
 
-# 16. Future Expansion
+# 14. API Rules
 
-The API should be designed so future features can be added without breaking existing clients.
-
-Potential future additions include:
-
-* Folder synchronization
-* Clipboard sharing
-* Multiple desktop devices
-* Remote relay support
-* End-to-end encryption
-
----
-
-# 17. API Rules
-
-Claude Code should:
-
-* Keep endpoint names consistent.
-* Reuse existing schemas where possible.
-* Avoid duplicate endpoints.
-* Keep controllers thin.
-* Place business logic in services.
-* Validate all inputs.
-* Return consistent responses.
-* Document new endpoints when they are added.
+Claude Code should: keep endpoint names consistent, reuse existing schemas
+where possible, avoid duplicate endpoints, keep controllers thin, place
+business logic in services, validate all inputs, return consistent
+responses, and document new endpoints when they are added.

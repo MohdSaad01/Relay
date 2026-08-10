@@ -1,312 +1,89 @@
 # Technology Stack
 
-Version: 1.0
+Version: 1.0 — condensed.
 
 ---
 
-# 1. Purpose
+# 1. Purpose & Guiding Principles
 
 This document defines the official technology stack for Relay Version 1.
-
-Unless explicitly instructed, these technologies should not be replaced during development.
-
----
-
-# 2. Guiding Principles
-
-Technology choices prioritize:
-
-* Stability
-* Maintainability
-* Developer productivity
-* Large community support
-* Long-term scalability
-* Ease of learning
+Unless explicitly instructed, these technologies should not be replaced
+during development. Choices prioritize stability, maintainability,
+developer productivity, community support, and ease of learning over
+novelty.
 
 ---
 
-# 3. Desktop Application
+# 2. The Stack
 
-## Framework
-
-Electron
-
-### Reason
-
-Electron provides:
-
-* Native Windows desktop application
-* Large ecosystem
-* Easy integration with backend services
-* Mature tooling
-* Future cross-platform support
-
----
-
-## User Interface
-
-HTML
-
-CSS
-
-JavaScript
-
-### Reason
-
-The UI should remain lightweight and easy to understand.
-
-No frontend framework (React, Vue, Angular, etc.) will be used in Version 1.
+| Layer | Choice | Why |
+|---|---|---|
+| Desktop framework | **Electron** | Native Windows desktop app, mature ecosystem, easy backend integration, future cross-platform potential. |
+| Desktop UI | **HTML / CSS / JavaScript** | No frontend framework (React, Vue, Angular) in Version 1 — kept lightweight and easy to understand. |
+| Backend language | **Python 3.13+** | — |
+| Backend framework | **FastAPI** | Performance, automatic OpenAPI docs, type safety, modern async support. |
+| API style | **REST**, versioned under `/api/v1` | See `docs/05_API_Design.md`. WebSockets were considered for real-time events but are not used in V1 — see that document §11. |
+| Database | **SQLite** | Version 1 targets a single desktop installation: no server, no configuration, minimal maintenance. Architecture allows future migration to PostgreSQL (`08_Architecture_Decisions.md` ADR-005). |
+| ORM | **SQLAlchemy** | Separates business logic from database implementation; simplifies a future DB migration. |
+| Validation | **Pydantic** | Request/response validation, type checking, automatic serialization. |
+| ASGI server | **Uvicorn** | Standard production-ready server for FastAPI. |
+| Android framework | **React Native** (TypeScript) | Mature ecosystem, cross-platform potential, native device access. Android only in Version 1. |
 
 ---
 
-# 4. Backend
+# 3. Networking
 
-## Language
-
-Python 3.13+
-
----
-
-## Framework
-
-FastAPI
-
-### Reason
-
-FastAPI provides:
-
-* Excellent performance
-* Automatic API documentation
-* Type safety
-* Modern async support
-* Strong developer experience
+Communication occurs over local Wi-Fi, mobile hotspot, or private LAN
+only. Internet connectivity is not required or used.
 
 ---
 
-## API Style
+# 4. File Transfer
 
-REST API
-
-WebSockets for real-time events where appropriate.
-
----
-
-# 5. Database
-
-SQLite
-
-### Reason
-
-Version 1 is designed for a single desktop installation.
-
-SQLite requires:
-
-* No database server
-* No configuration
-* Minimal maintenance
-
-The architecture should allow migration to PostgreSQL in the future.
+Files are streamed — never loaded completely into memory — with support
+for progress updates, cancellation, and error recovery. See
+`docs/11_File_Transfer.md`.
 
 ---
 
-# 6. ORM
+# 5. Authentication
 
-SQLAlchemy
-
-### Reason
-
-SQLAlchemy separates business logic from database implementation.
-
-It also simplifies future database migrations.
+Version 1 uses secure device pairing; authentication is based on trusted
+paired devices. No online accounts. See `docs/10_Security.md`.
 
 ---
 
-# 7. Data Validation
+# 6. Development Tools
 
-Pydantic
-
-### Reason
-
-Pydantic provides:
-
-* Request validation
-* Response validation
-* Type checking
-* Automatic serialization
+* **Primary:** Claude Code. **Secondary:** Visual Studio Code.
+* **Version control:** Git.
+* **Formatting/linting (Python):** Ruff. **Testing (Python):** Pytest.
+* **Dependency management:** pip + venv (Python), npm (Node.js).
+* **Logging:** Python `logging` module, structured where practical.
+* **Configuration:** environment variables and config files — sensitive
+  values are never hardcoded.
 
 ---
 
-# 8. ASGI Server
+# 7. Technologies Not Used
 
-Uvicorn
-
-### Reason
-
-Recommended production-ready server for FastAPI.
-
----
-
-# 9. Android Application
-
-Framework:
-
-React Native
-
-### Reason
-
-* Mature ecosystem
-* Cross-platform potential
-* Good community support
-* Native device access
-
-Version 1 will target Android only.
-
----
-
-# 10. Networking
-
-Communication should occur over:
-
-* Local Wi-Fi
-* Mobile Hotspot
-* Private LAN
-
-Internet connectivity is not required.
-
----
-
-# 11. File Transfer
-
-Files should be streamed.
-
-Large files should never be loaded completely into memory.
-
-Transfers should support:
-
-* Progress updates
-* Cancellation
-* Error recovery
-
----
-
-# 12. Authentication
-
-Version 1 should use secure device pairing.
-
-Authentication should be based on trusted paired devices.
-
-No online accounts are required.
-
----
-
-# 13. Development Tools
-
-Primary IDE
-
-* Claude Code
-
-Secondary IDE
-
-* Visual Studio Code
-
-Version Control
-
-* Git
-
-Operating System
-
-* Windows
-
----
-
-# 14. Code Quality
-
-Formatting
-
-* Ruff (Python)
-
-Linting
-
-* Ruff
-
-Testing
-
-* Pytest
-
----
-
-# 15. Dependency Management
-
-Python
-
-* pip
-* virtual environment (venv)
-
-Node.js
-
-* npm
-
----
-
-# 16. Logging
-
-Python logging module
-
-Structured log messages where practical.
-
----
-
-# 17. Configuration
-
-Environment variables
-
-Configuration files
-
-Sensitive values should never be hardcoded.
-
----
-
-# 18. Technologies Not Used
-
-Version 1 will NOT use:
-
-* Flask
-* Django
-* PostgreSQL
-* MongoDB
-* Firebase
-* Supabase
-* Docker
-* Kubernetes
-* Redis
-* GraphQL
-* Microservices
-
+Version 1 does **not** use: Flask, Django, PostgreSQL, MongoDB, Firebase,
+Supabase, Docker, Kubernetes, Redis, GraphQL, or a microservices split.
 These may be evaluated in future versions if requirements change.
 
 ---
 
-# 19. Future Upgrades
+# 8. Future Upgrades
 
-The architecture should support future migration to:
-
-* PostgreSQL
-* Native desktop packaging improvements
-* End-to-end encryption
-* Cross-platform desktop support
-* Cross-platform mobile support
-
-These upgrades should not require a complete redesign.
+The architecture should support, without a complete redesign: PostgreSQL,
+native desktop packaging improvements, end-to-end encryption, and
+cross-platform desktop/mobile support.
 
 ---
 
-# 20. Technology Rules
+# 9. Technology Rules
 
-Claude Code should not introduce additional frameworks, libraries, or services without first explaining:
-
-* Why they are needed
-* What problem they solve
-* Their advantages
-* Their trade-offs
-
-Technology choices should remain consistent throughout the project unless explicitly approved.
+Claude Code should not introduce additional frameworks, libraries, or
+services without first explaining why they are needed, what problem they
+solve, their advantages, and their trade-offs. Technology choices remain
+consistent throughout the project unless explicitly approved otherwise.

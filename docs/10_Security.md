@@ -1,170 +1,125 @@
 # Security Specification
 
-Version: 1.0
+Version: 1.0 — condensed. Section numbers are unchanged from the original
+— heavily cross-referenced by number elsewhere (`backend/README.md`,
+`CLAUDE.md`, `13_Database_Design.md`, `15_QA_NOTEBOOK.md`).
 
 ---
 
 # 1. Purpose
 
-This document defines the security model for Relay Version 1.
-
-The objective is to provide secure local file transfers while keeping the implementation simple and maintainable.
+Defines the security model for Relay Version 1: secure local file
+transfers, kept simple and maintainable.
 
 ---
 
 # 2. Security Principles
 
-Relay should:
-
-* Require explicit device pairing.
-* Never expose shared files to unknown devices.
-* Never require cloud authentication.
-* Never transmit sensitive information unnecessarily.
-* Default to the principle of least privilege.
+Relay requires explicit device pairing, never exposes shared files to
+unknown devices, never requires cloud authentication, never transmits
+sensitive information unnecessarily, and defaults to least privilege.
 
 ---
 
 # 3. Threat Model
 
-Version 1 is designed to defend against:
-
-* Accidental connections
-* Unauthorized devices on the same LAN
-* Unauthorized file browsing
-* Unauthorized file downloads
-
-Version 1 does **not** attempt to defend against:
-
-* A fully compromised local machine
-* Nation-state adversaries
-* Physical access to an unlocked device
+Defends against: accidental connections, unauthorized devices on the same
+LAN, unauthorized file browsing/downloads. Does **not** defend against: a
+fully compromised local machine, nation-state adversaries, or physical
+access to an unlocked device.
 
 ---
 
 # 4. Device Pairing
 
 A device must be paired before it can access any protected endpoint.
-
-Pairing requires explicit approval by the desktop user.
-
-Unpaired devices may discover Relay but cannot browse files or initiate transfers.
+Pairing requires explicit approval by the desktop user. Unpaired devices
+may discover Relay but cannot browse files or initiate transfers.
 
 ---
 
 # 5. QR Code
 
-The QR code should **not** contain sensitive information.
-
-It should contain only the information necessary to initiate pairing, such as:
-
-* Desktop IP address
-* Backend port
-* Temporary pairing identifier
-* Protocol version
-
-Authentication credentials must never be embedded directly in the QR code.
+The QR code contains only what's needed to initiate pairing — desktop IP
+address, backend port, temporary pairing identifier, protocol version —
+deliberately no credentials. Authentication credentials are never embedded
+in the QR code.
 
 ---
 
 # 6. Pairing Token
 
-When pairing begins:
-
-* The desktop generates a temporary pairing token.
-* The token has a short expiration time.
-* The token is single-use.
-* After successful pairing, the token is discarded.
+When pairing begins, the desktop generates a temporary pairing token with
+a short expiration, single-use, discarded after successful pairing. Not
+persisted to the database — see `docs/13_Database_Design.md` §9.
 
 ---
 
 # 7. Trusted Devices
 
-Successfully paired devices become trusted.
-
-Each trusted device should receive a unique identifier stored locally.
-
-Future requests must present valid credentials associated with that trusted device.
+Successfully paired devices become trusted; each receives a unique
+identifier stored locally. Future requests must present valid credentials
+associated with that trusted device.
 
 ---
 
 # 8. Session Authentication
 
-Authenticated requests should use a session token issued after successful pairing.
-
-Session tokens should:
-
-* Expire after a configurable period.
-* Be renewable.
-* Be invalidated if a device is removed.
+Authenticated requests use a session token issued after successful
+pairing. Session tokens expire after a configurable period
+(`app_settings.session_token_lifetime_minutes`, `docs/13_Database_Design.md`
+§8), are renewable, and are invalidated if a device is removed.
 
 ---
 
 # 9. Authorization
 
-Even trusted devices should only access endpoints appropriate to their permissions.
-
-Every request should be validated before performing file operations.
+Even trusted devices only access endpoints appropriate to their
+permissions; every request is validated before performing file
+operations.
 
 ---
 
 # 10. File Access
 
-Relay must never expose the entire file system.
-
-Only files intentionally shared by the user are accessible.
-
-Directory traversal attacks must be prevented.
+Relay never exposes the entire file system — only files intentionally
+shared by the user are accessible, and directory traversal attacks must
+be prevented.
 
 ---
 
-# 11. Logging
+# 11. Logging & Failure Responses
 
-Security logs should include:
-
-* Pairing attempts
-* Successful pairings
-* Failed authentication
-* Device removal
-
-Logs must never contain:
-
-* Session tokens
-* Authentication secrets
-* Sensitive file contents
+Security logs include pairing attempts, successful pairings, failed
+authentication, and device removal — never session tokens, authentication
+secrets, or sensitive file contents. Every authentication failure path
+(missing, unknown, or expired token; a valid token for the wrong device)
+returns the same generic error, so a caller can never use the response to
+probe which case occurred; the specific cause is only ever logged
+server-side. See `backend/README.md`'s authentication sections for where
+this is enforced.
 
 ---
 
 # 12. Transport Security
 
-Version 1 uses HTTP over a trusted local network.
-
-This is an accepted design decision for Version 1 to reduce implementation complexity.
-
-Future versions may introduce HTTPS and end-to-end encryption without changing the overall architecture.
+Version 1 uses HTTP over a trusted local network — an accepted design
+decision to reduce implementation complexity. Future versions may
+introduce HTTPS and end-to-end encryption without changing the overall
+architecture.
 
 ---
 
 # 13. Future Improvements
 
-Potential future enhancements include:
-
-* TLS
-* End-to-end encryption
-* Certificate pinning
-* Device revocation lists
-* Mutual authentication
-* Hardware-backed key storage
-
-These features are outside the scope of Version 1.
+Outside Version 1's scope: TLS, end-to-end encryption, certificate
+pinning, device revocation lists, mutual authentication, hardware-backed
+key storage.
 
 ---
 
 # 14. Security Rules
 
-Claude Code should:
-
-* Never hardcode secrets.
-* Never expose authentication tokens.
-* Validate every protected request.
-* Follow the principle of least privilege.
-* Explain any security-related dependency before introducing it.
+Claude Code should never hardcode secrets, never expose authentication
+tokens, validate every protected request, follow least privilege, and
+explain any security-related dependency before introducing it.

@@ -703,11 +703,12 @@ backend/
     └── utils/                   # Tests for app/utils (filesystem helpers)
 ```
 
-`app/websocket/` (described in `docs/04_Project_Structure.md`) is still not
-scaffolded — Version 1's real-time need is transfer progress, which M12
-covers by polling `GET /transfers/{id}` instead (`docs/11_File_Transfer.md`
-§16 lists WebSockets as a future enhancement, not a V1 requirement). It
-will be added when a milestone actually needs it.
+`app/websocket/` (mentioned in early planning, `docs/02_Architecture.md`
+§11) is still not scaffolded — Version 1's real-time need is transfer
+progress, which M12 covers by polling `GET /transfers/{id}` instead
+(`docs/11_File_Transfer.md` §16 lists WebSockets as a future enhancement,
+not a V1 requirement). It will be added when a milestone actually needs
+it.
 
 See `docs/13_Database_Design.md` for the full schema reference (tables,
 relationships, constraints, and the reasoning behind them), and

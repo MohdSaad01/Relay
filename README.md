@@ -277,13 +277,18 @@ Deliberately out of scope for Version 1 (`docs/11_File_Transfer.md` §16,
 
 `docs/` is the source of truth for Version 1's design:
 
-* `00_Project_Charter.md`, `01_Project_Overview.md` — goals and scope
-* `02_Architecture.md`, `03_Tech_Stack.md`, `04_Project_Structure.md`
-* `05_API_Design.md`, `06_Coding_Standards.md`, `07_Development_Workflow.md`
-* `08_Architecture_Decisions.md`
+* `00_Project_Overview.md` — vision, goals, scope
+* `02_Architecture.md` — architecture and repository structure
+* `03_Tech_Stack.md`
+* `05_API_Design.md`
+* `06_Coding_Standards.md` — coding standards and development workflow
+* `08_Architecture_Decisions.md` — ADR log
 * `09_Networking.md`, `10_Security.md`, `11_File_Transfer.md`
 * `12_Packaging_Deployment.md`, `13_Database_Design.md`, `14_Testing_Plan.md`
 * `15_QA_NOTEBOOK.md` — manual QA notes and verification steps
+
+(Numbering has gaps at 01/04/07: those documents were merged into 00/02/06
+respectively during a documentation consolidation pass.)
 
 `backend/README.md` documents the backend's internals in depth (services,
 API layer, dependency injection, request flow). `CLAUDE.md` documents

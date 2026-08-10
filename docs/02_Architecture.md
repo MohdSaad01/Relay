@@ -1,299 +1,239 @@
-# Relay Architecture
+# Relay Architecture & Project Structure
 
-Version: 1.0
+Version: 1.0 — consolidated from the former `02_Architecture.md` and
+`04_Project_Structure.md`, and corrected to match the as-built system
+(see `backend/README.md` for full backend internals).
 
 ---
 
 # 1. Architecture Philosophy
 
-Relay follows a modular, local-first architecture.
-
-Each major component has a single responsibility and communicates through clearly defined interfaces.
-
-The architecture should prioritize:
-
-* Simplicity
-* Maintainability
-* Testability
-* Scalability
-* Separation of concerns
+Relay follows a modular, local-first architecture. Each major component
+has a single responsibility and communicates through clearly defined
+interfaces, prioritizing simplicity, maintainability, testability, and
+separation of concerns over speculative flexibility.
 
 ---
 
 # 2. High-Level Architecture
 
-Relay consists of four primary components:
+Relay consists of three components plus local storage:
 
-1. Windows Desktop Application
-2. Android Application
-3. Local Backend API
-4. Local Database
-
-```
-+-----------------------+
-|   Windows Desktop     |
-|        UI             |
-+-----------+-----------+
-            |
-            | HTTP/WebSocket
-            |
-+-----------v-----------+
-|     FastAPI Backend   |
-| Business Logic & API  |
-+-----------+-----------+
-            |
-            |
-     +------+------+
-     |             |
-     |             |
-+----v----+   +----v----+
-| SQLite  |   | File    |
-|Database |   | Storage |
-+---------+   +---------+
-
-            ^
-            |
-            |
-+-----------+-----------+
-|   Android Application |
-+-----------------------+
+```text
+┌─────────────────────────────┐         Wi-Fi / hotspot         ┌───────────────────────┐
+│   Windows Desktop (Electron)│◄────────────────────────────────►│  Android (React Native) │
+│                              │      UDP discovery + REST API   │                         │
+│  ┌────────────────────────┐  │                                  └───────────────────────┘
+│  │ FastAPI backend         │  │
+│  │ (embedded, auto-started)│  │
+│  └───────────┬────────────┘  │
+│      ┌───────┴───────┐       │
+│      ▼               ▼       │
+│  ┌────────┐     ┌─────────┐  │
+│  │ SQLite │     │  Files   │  │
+│  │  (meta)│     │ (on disk)│  │
+│  └────────┘     └─────────┘  │
+└─────────────────────────────┘
 ```
 
----
-
-# 3. Desktop Application Responsibilities
-
-The Windows application is responsible for:
-
-* Displaying the desktop interface
-* Managing shared files
-* Displaying transfer progress
-* Showing paired devices
-* Starting and stopping the local backend
-* Sending API requests
-* Receiving transfer events
-
-The desktop application should not contain business logic.
-
-Business logic belongs inside the backend.
+The Windows desktop hosts the FastAPI backend as an embedded child process
+(Electron). Android connects to it directly over the local network — the
+desktop acts as the server for Version 1. No component runs in the cloud.
 
 ---
 
-# 4. Backend Responsibilities
+# 3. Component Responsibilities
 
-The backend acts as the central coordinator.
+**Desktop (`desktop/`)** — the host. Starts/stops the backend as a child
+process, displays the desktop UI (devices, shared files, transfer
+progress, settings), and provides system tray integration. Contains no
+backend business logic — it is a host and a UI.
 
-Responsibilities include:
+**Backend (`backend/`)** — the central coordinator and the only place
+business rules live: device discovery, pairing validation, authentication/
+authorization, shared-file and transfer management, byte streaming,
+database access, configuration, and logging.
 
-* Device discovery
-* Pairing validation
-* Transfer management
-* File streaming
-* Authentication
-* Authorization
-* Database operations
-* Logging
-* Error handling
-* Configuration management
+**Android (`android/`)** — discovers the desktop, pairs with it, browses
+its shared files, and proposes/streams transfers in both directions. Like
+the desktop, it stays thin; business logic lives in the backend wherever
+practical.
 
-All business rules should exist only in the backend.
-
----
-
-# 5. Android Responsibilities
-
-The Android application is responsible for:
-
-* Discovering available Relay servers
-* Displaying nearby devices
-* Pairing with the desktop
-* Browsing shared files
-* Requesting downloads
-* Uploading files
-* Displaying transfer progress
-* Managing paired devices
-
-Like the desktop application, the Android client should remain thin.
-
-Business logic belongs in the backend whenever practical.
+Both clients communicate with the backend only through its REST API —
+neither embeds any business logic that duplicates what the backend already
+enforces.
 
 ---
 
-# 6. Database Layer
+# 4. Backend Layered Design
 
-Version 1 uses SQLite.
+The backend follows a strict four-layer design (not the generic
+Presentation/Application/Domain/Infrastructure split considered during
+initial planning — the concrete layering below is what was actually built
+and is enforced throughout):
 
-The database stores:
-
-* Paired devices
-* Application settings
-* Shared file metadata
-* Transfer history
-* Security tokens
-* User preferences
-
-Large files are never stored inside the database.
-
-Only metadata is stored.
-
----
-
-# 7. File Storage
-
-Actual files remain on disk.
-
-The database references them through metadata.
-
-Relay should never duplicate files unless required for a transfer.
-
----
-
-# 8. API Layer
-
-All communication occurs through the backend API.
-
-Responsibilities include:
-
-* Device registration
-* Pairing
-* File listing
-* File uploads
-* File downloads
-* Transfer progress
-* Device management
-
-The API should remain RESTful where appropriate.
-
-Real-time events should use WebSockets when necessary.
-
----
-
-# 9. Layered Design
-
-The backend should follow a layered architecture.
-
-```
-Presentation Layer
+```text
+API Layer          (app/api/)           HTTP routing, request/response schemas, DI, exception mapping
         │
-Application Layer
+Service Layer       (app/services/)      Business rules, workflows, transaction boundaries (commit/rollback)
         │
-Domain Layer
+Repository Layer    (app/repositories/)  SQLAlchemy queries only
         │
-Infrastructure Layer
+Models              (app/models/)        SQLAlchemy ORM models (database tables)
 ```
 
-### Presentation Layer
+**Rules, enforced throughout:**
 
-Responsible for:
+* API routes may call services only.
+* Services may call repositories only; they never touch SQLAlchemy or
+  FastAPI request/response objects directly.
+* Repositories may access SQLAlchemy only; they are the only code that
+  queries the database.
+* SQLAlchemy models must never be queried directly from API routes or
+  services.
+* Each layer has a single responsibility; new features integrate with this
+  structure rather than bypassing it.
 
-* API endpoints
-* Request validation
-* Response formatting
+Cross-cutting infrastructure (configuration, security/token hashing,
+startup, logging) lives in `app/core/`, and stateless helpers (filesystem
+validation, network utilities) live in `app/utils/` — neither contains
+business logic.
 
----
-
-### Application Layer
-
-Responsible for:
-
-* Business workflows
-* Use cases
-* Coordination
-
----
-
-### Domain Layer
-
-Responsible for:
-
-* Core business rules
-* Models
-* Domain logic
-
-The domain layer should not depend on FastAPI or SQLite.
+Some backend state is deliberately **not** persisted to the database:
+in-memory, lock-guarded singletons (`PairingManager`, `TransferManager`,
+`ActiveStreamRegistry`, `UploadBatchRegistry`) hold short-lived,
+process-lifetime state such as pending pairing attempts and pending
+transfer proposals. See `docs/13_Database_Design.md` §9 for the reasoning.
 
 ---
 
-### Infrastructure Layer
+# 5. Database & File Storage
 
-Responsible for:
-
-* Database access
-* File system operations
-* Network communication
-* Configuration
-* Logging
-
----
-
-# 10. Communication Flow
-
-Typical transfer process:
-
-1. Android discovers desktop.
-2. User initiates pairing.
-3. Desktop approves pairing.
-4. Secure pairing information is stored.
-5. Android requests available files.
-6. Backend validates request.
-7. Backend streams file.
-8. Desktop reports progress.
-9. Android receives file.
-10. Transfer completes.
+Version 1 uses SQLite (`03_Tech_Stack.md`, `08_Architecture_Decisions.md`
+ADR-005) and stores metadata only — paired devices, sessions, shared-file/
+folder metadata, transfer history, and app settings. Actual files always
+remain on disk; the database references them through metadata and Relay
+never duplicates a file's bytes unless required to perform a transfer. See
+`docs/13_Database_Design.md` for the full schema.
 
 ---
 
-# 11. Design Principles
+# 6. API Layer
 
-Relay should follow:
-
-* Single Responsibility Principle
-* Dependency Inversion
-* Separation of Concerns
-* Explicit dependencies
-* Loose coupling
-* High cohesion
-
-Avoid unnecessary abstractions until there is a clear need.
+All communication happens through the backend's REST API, versioned under
+`/api/v1`. See `docs/03_API_Design.md` for conventions and
+`backend/README.md` for the full endpoint reference. There is no
+WebSocket layer in Version 1 — transfer progress is polled
+(`GET /transfers/{id}`); see `docs/03_API_Design.md` §11.
 
 ---
 
-# 12. Error Handling
+# 7. Communication Flow
 
-Errors should:
-
-* Be logged
-* Return meaningful messages
-* Never expose internal implementation details
-* Never fail silently
-
-Unexpected failures should be recoverable whenever possible.
+Typical transfer flow: Android discovers the desktop (or scans its QR
+code) → pairing is requested and approved → Android receives a session
+token → Android lists shared files → Android proposes a download/upload →
+the desktop accepts or rejects it → an accepted proposal streams over
+HTTP with either side polling status → the transfer reaches a terminal
+state. See `docs/11_File_Transfer.md` §7 for the full two-phase lifecycle.
 
 ---
 
-# 13. Future Scalability
+# 8. Design Principles
 
-The architecture should allow future migration to:
-
-* PostgreSQL
-* Multiple desktop clients
-* Internet relay servers
-* End-to-end encryption
-* Cross-platform desktop support
-* Plugin system
-
-These enhancements should require minimal changes to the core architecture.
+Relay follows Single Responsibility, Dependency Inversion, Separation of
+Concerns, explicit dependencies, loose coupling, and high cohesion.
+Unnecessary abstractions are avoided until there is a clear, demonstrated
+need — see `CLAUDE.md` Rules 1–10 for how this is enforced day to day.
 
 ---
 
-# 14. Architecture Rules
+# 9. Error Handling
 
-The following rules must always be respected:
+Errors are logged, return meaningful messages, never expose internal
+implementation details, and never fail silently. Unexpected failures
+should be recoverable whenever possible. The backend centralizes this as
+FastAPI-agnostic service exceptions (`NotFoundError`, `ValidationError`,
+`ConflictError`, `AuthenticationError`) mapped to HTTP responses in one
+place (`app/api/exception_handlers.py`) rather than per-route try/except.
 
-* UI does not contain business logic.
-* Business logic does not access UI directly.
-* Database access occurs through dedicated data layers.
-* Large files remain outside the database.
-* Components communicate through well-defined interfaces.
-* Every layer has a single responsibility.
-* New features should integrate with the existing architecture rather than bypass it.
+---
+
+# 10. Future Scalability
+
+The architecture should allow, without a redesign: migration to
+PostgreSQL, multiple desktop clients, an internet relay mode, end-to-end
+encryption, cross-platform desktop support, and a plugin system. These are
+explicitly out of scope for Version 1 (see `docs/00_Project_Overview.md`
+§5, §10).
+
+---
+
+# 11. Repository Structure
+
+```text
+Relay/
+├── CLAUDE.md                Instructions for Claude Code working in this repo
+├── README.md                Project overview, setup, and status
+├── LICENSE
+├── requirements.txt          Backend runtime dependencies
+├── requirements-dev.txt      Backend dev/test/lint dependencies
+│
+├── docs/                    Project specification — source of truth for Version 1
+│   └── upstream/             Notes on upstream (third-party) defects encountered
+│
+├── backend/                 FastAPI application
+│   ├── app/
+│   │   ├── api/               Routes (v1/), dependencies, exception handlers, response envelope
+│   │   ├── core/               Configuration, security/token hashing, logging setup
+│   │   ├── database/            Session management, base, init
+│   │   ├── models/              SQLAlchemy models (database tables)
+│   │   ├── schemas/             Pydantic request/response models
+│   │   ├── services/            Business logic, in-memory managers/registries
+│   │   ├── repositories/        SQLAlchemy queries — the only code that touches the ORM directly
+│   │   ├── utils/               Stateless helpers (filesystem, network, time)
+│   │   └── main.py              FastAPI app, lifespan (startup/shutdown reconciliation)
+│   ├── tests/                 Mirrors app/ (api/, services/, repositories/, database/, core/, utils/)
+│   ├── .env / .env.example
+│   └── README.md              Full backend internals reference
+│
+├── desktop/                 Electron shell — embeds the backend, hosts the desktop UI
+│   ├── src/main/               Main process: backend lifecycle, tray, IPC handlers
+│   ├── src/preload/            Preload bridge (renderer ↔ main IPC)
+│   ├── src/renderer/           Plain HTML/CSS/JS UI — one view module per resource
+│   │   └── views/                devices.js, files.js, pairing.js, settings.js, transfers.js
+│   ├── assets/                 Icons (desktop + tray)
+│   └── styles/                 app.css (design tokens, shared components)
+│
+├── android/                 React Native (TypeScript) client
+│   └── src/                   api/, discovery/, pairing/, session/, files/, transfers/,
+│                                streaming/, screens/, navigation/, components/
+│   ├── __tests__/              Jest suite mirroring src/
+│   └── README.md               Android setup, native build notes
+│
+└── scripts/                 Development utilities (e.g. tray icon generation)
+```
+
+`app/websocket/` and a top-level `shared/` directory were part of early
+planning but were never created: Version 1's only real-time need is
+transfer progress, which polling already satisfies (§6 above), and no
+resource has yet needed cross-component shared assets beyond what already
+lives in `docs/`.
+
+---
+
+# 12. Naming Conventions
+
+Directory names: lowercase, descriptive, singular where appropriate.
+Python: modules `snake_case`, classes `PascalCase`, functions
+`snake_case`, constants `UPPER_CASE`.
+
+---
+
+# 13. Structure Rules
+
+* Do not create unnecessary folders or duplicate functionality.
+* Keep related files together; respect separation of concerns.
+* Follow the existing directory structure; if a new top-level folder is
+  genuinely required, explain why before creating it.
+* No application code belongs at the repository root or inside `docs/`.

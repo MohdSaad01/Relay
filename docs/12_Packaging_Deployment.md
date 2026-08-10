@@ -1,64 +1,52 @@
 # Packaging & Deployment Specification
 
-Version: 1.0
+Version: 1.0 — condensed. This is Version 1's **next planned milestone**
+(see `CLAUDE.md`) — nothing below is implemented yet.
 
 ---
 
 # 1. Purpose
 
-This document defines how Relay Version 1 will be packaged, installed, and distributed.
-
-The objective is to provide a simple installation experience for end users while keeping the development workflow straightforward.
+Defines how Relay Version 1 will be packaged, installed, and distributed:
+a simple installation experience for end users, a straightforward
+development workflow.
 
 ---
 
 # 2. Distribution Goals
 
-Relay should:
-
-* Be easy to install.
-* Require minimal user configuration.
-* Not require users to install Python.
-* Not require users to install Node.js.
-* Run as a normal desktop application.
+Relay should be easy to install, require minimal user configuration, not
+require users to install Python or Node.js, and run as a normal desktop
+application.
 
 ---
 
 # 3. Desktop Packaging
 
-The Windows desktop application will be distributed as a packaged Electron application.
-
-The FastAPI backend should be bundled with the desktop application.
-
-The backend should start automatically when the desktop application launches.
-
-Users should not need to manually start the backend.
+The Windows desktop application will be distributed as a packaged Electron
+application, with the FastAPI backend bundled inside it. The backend
+starts automatically when the desktop application launches — users never
+manually start it.
 
 ---
 
 # 4. Backend Packaging
 
-The exact backend packaging tool (such as PyInstaller or an equivalent solution) will be selected during the packaging milestone after evaluating the available options.
-
-Requirements:
-
-* The backend must run without a system-wide Python installation.
-* The packaged backend should include all required Python dependencies.
-* Startup should be automatic.
+The exact tool (PyInstaller or an equivalent) will be selected during the
+packaging milestone after evaluating the options. Requirements: runs
+without a system-wide Python install, includes all required Python
+dependencies, starts automatically.
 
 ---
 
 # 5. Android Distribution
 
-The Android client will be distributed as a standard Android application package (APK) during development.
-
-Future releases may use Android App Bundles (AAB) for store distribution.
+Distributed as a standard APK during development; future releases may use
+Android App Bundles (AAB) for store distribution.
 
 ---
 
 # 6. Startup Sequence
-
-When the desktop application starts:
 
 1. Launch the embedded backend.
 2. Verify the backend is running.
@@ -66,110 +54,78 @@ When the desktop application starts:
 4. Display the user interface.
 5. Accept incoming paired device connections.
 
-The startup process should handle failures gracefully.
+Failures during startup should be handled gracefully.
 
 ---
 
 # 7. Shutdown Sequence
 
-When the desktop application exits:
-
-* Stop accepting new connections.
-* Complete or safely cancel active operations.
-* Shut down the backend cleanly.
-* Release system resources.
-
-Unexpected crashes should not leave orphaned backend processes running.
+On exit: stop accepting new connections, complete or safely cancel active
+operations, shut down the backend cleanly, release system resources. An
+unexpected crash must not leave an orphaned backend process running.
 
 ---
 
 # 8. Configuration
 
-Application configuration should be stored locally.
-
-Examples include:
-
-* Application settings
-* Database location
-* Download directory
-* Shared files configuration
-* Network settings
-
-Sensitive information should not be hardcoded.
+Application configuration (settings, database location, download
+directory, shared files config, network settings) is stored locally.
+Sensitive information is never hardcoded.
 
 ---
 
 # 9. Updates
 
-Automatic updates are outside the scope of Version 1.
-
-Application updates will be performed manually.
-
-The architecture should allow automatic updates to be added in a future version.
+Automatic updates are outside Version 1's scope; updates are performed
+manually. The architecture should allow automatic updates to be added
+later.
 
 ---
 
 # 10. Logging
 
-Application logs should be stored locally.
-
-Logs should assist with debugging while avoiding sensitive information.
-
-Future versions may provide an option to export logs for troubleshooting.
+Application logs are stored locally, to assist debugging while avoiding
+sensitive information. A future version may support exporting logs for
+troubleshooting.
 
 ---
 
 # 11. Release Builds
 
-Development and production builds should remain separate.
-
-Development builds may include:
-
-* Debug logging
-* Developer tools
-* Additional diagnostics
-
-Production builds should disable unnecessary debugging features.
+Development and production builds stay separate. Development builds may
+include debug logging, developer tools, and extra diagnostics; production
+builds disable unnecessary debugging features.
 
 ---
 
 # 12. Future Improvements
 
-Future versions may introduce:
-
-* Automatic updates
-* Code signing
-* Installer customization
-* Cross-platform installers
-* Portable editions
-
-These enhancements are outside the scope of Version 1.
+Outside Version 1's scope: automatic updates, code signing, installer
+customization, cross-platform installers, portable editions.
 
 ---
 
 # 13. Packaging Rules
 
-Claude Code should:
-
-* Avoid requiring users to install development tools.
-* Keep the startup process automatic.
-* Explain packaging-related dependencies before introducing them.
-* Prefer widely adopted packaging solutions over custom implementations.
-* Design the project so development and production packaging remain clearly separated.
+Claude Code should avoid requiring users to install development tools,
+keep the startup process automatic, explain packaging-related dependencies
+before introducing them, prefer widely adopted packaging solutions over
+custom implementations, and keep development/production packaging clearly
+separated.
 
 ---
 
-## Windows Data Storage
+# 14. Windows Data Storage
 
-Relay should store user data inside the user's local application data directory.
+Relay stores user data (SQLite database, application configuration, logs,
+pairing information) inside the user's local application data directory —
+application binaries stay separate from user-generated data. The exact
+directory structure will be finalized during the Packaging milestone.
 
-Examples include:
-
-- SQLite database
-- Application configuration
-- Logs
-- Pairing information
-
-Application binaries should remain separate from user-generated data.
-
-The exact directory structure will be finalized during the Packaging milestone.
+A related decision has already been made ahead of full packaging
+(`docs/15_QA_NOTEBOOK.md` T8): a `RELAY_DATA_DIR` environment variable
+(defaulting `DATABASE_URL`/`LOG_DIR` under it when set) prevents the
+packaged backend from writing its database/logs inside its own,
+potentially unwritable or upgrade-destroyed, install directory —
+`backend-manager.js` sets it to Electron's `app.getPath("userData")` in a
+packaged build.

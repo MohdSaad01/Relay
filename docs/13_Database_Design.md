@@ -16,9 +16,9 @@ If future changes are made to the schema, this document should be updated alongs
 
 # 2. Scope and Philosophy
 
-Relay V1 uses SQLite (`03_Tech_Stack.md`, `08_Architecture_Decisions.md` ADR-005) and stores only metadata. Files themselves always remain on disk (`02_Architecture.md` §6-7).
+Relay V1 uses SQLite (`03_Tech_Stack.md`, `08_Architecture_Decisions.md` ADR-005) and stores only metadata. Files themselves always remain on disk (`02_Architecture.md` §5).
 
-The database describes a single desktop installation's view of the world: the phones it has paired with, the files it has chosen to share, and the transfers it has performed. There are no user accounts (Charter §5) and no concept of the desktop needing a row describing itself.
+The database describes a single desktop installation's view of the world: the phones it has paired with, the files it has chosen to share, and the transfers it has performed. There are no user accounts (`00_Project_Overview.md` §5) and no concept of the desktop needing a row describing itself.
 
 The schema favors a small number of explicit, well-understood tables over generic or speculative structures. Nothing is included to support a feature that has not been requested for Version 1.
 
@@ -257,8 +257,8 @@ Required: `devices`, `sessions`, `shared_files`, `shared_folders` (P13), `transf
 | `checksum` on `shared_files` / `transfers` | Integrity verification is a documented future enhancement |
 | `devices.status` (soft delete) | Hard delete approved for V1; may be reconsidered later |
 | Audit/security log table | Security events belong in the existing file-based logger (`LOG_DIR`), not the database |
-| `users` / accounts | Explicitly out of scope (Charter §5) |
-| Folder-*sync* tables (watching a shared folder for changes, incremental diffing) | Still explicitly out of scope (Charter §5, `11_File_Transfer.md` §3) — distinct from folder *sharing/transfer*, implemented as of Milestone P13 (§6a) |
+| `users` / accounts | Explicitly out of scope (`00_Project_Overview.md` §5) |
+| Folder-*sync* tables (watching a shared folder for changes, incremental diffing) | Still explicitly out of scope (`00_Project_Overview.md` §5, `11_File_Transfer.md` §3) — distinct from folder *sharing/transfer*, implemented as of Milestone P13 (§6a) |
 
 ---
 
@@ -274,10 +274,10 @@ These are implementation-level details that follow from this design and must be 
 
 # 14. Why This Design Fits Version 1
 
-The schema maps directly onto the Charter's stated V1 scope — pairing, device management, a shared list, transfers, basic history, preferences — with nothing speculative added. Six tables (`shared_folders` added Milestone P13), no generic or key-value patterns, no unused enum values.
+The schema maps directly onto the stated V1 scope (`00_Project_Overview.md` §5) — pairing, device management, a shared list, transfers, basic history, preferences — with nothing speculative added. Six tables (`shared_folders` added Milestone P13), no generic or key-value patterns, no unused enum values.
 
 **Future expansion:**
-- All tables use plain integer primary keys and standard foreign key relationships, so a future PostgreSQL migration (`08_Architecture_Decisions.md` ADR-005, `03_Tech_Stack.md` §19) is a data-copy exercise, not a redesign.
+- All tables use plain integer primary keys and standard foreign key relationships, so a future PostgreSQL migration (`08_Architecture_Decisions.md` ADR-005, `03_Tech_Stack.md` §8) is a data-copy exercise, not a redesign.
 - `platform` on `devices` is already a string/enum rather than an implicit "always Android," so future iOS/macOS/Linux clients add new values, not new columns.
 - `shared_files` and `transfers` were already decoupled via nullable foreign keys before Milestone P13, which is exactly what let folder sharing/transfer be added as new nullable columns and one new table rather than a redesign — confirming the prediction this section originally made. Checksum verification remains a similarly additive future step.
 

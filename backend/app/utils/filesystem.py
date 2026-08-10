@@ -1,7 +1,7 @@
 """Filesystem helpers for inspecting a file the desktop user has selected to share.
 
-Pure, read-only, and framework/business-rule agnostic (04_Project_Structure.md
-§14: "avoid placing business logic here"). Callers in the Service Layer
+Pure, read-only, and framework/business-rule agnostic (02_Architecture.md
+§11: "avoid placing business logic here"). Callers in the Service Layer
 translate the exceptions raised here into app/services/exceptions.py errors.
 """
 

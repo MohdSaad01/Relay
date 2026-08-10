@@ -314,8 +314,8 @@ single-file pipeline — no new streaming concept: a folder "transfer" is N
 ordinary single-file transfers, serialized by P11's own FIFO queue. New
 `shared_folders` table + `SharedFolderService`, `/folders` API mirroring
 `/files`, `UploadBatchRegistry` for upload-side folder-name conflicts.
-Protocol details: `docs/11_File_Transfer.md` §6/§18,
-`docs/13_Database_Design.md` §6a/§7a/§12. The required live-device pass
+Protocol details: `docs/11_File_Transfer.md` §6,
+`docs/13_Database_Design.md` §6a/§7/§12. The required live-device pass
 found and fixed 3 defects the (all-green) automated suites couldn't reach:
 a `Content-Disposition` header crash on non-Latin-1 filenames (pre-existing
 since Milestone 12, affects standalone files too — fixed with an RFC

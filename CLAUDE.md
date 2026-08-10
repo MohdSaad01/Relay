@@ -192,6 +192,43 @@ the standard wrapper for a table cell holding more than one or two action
 buttons — use it instead of bare inline buttons when a row's action set
 grows past what fits one line at the app's default window width.
 
+### Android Folder Transfer Presentation (P21.1)
+
+A folder download/upload remains, internally, N ordinary child `Transfer`
+rows streamed one at a time through `TransferStreamManager`'s existing FIFO
+(`docs/11_File_Transfer.md` §10) — Android does not, and should not, grow a
+second streaming engine or a folder-level backend `Transfer` type. UI code
+must instead *present* those child transfers as one user-level operation:
+
+- Android's `files/folderDownloadStatus.ts` (`deriveFolderDownloadStatus`)
+  already derives a folder's aggregate download state from its children.
+  `screens/files/FilesScreen.tsx`'s `computeFolderRowState` additionally
+  breaks the tie between "every child just finished, reconciliation is
+  still catching up" and "genuinely stale/never downloaded" using
+  `TransferStreamManager`'s own live state (P21.1) — any future change to
+  folder-status derivation must preserve this, or the Download/Downloading
+  flicker P21.1 fixed will return.
+- Any per-child transition inside `TransferStreamManager`'s FIFO — not just
+  the very first child's own startup — passes through a real async gap
+  (`start()`'s `await PermissionsAndroid.request(...)`) during which
+  `isActive()` is false for every transfer while the rest of the folder is
+  still genuinely `isQueued()`. A large folder (P21.2: confirmed live at
+  100 files) exposes this at every single child boundary, not just once —
+  `computeFolderRowState`'s `queued` derivation must keep treating a folder
+  as "underway" (never `Queued`) from its first completed/active child
+  onward, or the Downloading/Queued oscillation P21.2 fixed will return.
+  Any new folder-level (or other multi-child aggregate) UI state derived
+  from `TransferStreamManager` must account for this same gap.
+- Android's Transfers tab (`screens/transfers/TransferListScreen.tsx`)
+  groups a folder's child transfers into one row via
+  `transfers/transferGrouping.ts`'s `groupTransfers` — a download groups by
+  `shared_folder_id`, an upload by `upload_batch_id` (a download has no
+  `upload_batch_id`; see that module's own doc comment). New Transfers-list
+  UI must render through this grouping, not the raw `GET /transfers` array,
+  or a folder will again show as N separate rows. Mirrors Desktop's own
+  `transferGrouping.js`/`renderBatchRow` precedent (P21) for the same
+  underlying data.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)

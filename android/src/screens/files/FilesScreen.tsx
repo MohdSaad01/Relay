@@ -90,19 +90,105 @@ function computeFileRowState(
   return { status, queued };
 }
 
-function computeFolderRowState(
+/**
+ * P21.1: `deriveFolderDownloadStatus` is a pure function of polled
+ * data — it has no way to tell "every child's Transfer just reached
+ * 'completed', but TransferStreamManager's own reconciliation write
+ * (markFolderReconciled, TransferStreamManager.notifyIfFolderComplete)
+ * hasn't landed yet" apart from "this folder was simply never downloaded
+ * and its content changed since" (P13.2, Issue 2) — both look identical to
+ * it: every current child individually 'completed', but
+ * isFolderContentReconciled says no. It therefore falls to 'idle', and the
+ * Files row briefly regresses from "Downloading..." to "Download" before
+ * FilesScreen's own TransferStreamManager subscription (P13.3, fix #3)
+ * refreshes reconciliation a moment later and the row jumps to "Open" —
+ * confirmed live on RMX3997 (frame-by-frame screen capture, folder of 8
+ * files) as a single-frame flicker landing consistently around the last
+ * child's completion, not one flicker per child (every child's Transfer
+ * already reads 'in_progress' the instant it's proposed — see
+ * downloadStatus.ts — so an *earlier* child finishing can never make the
+ * folder's aggregate kind fall out of 'in_progress').
+ *
+ * Fix: break the tie using a signal deriveFolderDownloadStatus doesn't
+ * have — TransferStreamManager's own live state, which this screen is
+ * already subscribed to. If every child is backend-'completed' but the
+ * derived kind is still 'idle', and the last transfer this app instance's
+ * stream engine actually touched (state.transferId) belongs to *this*
+ * folder, then this is the reconciliation-catch-up window, not a genuinely
+ * stale/never-downloaded folder — keep showing "Downloading..." rather
+ * than regressing to "Download". A folder the stream engine hasn't just
+ * touched (state is null, or references a different transfer entirely —
+ * including the ordinary case of a folder whose *content changed on the
+ * desktop* since its last download, P13.2's Issue 2) is untouched by this
+ * override and still correctly reports 'idle' so the user can re-download
+ * it. `folderExists === false` (P13.3) also bypasses the override — a
+ * folder just confirmed deleted from disk must still fall back to
+ * "Download", not get stuck showing "Downloading..." forever.
+ *
+ * P21.2: the fix above closed the *kind* ('idle' vs 'in_progress'/
+ * 'completed') flicker, but a large folder still visibly toggled its
+ * button text between "Downloading..." and "Queued" once per child —
+ * confirmed live on RMX3997 with a 100-file folder via direct
+ * instrumentation of this function's own return value: 194 label changes
+ * (Downloading...⇄Queued, roughly one full cycle per child) across a single
+ * download, `kind` itself rock solid throughout. Root cause: every child
+ * transfer, including the 2nd through 100th, goes through
+ * TransferStreamManager.start()'s own brief `await
+ * PermissionsAndroid.request(...)` gate before `state.status` flips to
+ * 'streaming' (the same gap the P13.3 correction above already had to
+ * design around for a single lone transfer). Between one child's stream
+ * ending and the next one's clearing that gate, `TransferStreamManager`
+ * has *no* transfer with `status === 'streaming'` for a few milliseconds —
+ * `anyActive` below reads false — while the other 98 not-yet-started
+ * children are already genuinely sitting in the FIFO `queue`, so `queued`
+ * below read true, for every single child boundary in a large folder.
+ *
+ * Fix: `queued` must mean "this *folder's* download hasn't started yet",
+ * not "no child happens to be mid-permission-check this exact millisecond".
+ * Once any child has completed, or one is genuinely active right now, the
+ * folder's operation is unambiguously underway — the transient gap between
+ * children is internal progress, not the whole folder going back to
+ * waiting in line, and must never read as "Queued" again. A folder that
+ * genuinely hasn't started at all (nothing completed, nothing of its own
+ * active) still correctly reports "Queued" while it waits behind an
+ * unrelated transfer already streaming (P21.1's own Test E).
+ */
+export function computeFolderRowState(
   children: AvailableFolderFileResponse[],
   requests: TransferRequestResponse[],
   transfers: TransferResponse[],
   reconciledChildren: Record<string, number> | undefined,
   folderExists: boolean | undefined,
 ): { status: FolderDownloadStatus; queued: boolean } {
-  const status = deriveFolderDownloadStatus(children, requests, transfers, reconciledChildren, folderExists);
+  let status = deriveFolderDownloadStatus(children, requests, transfers, reconciledChildren, folderExists);
   const childTransferIds = children
     .map(child => latestSendTransferId(child.id, transfers))
     .filter((id): id is number => id != null);
+
+  if (
+    status.kind === 'idle' &&
+    status.totalCount > 0 &&
+    status.completedCount === status.totalCount &&
+    folderExists !== false
+  ) {
+    const streamState = TransferStreamManager.getState();
+    if (streamState != null && childTransferIds.includes(streamState.transferId)) {
+      status = { ...status, kind: 'in_progress' };
+    }
+  }
+
   const anyActive = childTransferIds.some(id => TransferStreamManager.isActive(id));
-  const queued = !anyActive && childTransferIds.some(id => TransferStreamManager.isQueued(id));
+  // P21.2: once this folder's own download is underway — at least one child
+  // has finished, or one is streaming right now — it must never read as
+  // "Queued" again, even for the brief async gap between one child's stream
+  // ending and the next one's starting (see this function's own doc comment
+  // below for why that gap exists). `queued` otherwise still correctly
+  // reports true for the folder's genuine pre-start wait behind an unrelated
+  // active transfer (P21.1's own Test E: a lone file + a folder started
+  // together, the later one waits its turn) — that scenario has
+  // completedCount === 0 and no child of *this* folder active yet.
+  const folderDownloadUnderway = anyActive || status.completedCount > 0;
+  const queued = !folderDownloadUnderway && childTransferIds.some(id => TransferStreamManager.isQueued(id));
   return { status, queued };
 }
 

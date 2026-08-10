@@ -1644,6 +1644,305 @@ whenever this debug build (or a release APK) is next working end-to-end.
 
 ---
 
+# Milestone P21.1 — Android Folder Download Flicker & Transfer Grouping
+
+**Scope:** Two reported Android issues only — (1) a folder's Files-screen
+button flickering between "Download" and "Downloading..." during a folder
+download, (2) the Transfers tab showing every child file of a folder
+download/upload as its own row instead of one folder-level row. No new
+architecture, no new backend transfer type, no context-menu/Settings/
+pairing/Desktop changes — per this milestone's own explicit boundary.
+
+**Baseline reproduction (RMX3997, real backend + real hotspot network, not
+the attached videos alone):** four synthetic shared folders (8, 8, 12, and
+6 files, 15–20 MB each so streaming took real, observable time) were shared
+via `POST /folders` and downloaded from the Android Files screen while
+capturing the folder row every 0.5–0.7s via `adb shell screencap`, and every
+`GET /transfers`/`GET /transfers/requests` request/response was captured via
+the app's existing `[QR-DEBUG]` HTTP logging (`api/client.ts`) over `adb
+logcat`. Pre-fix, an 8-file folder's row was observed to transition
+"Downloading..." → **"Download"** (one frame) → "Open" — confirmed live, not
+assumed from the videos.
+
+**Root cause (Issue 1):** `deriveFolderDownloadStatus`
+(`files/folderDownloadStatus.ts`) is a pure function of polled data with no
+way to distinguish two situations that look identical to it: (a) every
+child's `Transfer` just reached `'completed'`, but
+`TransferStreamManager.notifyIfFolderComplete`'s own multi-step pipeline
+(`getFolderFiles` + `listTransferRequests` + `listTransfers`, then
+`markFolderReconciled`) hasn't finished writing the reconciliation record
+yet, vs. (b) a folder that was never downloaded, or whose shared content has
+since drifted (P13.2, Issue 2) and genuinely needs a fresh download. Both
+report every current child `'completed'` but `isFolderContentReconciled ===
+false`, so both fall to `'idle'` → "Download". P13.3's own fix (subscribing
+to `TransferStreamManager` and refreshing reconciliation the instant a
+stream completes) narrows this window but does not close it: the routine
+2000ms `transfers` poll can independently observe "every child completed"
+via the backend *before* `notifyIfFolderComplete`'s own several sequential
+network calls finish — confirmed directly by parsing the captured
+`[QR-DEBUG]` response bodies: the `transfers` array's own completed-count for
+the folder was strictly monotonic (never regressed) across the whole
+download, ruling out an out-of-order/stale-poll-response race as the cause
+before spending any effort on it. Also confirmed live: intermediate
+children finishing never causes a flicker — every child's backend `Transfer`
+already reads `'in_progress'` the instant it's proposed (auto-accept, see
+`downloadStatus.ts`), so the aggregate `kind` cannot fall out of
+`'in_progress'` until the very last child, and `requestingFolderIds` already
+pins the button to "Downloading..." for the whole propose loop regardless.
+
+**Fix (Issue 1):** `FilesScreen.computeFolderRowState` now breaks the
+`'idle'`-vs-"reconciling" tie using a signal `deriveFolderDownloadStatus`
+doesn't have: `TransferStreamManager`'s own live state, which this screen is
+already subscribed to. If every child is backend-`'completed'` but the
+derived `kind` is still `'idle'`, and the last transfer this app instance's
+stream engine actually touched (`state.transferId`) belongs to this exact
+folder, the row is held at `'in_progress'` ("Downloading...") instead of
+regressing to `'idle'` ("Download") — self-terminating the moment
+reconciliation actually lands (kind becomes genuine `'completed'` directly).
+A folder the stream engine hasn't just touched (state `null`, or referencing
+an unrelated transfer — including the ordinary "content changed on desktop"
+staleness case) is untouched by the override and still correctly offers
+"Download". `folderExists === false` (P13.3) also bypasses the override — a
+folder just confirmed deleted from disk must still fall back to "Download,"
+never get stuck on "Downloading..." forever.
+
+**Root cause (Issue 2):** `TransferListScreen` has always rendered `GET
+/transfers` one row per persisted `Transfer`, with no concept of "these N
+rows are one folder operation" — confirmed by reading the screen (no
+grouping logic existed at all, unlike Desktop's own
+`transferGrouping.js`/`renderBatchRow`, which already solved the identical
+problem for Desktop's Transfers table).
+
+**Fix (Issue 2):** New `android/src/transfers/transferGrouping.ts`
+(`groupTransfers`), a client-side-only grouping over the existing `GET
+/transfers` data — mirrors `desktop/src/renderer/transferGrouping.js`'s
+shape, adapted for Android's two directions: a folder *download* groups by
+`shared_folder_id` (a download has no `upload_batch_id`), a folder *upload*
+groups by `upload_batch_id` (client-generated UUID, set by
+`TransferListScreen.handleUploadFolder`). `TransferListScreen` renders each
+group as one non-interactive `FolderTransferRow` (name, `Folder (N items)`,
+an aggregate status — failed > in_progress > completed > cancelled, same
+priority as Desktop's `renderBatchRow`) instead of N individual rows; a
+standalone transfer is untouched. No progress counters in the folder row,
+per this milestone's own instruction and matching FilesScreen's existing
+P13.1 precedent (a folder's label reads like an ordinary item's, never
+"(3/8)"). The row is not `Pressable` — there is no folder-level detail
+screen, and building one was out of this milestone's scope; each child
+transfer still has its own detail screen, just not reachable from the
+folder row.
+
+**Architecture decision — `shared_folder_id` reuse (P17) left as a known
+limitation, not solved:** `transferGrouping.ts`'s own doc comment spells
+this out — grouping a folder *download* by `shared_folder_id` alone can, in
+the narrow case where a folder is downloaded, fully unshared, and a later,
+unrelated folder is shared and reuses the same SQLite id (P17), merge two
+logically unrelated download batches into one folder row in Transfers
+*history*. Unlike `files/folderIdentity.ts`'s own P17 fix, there is no
+available fix at this layer: that fix cross-checks a live `SharedFolder`'s
+`shared_at`, but the Transfers screen renders permanent history
+(`docs/13_Database_Design.md` §7/§10) including transfers whose folder was
+unshared long ago and has no live `shared_at` to check against. The common
+case (one folder, downloaded once or retried) groups correctly; a false
+merge requires the specific id-reuse sequence above. Accepted rather than
+adding a backend column or new client-side identity store for a folder
+history predates.
+
+**Files changed:**
+- `android/src/screens/files/FilesScreen.tsx` — `computeFolderRowState`
+  fix (exported for testability), doc comment.
+- `android/src/screens/transfers/TransferListScreen.tsx` — renders grouped
+  items, new `FolderTransferRow`.
+- `android/src/transfers/transferGrouping.ts` — new.
+- `android/__tests__/screens/files/computeFolderRowState.test.ts` — new,
+  9 tests.
+- `android/__tests__/transfers/transferGrouping.test.ts` — new, 10 tests.
+
+**Automated verification:** `npx tsc --noEmit` clean; `npx eslint .` — 0
+errors, the same 2 pre-existing `no-void` warnings in
+`TransferStreamManager.ts` unrelated to this change; `npx jest` — 40 suites,
+339 tests, all passing (19 new, 0 regressions).
+
+**Physical-device verification (RMX3997, real backend/network):**
+- **Test A (single file):** unaffected — Download → Downloading... → Open,
+  and the Transfers row for it stays its own single row even alongside a
+  concurrent folder download.
+- **Test B (one-file folder):** the three "duplicate name" folders below
+  (§Test F) each had exactly one child and showed the identical clean
+  transition with no flicker.
+- **Test C (multi-file folder):** a 12-file, 240 MB folder captured at
+  0.5s intervals end-to-end (100 frames) — contact sheet confirmed a clean
+  "Downloading..." → "Open" transition with **zero** intermediate
+  "Download" frames (pre-fix, the same class of folder produced one). The
+  Transfers tab showed exactly one row ("Folder (12 items)", "In progress"
+  → "Completed") for the whole operation, never 12 rows.
+- **Test D (nested folder):** `a.bin` + `sub/b.bin` + `sub/c.bin` +
+  `sub2/d.bin` — one Files row, one Transfers row ("Folder (4 items)"),
+  "Open" correctly showed the full nested structure (`sub/`, `sub2/`,
+  `a.bin`) via the device's file manager.
+- **Test E (concurrent operations):** a folder download and a standalone
+  file download started together — the file correctly queued behind the
+  folder (FIFO unchanged), Transfers showed the file as its own row
+  ("0 B / 10.0 MB", "In progress") and the folder as one row
+  ("In progress") simultaneously; both reached "Completed"/"Open" cleanly.
+- **Test F (duplicate folder names):** three distinct shared folders all
+  named `test` (distinct `shared_folder_id`s 6/7/8, downloaded
+  concurrently) remained three separate rows on both Files and Transfers
+  throughout — one `Completed`/`Downloading...`/`Queued` at a time (FIFO),
+  never merged — and landed on-device as three distinct directories
+  (`test`, `test (1)`, `test (2)`, confirmed via `adb shell ls`),
+  regression-checking P13.2/P13.3/P17's existing identity handling.
+
+**Before/after:** Before — a multi-file folder's Files-screen button could
+regress "Downloading..." → "Download" for one frame right before "Open";
+the Transfers tab showed every folder child as its own row. After — the
+button transitions cleanly Download → Downloading... → Open/Retry with no
+regression; the Transfers tab shows exactly one row per folder operation
+alongside ordinary single-file rows.
+
+**Defects discovered and deferred (not fixed — out of P21.1's scope):**
+- Re-downloading a folder that was previously downloaded, then deleted from
+  disk (`folderExists` cached `false`), appears able to get stuck failing
+  to report `'completed'` again until the next existence re-check happens
+  to run — `deriveFolderDownloadStatus`'s `'completed'` branch requires
+  `folderExists !== false`, but the effect that re-verifies existence only
+  runs when `status.kind === 'completed'` already, a potential circular
+  dependency. Not reproduced live (would require a separate, deliberate
+  repro) and not touched by this milestone's fix (P21.1's override
+  explicitly excludes `folderExists === false`, so it neither causes nor
+  worsens this) — flagged here for a future milestone to investigate.
+- The `[QR-DEBUG]` logging left in `api/client.ts` (noted as an open item
+  since P14.2) is verbose enough to occasionally hit React Native's
+  console "TOO BIG formatValueCalls" truncation on a large `GET /transfers`
+  response during heavy testing — cosmetic (log truncation only, no
+  functional impact observed), not touched here.
+
+**Remaining limitations:** the `shared_folder_id` reuse edge case for
+Transfers-tab grouping (see Architecture decision above); no folder-level
+detail/drill-down screen (each child's own detail screen is unreachable
+from the grouped folder row); no progress-count indicator on a folder's
+Transfers row, per this milestone's explicit instruction.
+
+---
+
+# Milestone P21.2 — Folder Download Button State Regression
+
+**Scope:** Files-screen folder button state only, per this milestone's own
+boundary — P21.1's Transfers-tab grouping was explicitly not to be touched
+(verified unbroken, see below).
+
+**Reproduction methodology:** a 100-file, 200 MB shared folder
+(`P21_2_100_File_Test`, 2 MB/file) was downloaded live on RMX3997 while
+`computeFolderRowState`'s own return value was captured via temporary
+single-line `console.log` instrumentation over `adb logcat` — not by
+scraping the app's existing `[QR-DEBUG]` HTTP response dumps (`api/client.ts`),
+which was tried first and found unreliable at this scale: React Native's
+console formatter truncates a large printed array after roughly 200
+field-format calls, so a `GET /transfers` response containing 100+ objects
+only ever printed ~12–14 of them before hitting
+`[TOO BIG formatValueCalls N exceeded limit of 200]` placeholders. An
+initial pass analyzing those truncated dumps produced 31 apparent
+"completed-count regressions" and 107 apparent "present-count drops" that,
+on cross-checking against the *un-truncated* real backend data (`curl`
+against `GET /transfers` directly, and comparing to responses containing
+more than 3 real objects), turned out to be entirely a printing artifact —
+some captured "list" records were actually single-object `GET
+/transfers/{id}` responses (from `handleFolderDownload`'s own
+`getTransfer()` call per proposed child) misidentified as truncated list
+responses by the initial parsing. Direct in-app instrumentation was
+adopted instead specifically to avoid drawing conclusions from this noise.
+
+**First reproduction result — `kind` (Download/Downloading/Open): clean.**
+Two full 100-file runs (one holding Files in the foreground throughout, one
+additionally navigating to Transfers and back mid-download) both showed
+`computeFolderRowState`'s `status.kind` transition exactly three times:
+`idle → in_progress → completed`, zero regressions, zero premature
+`completed`, across 383 and 387 captured renders respectively. P21.1's own
+fix (the `idle`-vs-reconciling tie-break) holds at 100-file scale exactly
+as it did at the smaller scale it was originally verified against.
+
+**Second reproduction result — `queued` (Downloading.../Queued): the real
+bug.** The same capture's `queued` boolean, replayed through
+`folderDownloadButtonLabel`'s own switch, showed **194 label changes** —
+`Downloading...` ⇄ `Queued`, roughly once per child, for the entire ~105s
+download. This is what the reported "the button keeps changing state as
+individual files complete" behavior actually was: not the folder falling
+back to `Download`/`Open` literally, but a rapid, continuous
+`Downloading...`/`Queued` oscillation that reads, at a glance, as exactly
+the kind of "state keeps flickering" the milestone description describes.
+
+**Root cause:** every child transfer — not just the first — passes through
+`TransferStreamManager.start()`'s own brief `await
+PermissionsAndroid.request(...)` gate before `state.status` flips to
+`'streaming'` (the same startup gap `Milestone P13.3 Correction` already
+had to design around for a *single* lone transfer). Between one child's
+stream ending and the next one clearing that gate, `state.status` is
+briefly whatever the just-finished child left it at (`'completed'` /
+`'failed'`), so `TransferStreamManager.isActive(id)` returns `false` for
+*every* id in the folder for those few milliseconds — while the other
+98-or-so not-yet-started children are already genuinely sitting in the
+FIFO `queue`, so `isQueued()` for them is `true`. `computeFolderRowState`'s
+old `queued = !anyActive && childTransferIds.some(isQueued)` therefore
+read `true` at every single child boundary in a large folder — once per
+child, 99 times for a 100-file folder — not just once at the very start.
+A small folder (P21.1's own 6–12-file tests) has too few boundaries for
+this to read as more than an occasional, easy-to-miss blip; at 100 files
+it is continuous and highly visible.
+
+**Fix:** `android/src/screens/files/FilesScreen.tsx`'s `computeFolderRowState`
+now treats the folder as "underway" — and therefore never `Queued` — once
+any child has completed or one is genuinely active right now
+(`folderDownloadUnderway = anyActive || status.completedCount > 0`); the
+transient inter-child gap no longer counts as "the whole folder went back
+to waiting in line." A folder that genuinely has not started at all
+(nothing completed, nothing of its own active) still correctly reports
+`Queued` while it waits behind an unrelated already-streaming transfer
+(P21.1's own Test E: a lone file plus a folder started together).
+
+**Why this doesn't change the underlying architecture:** the fix is a
+three-line change to one derived boolean in one screen-local function.
+`TransferStreamManager`'s FIFO, `folderIdentity.ts`, `useFolderReconciliation.ts`,
+`deriveFolderDownloadStatus`, and the P21.1 `kind` override are all
+untouched — children still stream one at a time exactly as before; only
+how their *transient in-between* state is read for the folder's `queued`
+flag changed.
+
+**Automated tests:** `android/__tests__/screens/files/computeFolderRowState.test.ts`
+gained a `computeFolderRowState queued derivation (P21.2)` block (4 tests):
+the inter-child gap no longer reads queued; a 100-child folder simulated
+across every single completion boundary never reads queued once started;
+a folder genuinely not yet started still correctly reads queued behind an
+unrelated transfer; the actively-streaming child keeps the folder out of
+queued regardless of completed count. `npx tsc --noEmit` clean; `npx eslint .`
+0 errors (same 2 pre-existing unrelated `no-void` warnings); `npx jest` —
+40 suites, 343 tests, all passing (4 new, 0 regressions).
+
+**100-file physical-device verification (post-fix, RMX3997):** a fresh
+100-file folder (never before downloaded on this install, so no stale
+reconciliation state) was downloaded while capturing the Files-screen row
+at backend-confirmed 0%, 25%, 51%, 75%, and 95% completion, plus after
+100%. All five in-progress screenshots showed an identical, stable
+"Downloading..." button — no `Download`, no `Queued`, no `Open` in
+between — and the final screenshot showed "Open", with all 100 files
+confirmed present on-device (`adb shell ls`, 100 entries).
+
+**P21.1 regression check:** the same 100-child folder's Transfers tab
+still showed exactly one row — "P21_2_100_File_Test / Download · Folder
+(100 items) / Completed" — never 100 individual rows, confirming P21.1's
+grouping fix is untouched by this change.
+
+**Remaining limitations:** none newly introduced by this fix.
+`handleFolderDownload`'s sequential propose loop (unrelated pre-existing
+code, not touched by P21.1 or P21.2) has no per-child retry — a single
+transient network failure among 100 sequential `POST /transfers/requests`
+calls would abort the loop, leaving the remaining children un-proposed and
+the folder stuck at "Downloading..." with no automatic resume; not
+reproduced live and not observed in either successful 100-file test run
+in this milestone, noted here only as a theoretical scale-related gap
+worth a future look, not a defect this milestone's fix caused or could
+mask.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:

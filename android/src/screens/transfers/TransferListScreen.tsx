@@ -6,6 +6,7 @@ import { errorCodes, isErrorWithCode, pick } from '@react-native-documents/picke
 import { TransfersStackParamList } from '../../navigation/types';
 import { useTransfers } from '../../transfers/useTransfers';
 import { directionLabel, formatStatus } from '../../transfers/labels';
+import { FolderTransferGroup, groupTransfers, TransferListItem } from '../../transfers/transferGrouping';
 import { formatFileSize } from '../../utils/formatFileSize';
 import { TransferResponse } from '../../api/types';
 import { getTransfer, proposeTransfer } from '../../api/endpoints/transfers';
@@ -209,6 +210,11 @@ export function TransferListScreen() {
   const visibleTransfers = applyHistoryReset(transfers, clearedAt);
   const hasHistoryToClear = visibleTransfers.some(isHistoricalTransfer);
   const historyWasCleared = clearedAt != null && transfers.length > 0 && visibleTransfers.length === 0;
+  // P21.1 (Issue 2): grouped after history reset, same order desktop's own
+  // batch grouping applies it in — a folder whose children are all hidden by
+  // a clear stays hidden, one still 'in_progress' stays visible, exactly
+  // like today's per-row behavior. See transferGrouping.ts's own doc comment.
+  const listItems = groupTransfers(visibleTransfers);
 
   const handleClearHistory = useCallback(() => {
     Alert.alert(
@@ -276,21 +282,25 @@ export function TransferListScreen() {
           <ActivityIndicator size="large" />
         </View>
       ) : (
-        <FlatList<TransferResponse>
-          data={visibleTransfers}
-          keyExtractor={item => String(item.id)}
-          renderItem={({ item }) => (
-            <TransferRow
-              transfer={item}
-              onPress={() => navigation.navigate('TransferDetail', { transferId: item.id })}
-            />
-          )}
+        <FlatList<TransferListItem>
+          data={listItems}
+          keyExtractor={item => (item.kind === 'single' ? `single-${item.transfer.id}` : item.key)}
+          renderItem={({ item }) =>
+            item.kind === 'folder' ? (
+              <FolderTransferRow group={item} />
+            ) : (
+              <TransferRow
+                transfer={item.transfer}
+                onPress={() => navigation.navigate('TransferDetail', { transferId: item.transfer.id })}
+              />
+            )
+          }
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
               <Text style={styles.empty}>{historyWasCleared ? 'Transfer history cleared.' : 'No transfers yet.'}</Text>
             </View>
           }
-          contentContainerStyle={visibleTransfers.length === 0 ? styles.emptyList : undefined}
+          contentContainerStyle={listItems.length === 0 ? styles.emptyList : undefined}
         />
       )}
     </View>
@@ -311,6 +321,34 @@ function TransferRow({ transfer, onPress }: { transfer: TransferResponse; onPres
       </View>
       <Text style={styles.statusBadge}>{formatStatus(transfer.status)}</Text>
     </Pressable>
+  );
+}
+
+/**
+ * P21.1 (Issue 2): one row for an entire folder upload/download — see
+ * transferGrouping.ts's own doc comment. Not `Pressable`: there is no
+ * folder-level detail screen (each child transfer still has its own, but
+ * drilling into one from here is out of this milestone's scope), matching
+ * desktop's own non-interactive batch row
+ * (desktop/src/renderer/views/transfers.js's renderBatchRow). Deliberately
+ * no per-child progress count in the subtitle — FilesScreen's
+ * folderDownloadButtonLabel already established (P13.1) that a folder's
+ * primary label should read exactly like a single item's, not "(3/8)".
+ */
+function FolderTransferRow({ group }: { group: FolderTransferGroup }) {
+  const itemLabel = `${group.transfers.length} item${group.transfers.length === 1 ? '' : 's'}`;
+  return (
+    <View style={styles.row}>
+      <View style={styles.rowInfo}>
+        <Text style={styles.name} numberOfLines={1}>
+          {'\u{1F4C1}'} {group.folderName}
+        </Text>
+        <Text style={styles.meta}>
+          {directionLabel(group.direction)} · Folder ({itemLabel})
+        </Text>
+      </View>
+      <Text style={styles.statusBadge}>{formatStatus(group.status)}</Text>
+    </View>
   );
 }
 

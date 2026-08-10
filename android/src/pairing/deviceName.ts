@@ -2,10 +2,11 @@ import { Platform } from 'react-native';
 
 /**
  * Best-effort human-readable default name for this device, submitted once
- * at pairing time. Android has no way to rename it afterwards — renaming a
- * paired device is desktop-only (PATCH /devices/{id}, per backend/README.md's
- * "Shared Files API"/"Devices" precedent) — so this only needs to be a
- * reasonable default, not editable UI.
+ * at pairing time (`POST /pairing/request`'s `device_name`) and carried
+ * forward into `Session.device_name` (session/types.ts). Editable
+ * afterwards from the Settings screen (P23), which calls
+ * `PATCH /devices/{id}` via api/endpoints/devices.ts's renameDevice — this
+ * function only supplies the initial value, not a permanent one.
  *
  * `Platform.constants.Model` is part of React Native core on Android; no
  * extra device-info dependency is needed for it.

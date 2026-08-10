@@ -12,6 +12,7 @@ const sampleSession: Session = {
   session_token: 'session-token',
   session_expires_at: '2026-01-01T00:00:00Z',
   desktop_base_url: 'http://192.168.1.10:8000/api/v1',
+  device_name: 'Test Phone',
 };
 
 beforeEach(() => {
@@ -60,6 +61,22 @@ test('clearSession removes it from storage, memory, and api config', async () =>
   expect(secureStorage.clearSession).toHaveBeenCalled();
   expect(SessionManager.getSession()).toBeNull();
   expect(getApiConfig()).toEqual({ baseUrl: null, sessionToken: null });
+});
+
+test('updateDeviceName persists the new name and keeps the rest of the session intact', async () => {
+  await SessionManager.setSession(sampleSession);
+
+  await SessionManager.updateDeviceName('New Name');
+
+  const expected = { ...sampleSession, device_name: 'New Name' };
+  expect(secureStorage.saveSession).toHaveBeenLastCalledWith(expected);
+  expect(SessionManager.getSession()).toEqual(expected);
+});
+
+test('updateDeviceName throws when there is no active session', async () => {
+  await SessionManager.clearSession();
+
+  await expect(SessionManager.updateDeviceName('New Name')).rejects.toThrow();
 });
 
 test('subscribe() notifies listeners on setSession and clearSession, not after unsubscribing', async () => {

@@ -23,7 +23,7 @@ type Route = RouteProp<PairingStackParamList, 'PairingWaiting'>;
 export function PairingWaitingScreen() {
   const navigation = useNavigation<Navigation>();
   const { params } = useRoute<Route>();
-  const { desktopBaseUrl, pairingToken } = params;
+  const { desktopBaseUrl, pairingToken, deviceName } = params;
 
   useEffect(() => {
     let cancelled = false;
@@ -45,6 +45,7 @@ export function PairingWaitingScreen() {
             session_token: result.session_token,
             session_expires_at: result.session_expires_at,
             desktop_base_url: desktopBaseUrl,
+            device_name: deviceName,
           },
         });
       } catch (err) {
@@ -76,7 +77,7 @@ export function PairingWaitingScreen() {
         clearTimeout(timer);
       }
     };
-  }, [desktopBaseUrl, pairingToken, navigation]);
+  }, [desktopBaseUrl, pairingToken, deviceName, navigation]);
 
   return (
     <View style={styles.container}>

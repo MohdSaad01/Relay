@@ -106,5 +106,7 @@ export const apiClient = {
   get: <T>(path: string, baseUrlOverride?: string) => request<T>('GET', path, undefined, baseUrlOverride),
   post: <T>(path: string, body?: unknown, baseUrlOverride?: string) =>
     request<T>('POST', path, body ?? {}, baseUrlOverride),
+  patch: <T>(path: string, body?: unknown, baseUrlOverride?: string) =>
+    request<T>('PATCH', path, body ?? {}, baseUrlOverride),
   del: <T>(path: string, baseUrlOverride?: string) => request<T>('DELETE', path, undefined, baseUrlOverride),
 };

@@ -20,7 +20,7 @@ export type PairingStackParamList = {
   // enables — the closest thing to a device-identity check the current QR
   // payload supports.
   QrScan: { device?: DiscoveredDesktop } | undefined;
-  PairingWaiting: { desktopBaseUrl: string; pairingToken: string };
+  PairingWaiting: { desktopBaseUrl: string; pairingToken: string; deviceName: string };
   PairingResult: PairingResultParams;
 };
 

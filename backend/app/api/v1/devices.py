@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Response, status
 
-from app.api.dependencies import DeviceServiceDep
+from app.api.dependencies import DeviceOwnerAuthDep, DeviceServiceDep
 from app.api.responses import success
 from app.schemas.common import ApiResponse
 from app.schemas.device import DeviceResponse, DeviceUpdateRequest
@@ -26,8 +26,12 @@ def get_device(device_id: int, service: DeviceServiceDep) -> ApiResponse:
 
 
 @router.patch("/{device_id}", response_model=ApiResponse)
-def rename_device(device_id: int, body: DeviceUpdateRequest, service: DeviceServiceDep) -> ApiResponse:
-    """Rename a paired device."""
+def rename_device(
+    device_id: int, body: DeviceUpdateRequest, service: DeviceServiceDep, _auth: DeviceOwnerAuthDep
+) -> ApiResponse:
+    """Rename a paired device. The desktop (loopback) may rename any device;
+    a paired Android device may only rename itself (P23) — see
+    verify_device_owner's own doc comment."""
     device = service.rename_device(device_id, body.device_name)
     return success(
         DeviceResponse.model_validate(device).model_dump(mode="json"),

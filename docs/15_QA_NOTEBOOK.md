@@ -2168,6 +2168,208 @@ cross-checks at each step:
 
 ---
 
+# Milestone P23 — Android Settings, Navigation & App Identity
+
+**Scope:** `New_Issues.txt` §3 (Android Settings, device display name,
+download folder audit), §14 (bottom-navigation icons), §13/§1.7 (Android
+app icon, cross-platform visual identity), §15 (Clear History placement).
+Explicitly not touched: Desktop Settings/menu-bar/UI, pairing protocol,
+transfer engine, storage architecture, `historyReset.ts` semantics, or
+packaging/deployment.
+
+**Baseline (RMX3997, already paired, before any change):** Settings showed
+only the P14.3 download-location card ("Downloads/Relay" default) with a
+large empty area below it — no device-name UI existed. The bottom nav
+rendered `@react-navigation/elements`' `MissingIcon` (a bare outlined
+rectangle) for all three tabs — confirmed by grep, no `tabBarIcon` was set
+anywhere in the codebase, so this wasn't a rendering bug, it was simply
+never implemented. The launcher icon was the stock unmodified React Native
+template robot icon. Transfers' Clear History sat right-aligned below the
+Upload buttons. All captured via `adb screencap` before any edit.
+
+**Investigation before implementation:** read `SettingsScreen.tsx`,
+`downloadLocationStore.ts`/`DownloadLocationManager.ts`/
+`useDownloadLocation.ts` (confirmed P14.3 fully functional, reused
+verbatim — not rebuilt), `pairing/deviceName.ts`/`deviceIdentifier.ts`,
+`session/types.ts`/`SessionManager.ts`/`secureStorage.ts`, the pairing
+screens (`QrScanScreen.tsx`, `PairingWaitingScreen.tsx`,
+`PairingResultScreen.tsx`), `MainTabs.tsx`, `TransferListScreen.tsx`,
+`historyReset.ts`, and the backend's `devices.py`/`device_service.py`/
+`dependencies.py`/`auth_service.py`.
+
+**Architecture decision — device display name required a scoped backend
+auth change, surfaced to the user before implementing:** `deviceName.ts`'s
+own doc comment stated the rename was desktop-only
+(`PATCH /devices/{id}`), and that route had zero auth of any kind — not
+even a loopback check in code, only a documented assumption. This is
+exactly the gap `CLAUDE.md`'s "Not Yet Implemented" section had flagged
+since M9 ("revisit if Android is ever expected to call those routes
+directly"), and P23 is the milestone that actually triggers it. Presented
+three options to the user (call the open route as-is; make the name
+local-only with no backend sync; add a scoped auth check) — the user chose
+the scoped check. Implemented as `verify_device_owner`
+(`backend/app/api/dependencies.py`), reusing the exact
+`RequestingDeviceDep`/loopback-vs-bearer-token pattern M10 already
+established for `GET /files`: the loopback desktop caller is unrestricted;
+any other caller must present a session token whose `device_id` matches
+the path — a token for a *different* device gets the same generic 401 as
+no token at all (`10_Security.md` §11). `GET /devices`, `GET /devices/{id}`,
+`DELETE /devices/{id}` are untouched. New/updated backend tests:
+`test_patch_device_as_self_renames_it`,
+`test_patch_device_rejects_non_loopback_caller_without_token`,
+`test_patch_device_rejects_token_for_a_different_device`; the three
+pre-existing PATCH tests were switched from the (non-loopback-simulating)
+`client` fixture to `desktop_client` since they exercise the
+desktop-perspective rename.
+
+**Architecture decision — `Session.device_name` is carried forward from
+pairing, not fetched.** `PairingResultResponse` never returns the name
+Android itself submitted at pairing (`POST /pairing/request`'s
+`device_name`), so it wasn't available anywhere after the pairing screens.
+Threaded `deviceName` through `QrScanScreen` → `PairingWaiting` route
+params → the `Session` object `PairingWaitingScreen` builds, rather than
+adding a new `GET /devices/{id}` round-trip (simpler, and avoids opening a
+second dual-audience read route on `/devices` beyond what P23 actually
+needed). Editing calls `PATCH /devices/{id}` first and only updates the
+local `Session` (`SessionManager.updateDeviceName`) once that succeeds, so
+the two are never out of sync from Android's own actions.
+
+**Bug found and fixed during live verification, not anticipated by
+inspection alone:** the physical test device's session predates this
+milestone, so its persisted `Session` had no `device_name` field at all —
+the DEVICE card rendered with a blank value and a large visual gap between
+the label and the Edit Name button (screenshotted). Fixed by falling back
+to `getDefaultDeviceName()` (the same default a fresh pairing would use)
+whenever `session.device_name` is falsy, in both the display value and the
+edit-start draft; saving (even unchanged) self-heals the stored session
+since the fallback is guaranteed not to equal the missing `device_name`.
+Re-verified live — showed "RMX3997" (the device model) immediately.
+
+**Files changed:**
+- Backend: `app/api/dependencies.py` (`verify_device_owner`,
+  `DeviceOwnerAuthDep`), `app/api/v1/devices.py` (wired onto
+  `PATCH /devices/{id}`), `tests/api/test_devices.py` (new/adjusted
+  tests), `README.md` (new "Devices API" section, updated Authentication
+  Infrastructure paragraph).
+- Android: `session/types.ts` (`Session.device_name`),
+  `session/SessionManager.ts` (`updateDeviceName`),
+  `navigation/types.ts` (`PairingWaiting.deviceName`),
+  `screens/pairing/QrScanScreen.tsx`/`PairingWaitingScreen.tsx` (thread
+  the submitted name into the built `Session`), `pairing/deviceName.ts`
+  (doc comment only — logic unchanged), `api/types.ts`
+  (`DeviceUpdateRequest`/`DeviceRenameResponse`), `api/client.ts` (new
+  `patch` method), `api/endpoints/devices.ts` (new, `renameDevice`),
+  `screens/settings/SettingsScreen.tsx` (DEVICE/STORAGE sections,
+  `DeviceNameCard`; download-location logic reused verbatim),
+  `navigation/MainTabs.tsx` (`tabBarIcon`/tint colors),
+  `components/icons.tsx` (new — `FolderIcon`/`TransferIcon`/
+  `SlidersIcon`), `screens/transfers/TransferListScreen.tsx`
+  (`headerRight` via `navigation.setOptions`, replacing the in-content
+  Clear History row; `historyReset.ts` itself untouched), `package.json`
+  (added `react-native-svg@15.15.5` — a rendering primitive, not a
+  bundled icon set, to match Desktop's own hand-written inline-SVG icon
+  language rather than pulling in an icon-font library for three icons).
+- Android native resources: `android/app/src/main/res/values/colors.xml`
+  (`ic_launcher_background`), `drawable/ic_launcher_foreground.xml` (new,
+  vector), `mipmap-anydpi-v26/ic_launcher.xml`/`ic_launcher_round.xml`
+  (new, adaptive icon), all five `mipmap-*dpi/ic_launcher*.png` densities
+  regenerated (legacy pre-API26 fallback) — same two-arrows glyph on the
+  Relay-blue (`#2D6CDF`, matching Desktop's `--color-primary`) background,
+  generated via a one-off Pillow script (not committed, mirroring how
+  `desktop/assets/icons/tray.png` was produced and only the output kept).
+- `__tests__/session/SessionManager.test.ts`/`secureStorage.test.ts`
+  (added `device_name` to the sample `Session` fixture;
+  `updateDeviceName` test coverage).
+- `CLAUDE.md` — new "Android Settings, Navigation & App Identity (P23)"
+  conventions section.
+
+**Automated verification:** `npx tsc --noEmit` clean; `npx eslint .`
+clean except 3 pre-existing/expected warnings (2 `no-void` in
+`TransferStreamManager.ts`, unrelated to this milestone, already noted in
+P22's entry; 1 `react/no-unstable-nested-components` on
+`TransferListScreen.tsx`'s `headerRight`, the standard
+`navigation.setOptions` pattern react-navigation's own docs use for a
+dynamic header action); `npx jest` — 42/42 suites, 359/359 tests passing.
+Backend: `pytest -q` — 343 passed, 2 skipped (pre-existing skips,
+unrelated); `ruff check` — all checks passed.
+
+**Physical-device verification (RMX3997, `69DADENFONAIOZS4`):** a full
+native rebuild (`gradlew app:installDebug`, ~12 minutes, required to link
+`react-native-svg`'s native module and pick up the new icon resources) was
+installed and driven against the real dev backend
+(`10.169.164.233:8000`), with before/after screenshots at every step:
+- **Device name:** edited "RMX3997" → "Saad Pixel" → Save; confirmed
+  immediately in Settings, survived leaving/returning to the tab, survived
+  a full `am force-stop` + relaunch, and — since this milestone explicitly
+  allowed verifying the backend/discovery path directly rather than
+  unpairing the only physical test device — confirmed via a direct
+  `GET /devices` call against the running backend that
+  `device_name: "Saad Pixel"` had actually persisted server-side
+  (`updated_at` reflected the change). Empty-name validation showed
+  "Device name cannot be empty." inline with no network call and stayed in
+  edit mode. Cancel reverted the draft to the last-saved name without
+  saving. A full live fresh-pairing cycle exercising the new
+  `QrScanScreen`→`PairingWaiting`→`Session` threading end-to-end was **not**
+  performed (would have required unpairing the only test device, which the
+  milestone instructions explicitly said to avoid) — see Remaining
+  limitations.
+- **Download folder:** unchanged card still showed "Default
+  (Downloads/Relay)"; Change Folder opened the real Android SAF picker
+  (showing a folder from an earlier milestone's testing, confirming no
+  regression), cancelled out via back button without altering the setting,
+  and Settings still showed the same default afterward.
+- **Navigation icons:** all three tabs (Files/Transfers/Settings)
+  screenshotted with the `MissingIcon` placeholders replaced by the
+  hand-drawn folder/transfer-arrows/sliders icons, correct active
+  (brand blue)/inactive (gray) tint per tab.
+- **App icon:** not visible from this launcher's home screen (a locked-down
+  OEM launcher with no accessible app drawer via `adb input swipe`/tap —
+  documented as a limitation, not worked around by disabling device
+  restrictions) — verified instead via the task-switcher (`KEYCODE_APP_SWITCH`)
+  card, which is sourced from the same launcher-icon resource and clearly
+  showed the new blue rounded-square badge with the two-arrows glyph in
+  place of the old default RN robot icon.
+- **Clear History:** now renders in the native header via
+  `navigation.setOptions({ headerRight })`, right-aligned opposite
+  "Transfers" exactly as specified; correctly disabled/greyed when there is
+  no historical transfer to clear (verified against the already-cleared
+  state from this same session's earlier testing).
+- **Regression:** Files tab (empty state), Transfers tab (Upload buttons,
+  header), and Settings tab all re-screenshotted post-rebuild and confirmed
+  unaffected; the existing paired session remained paired throughout every
+  step, including across the native rebuild and reinstall.
+
+**Discovered but out of scope (deferred, not fixed):**
+1. `api/client.ts` still contains the leftover `[QR-DEBUG]`
+   `console.log`/`console.error` statements already flagged in P22's
+   entry — confirmed still present, still unrelated to this milestone.
+2. This RMX3997 unit's OEM launcher has no reachable app drawer/home-screen
+   icon placement via ADB automation (gesture gaps and taps on the
+   documented "swipe up" affordance did not open it) — the launcher icon
+   was verified via the task-switcher instead, which uses the identical
+   resource but is not a full substitute for seeing it in the actual
+   launcher grid. Worth a manual (non-ADB) spot check if this ever becomes
+   load-bearing.
+
+**Remaining limitations:**
+- The device-name-through-pairing threading
+  (`QrScanScreen`→`PairingWaiting`→`Session.device_name`) was verified by
+  code review and type-checking, and is structurally identical to the
+  already-tested `PairingResultScreen`/`SessionManager.setSession` path,
+  but was not exercised by a live fresh pairing in this session, per the
+  milestone's own explicit caution against unpairing the only physical
+  test device. The backend-propagation half of the feature (post-pairing
+  edit → `PATCH /devices/{id}` → `GET /devices`) *was* fully verified live.
+- Desktop has no application icon of its own yet (confirmed —
+  `desktop/assets/icons/tray.png` is a flat, unbranded color square, and no
+  window/dock icon is wired into `main.js`). The new Android icon's glyph
+  and `#2D6CDF` color are chosen so a future Desktop icon (out of scope
+  here — tracked under Packaging & Deployment) can reuse them for genuine
+  cross-platform consistency, but that Desktop work itself remains
+  undone.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:

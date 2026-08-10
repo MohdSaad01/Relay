@@ -4,7 +4,8 @@
  * Only the schemas Android is sanctioned to use are modeled here — the
  * endpoints documented as Android/dual-audience in backend/README.md
  * (`/pairing/request`, `/pairing/result/{token}`, `GET /files`,
- * `/transfers*` excluding the desktop-only accept/reject decision). Fields
+ * `/transfers*` excluding the desktop-only accept/reject decision,
+ * `PATCH /devices/{id}` for renaming itself only — P23). Fields
  * stay snake_case, matching the JSON exactly as the backend serializes it —
  * no case-conversion layer, per the thin-client rule (no logic beyond what
  * the API boundary itself requires).
@@ -53,6 +54,19 @@ export interface PairingResultResponse {
   device_secret: string;
   session_token: string;
   session_expires_at: string;
+}
+
+// --- Devices (app/schemas/device.py) ----------------------------------------
+
+/** Payload for PATCH /devices/{id} — device_name is the only mutable field. */
+export interface DeviceUpdateRequest {
+  device_name: string;
+}
+
+/** The fields Android reads back from a successful device rename (P23). */
+export interface DeviceRenameResponse {
+  id: number;
+  device_name: string;
 }
 
 // --- Shared files (app/schemas/shared_file.py) ------------------------------

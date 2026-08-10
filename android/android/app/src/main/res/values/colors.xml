@@ -4,6 +4,9 @@
          AndroidManifest.xml), matching the blue used for primary actions
          elsewhere in the app (e.g. FilesScreen's Download button). -->
     <item name="blue" type="color">#2563eb</item>
+    <!-- Relay brand blue (P23), matches Desktop's color-primary token
+         (desktop/styles/app.css) — the adaptive launcher icon's background. -->
+    <item name="ic_launcher_background" type="color">#2D6CDF</item>
     <integer-array name="androidcolors">
         <item>@color/blue</item>
     </integer-array>

@@ -48,6 +48,10 @@ build yet — plus the enhancements listed under
   `Downloads/Relay`; a Settings tab lets you pick any folder via the
   system folder picker instead. Changing it never moves or deletes files
   already saved at the previous location.
+* **Editable Android device display name** — the name a paired Android
+  device shows on the desktop's Devices list can be changed from the
+  Android Settings screen at any time; the device's underlying identity
+  (used for pairing/session lookups) never changes.
 * **Transfer history reset (Desktop and Android)** — a "Clear History"
   action on each platform's own Transfers screen hides completed, failed,
   and cancelled transfers from that list. It never deletes downloaded
@@ -195,7 +199,7 @@ request/response shapes, and auth rules: `backend/README.md`.
 |---|---|---|
 | Health | `/health` | none |
 | Settings | `/settings` | none (desktop-only, loopback) |
-| Devices | `/devices` | none (desktop-only, loopback) |
+| Devices | `/devices` | mostly none (desktop-only, loopback); `PATCH /devices/{id}` also allows a device to rename itself with its own token |
 | Pairing | `/pairing` | none (handshake issues the session token) |
 | Discovery | `/discovery` | none (desktop-only, loopback) |
 | Shared Files | `/files` | dual-audience: loopback desktop, or `DeviceSession` token |
@@ -261,10 +265,13 @@ Deliberately out of scope for Version 1 (`docs/11_File_Transfer.md` §16,
   (`GET /transfers/{id}`).
 * No packaged installer for the desktop app and no signed release APK for
   Android — both currently run from source only.
-* Whether the always-unauthenticated routes (`/devices`, `/settings`,
-  `/pairing`, `/discovery`) should also require a paired-device session was
-  raised during M9 and left open; in practice they're only ever called by
-  the desktop's own UI over loopback.
+* Whether the always-unauthenticated routes (`/settings`, `/pairing`,
+  `/discovery`, and most of `/devices`) should also require a
+  paired-device session was raised during M9 and left open; in practice
+  they're only ever called by the desktop's own UI over loopback.
+  `PATCH /devices/{id}` is the one exception (added P23, see
+  `backend/README.md`'s "Devices API"): a paired Android device calls it
+  to rename itself and must present a session token for that exact device.
 
 ## Documentation
 

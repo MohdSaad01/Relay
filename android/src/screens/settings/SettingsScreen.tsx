@@ -1,21 +1,38 @@
-import React, { useCallback, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { hasPermission, openDocumentTree } from 'react-native-saf-x';
 import { DownloadLocationManager } from '../../settings/DownloadLocationManager';
 import { useDownloadLocation } from '../../settings/useDownloadLocation';
+import { useSession } from '../../session/useSession';
+import { SessionManager } from '../../session/SessionManager';
+import { renameDevice } from '../../api/endpoints/devices';
+import { ApiError } from '../../api/client';
+import { getDefaultDeviceName } from '../../pairing/deviceName';
 
 /**
- * P14.3: shows and lets the user change where Relay publishes a completed
- * download. This setting is the real source of truth for the download
- * pipeline (files/downloadExistence.ts, streaming/blobUtil.ts) — not a
- * cosmetic display here; see settings/DownloadLocationManager.ts.
+ * A small, user-facing settings screen — deliberately not an administrative
+ * configuration panel (P23). Exposes exactly two things: this device's
+ * display name (DEVICE) and where downloads are saved (STORAGE). No session
+ * token lifetime, backend URL, or other internal configuration belongs here.
  *
- * Changing the location never touches existing downloads (see this
- * screen's own hint text) — the pipeline re-derives on-device existence
- * live against whatever the current location resolves to, the same way it
- * already recovers from an externally-deleted file, so nothing needs to be
- * moved or reconciled here.
+ * DOWNLOAD LOCATION (P14.3): shows and lets the user change where Relay
+ * publishes a completed download. This setting is the real source of truth
+ * for the download pipeline (files/downloadExistence.ts, streaming/blobUtil.ts)
+ * — not a cosmetic display here; see settings/DownloadLocationManager.ts.
+ * Changing the location never touches existing downloads (see this screen's
+ * own hint text) — the pipeline re-derives on-device existence live against
+ * whatever the current location resolves to, the same way it already
+ * recovers from an externally-deleted file, so nothing needs to be moved or
+ * reconciled here.
  */
 export function SettingsScreen() {
   const { location, isRestored } = useDownloadLocation();
@@ -90,9 +107,12 @@ export function SettingsScreen() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.sectionTitle}>Download Location</Text>
+      <Text style={styles.sectionTitle}>Device</Text>
+      <DeviceNameCard />
+
+      <Text style={[styles.sectionTitle, styles.sectionSpacing]}>Storage</Text>
       <View style={styles.card}>
-        <Text style={styles.label}>Downloads are saved to</Text>
+        <Text style={styles.label}>Download folder</Text>
         <Text style={styles.value}>{currentLabel}</Text>
         {permissionRevoked && (
           <Text style={styles.warning}>
@@ -104,16 +124,16 @@ export function SettingsScreen() {
           onPress={handleChangeLocation}
           disabled={changing}
           accessibilityRole="button"
-          accessibilityLabel="Change download location"
+          accessibilityLabel="Change download folder"
         >
-          <Text style={styles.buttonText}>{changing ? 'Choosing…' : 'Change Location'}</Text>
+          <Text style={styles.buttonText}>{changing ? 'Choosing…' : 'Change Folder'}</Text>
         </Pressable>
         {location.mode === 'custom' && (
           <Pressable
             style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}
             onPress={handleResetToDefault}
             accessibilityRole="button"
-            accessibilityLabel="Reset download location to default"
+            accessibilityLabel="Reset download folder to default"
           >
             <Text style={styles.secondaryButtonText}>Reset to Default</Text>
           </Pressable>
@@ -123,6 +143,129 @@ export function SettingsScreen() {
           location.
         </Text>
       </View>
+    </View>
+  );
+}
+
+/**
+ * The device display name shown on the desktop's Devices list — distinct
+ * from device_identifier, which is generated once at pairing and never
+ * changes (pairing/deviceIdentifier.ts). Renaming calls
+ * `PATCH /devices/{id}` and, only once that succeeds, updates the local
+ * Session so the new name survives navigating away and an app restart
+ * (SessionManager persists via secure storage on every write).
+ */
+function DeviceNameCard() {
+  const { session } = useSession();
+  // A session persisted before P23 has no device_name (the field didn't
+  // exist yet) — falls back to the same default a fresh pairing would have
+  // used, rather than rendering blank. Saving (even unchanged) self-heals
+  // the stored session, since the fallback never equals session.device_name.
+  const currentName = session?.device_name || getDefaultDeviceName();
+  const [editing, setEditing] = useState(false);
+  const [draftName, setDraftName] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Keeps the draft in sync if the session's name changes out from under an
+  // idle (non-editing) card — e.g. right after a save commits.
+  useEffect(() => {
+    if (!editing) {
+      setDraftName(currentName);
+    }
+  }, [editing, currentName]);
+
+  const handleStartEdit = useCallback(() => {
+    setError(null);
+    setDraftName(currentName);
+    setEditing(true);
+  }, [currentName]);
+
+  const handleCancelEdit = useCallback(() => {
+    setError(null);
+    setEditing(false);
+  }, []);
+
+  const handleSave = useCallback(async () => {
+    if (!session) {
+      return;
+    }
+    const trimmed = draftName.trim();
+    if (!trimmed) {
+      setError('Device name cannot be empty.');
+      return;
+    }
+    if (trimmed === session.device_name) {
+      // Nothing changed — no need to round-trip to the backend.
+      setEditing(false);
+      return;
+    }
+    setError(null);
+    setSaving(true);
+    try {
+      await renameDevice(session.device_id, trimmed);
+      await SessionManager.updateDeviceName(trimmed);
+      setEditing(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save this name. Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  }, [draftName, session]);
+
+  if (!session) {
+    return null;
+  }
+
+  return (
+    <View style={styles.card}>
+      <Text style={styles.label}>Device display name</Text>
+      {editing ? (
+        <>
+          <TextInput
+            style={styles.input}
+            value={draftName}
+            onChangeText={setDraftName}
+            autoFocus
+            editable={!saving}
+            accessibilityLabel="Device display name"
+          />
+          {error && <Text style={styles.warning}>{error}</Text>}
+          <View style={styles.editRow}>
+            <Pressable
+              style={({ pressed }) => [styles.secondaryButtonSmall, pressed && styles.buttonPressed]}
+              onPress={handleCancelEdit}
+              disabled={saving}
+              accessibilityRole="button"
+              accessibilityLabel="Cancel editing device name"
+            >
+              <Text style={styles.secondaryButtonText}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.buttonSmall, pressed && styles.buttonPressed]}
+              onPress={handleSave}
+              disabled={saving}
+              accessibilityRole="button"
+              accessibilityLabel="Save device name"
+            >
+              <Text style={styles.buttonText}>{saving ? 'Saving…' : 'Save'}</Text>
+            </Pressable>
+          </View>
+        </>
+      ) : (
+        <>
+          <Text style={styles.value}>{currentName}</Text>
+          <Pressable
+            style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}
+            onPress={handleStartEdit}
+            accessibilityRole="button"
+            accessibilityLabel="Edit device name"
+          >
+            <Text style={styles.secondaryButtonText}>Edit Name</Text>
+          </Pressable>
+          <Text style={styles.hint}>This is the name paired desktops see for this device.</Text>
+        </>
+      )}
     </View>
   );
 }
@@ -144,6 +287,9 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     marginBottom: 8,
   },
+  sectionSpacing: {
+    marginTop: 24,
+  },
   card: {
     backgroundColor: '#f5f5f5',
     borderRadius: 8,
@@ -157,6 +303,15 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     marginTop: 4,
+  },
+  input: {
+    marginTop: 4,
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#111',
+    borderBottomWidth: 2,
+    borderBottomColor: '#2563eb',
+    paddingVertical: 4,
   },
   warning: {
     marginTop: 12,
@@ -190,6 +345,26 @@ const styles = StyleSheet.create({
     color: '#333',
     fontSize: 15,
     fontWeight: '600',
+  },
+  editRow: {
+    flexDirection: 'row',
+    marginTop: 12,
+    gap: 8,
+  },
+  secondaryButtonSmall: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#999',
+    alignItems: 'center',
+  },
+  buttonSmall: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 8,
+    backgroundColor: '#2563eb',
+    alignItems: 'center',
   },
   hint: {
     marginTop: 12,

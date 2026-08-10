@@ -1,7 +1,12 @@
 """Tests for the /devices endpoints."""
 
+from datetime import timedelta
+
 from fastapi.testclient import TestClient
 
+from app.core.security import hash_token
+from app.models.device_session import DeviceSession
+from app.utils.time import utc_now
 from tests.repositories.conftest import make_device
 
 
@@ -10,6 +15,23 @@ def _create_device(client: TestClient, identifier: str = "device-uuid-1", name: 
     session = client.session_factory()  # type: ignore[attr-defined]
     device = make_device(identifier=identifier, name=name)
     session.add(device)
+    session.commit()
+    device_id = device.id
+    session.close()
+    return device_id
+
+
+def _create_device_with_token(
+    client: TestClient, identifier: str = "device-uuid-1", name: str = "Test Phone", token: str = "valid-token"
+) -> int:
+    """Seed a paired device with a valid session token, for the PATCH-as-self tests (P23)."""
+    session = client.session_factory()  # type: ignore[attr-defined]
+    device = make_device(identifier=identifier, name=name)
+    session.add(device)
+    session.flush()
+    session.add(
+        DeviceSession(device_id=device.id, token_hash=hash_token(token), expires_at=utc_now() + timedelta(minutes=30))
+    )
     session.commit()
     device_id = device.id
     session.close()
@@ -51,27 +73,66 @@ def test_get_device_returns_404_when_missing(client: TestClient) -> None:
     assert response.json()["success"] is False
 
 
-def test_patch_device_renames_it(client: TestClient) -> None:
+def test_patch_device_renames_it(client: TestClient, desktop_client: TestClient) -> None:
     device_id = _create_device(client)
 
-    response = client.patch(f"/api/v1/devices/{device_id}", json={"device_name": "New Name"})
+    response = desktop_client.patch(f"/api/v1/devices/{device_id}", json={"device_name": "New Name"})
 
     assert response.status_code == 200
     assert response.json()["data"]["device_name"] == "New Name"
 
 
-def test_patch_device_rejects_blank_name(client: TestClient) -> None:
+def test_patch_device_rejects_blank_name(client: TestClient, desktop_client: TestClient) -> None:
     device_id = _create_device(client)
 
-    response = client.patch(f"/api/v1/devices/{device_id}", json={"device_name": "   "})
+    response = desktop_client.patch(f"/api/v1/devices/{device_id}", json={"device_name": "   "})
 
     assert response.status_code == 400
 
 
-def test_patch_device_returns_404_when_missing(client: TestClient) -> None:
-    response = client.patch("/api/v1/devices/999", json={"device_name": "New Name"})
+def test_patch_device_returns_404_when_missing(desktop_client: TestClient) -> None:
+    response = desktop_client.patch("/api/v1/devices/999", json={"device_name": "New Name"})
 
     assert response.status_code == 404
+
+
+# --- PATCH /devices/{id} as a non-loopback (Android) caller (P23) ------------
+
+
+def test_patch_device_as_self_renames_it(client: TestClient) -> None:
+    """A paired Android device, presenting its own valid session token, may rename itself."""
+    device_id = _create_device_with_token(client)
+
+    response = client.patch(
+        f"/api/v1/devices/{device_id}",
+        json={"device_name": "New Name"},
+        headers={"Authorization": "Bearer valid-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["device_name"] == "New Name"
+
+
+def test_patch_device_rejects_non_loopback_caller_without_token(client: TestClient) -> None:
+    device_id = _create_device(client)
+
+    response = client.patch(f"/api/v1/devices/{device_id}", json={"device_name": "New Name"})
+
+    assert response.status_code == 401
+
+
+def test_patch_device_rejects_token_for_a_different_device(client: TestClient) -> None:
+    """A valid session token may not be used to rename a different device."""
+    _create_device_with_token(client, identifier="device-uuid-self", token="valid-token")
+    other_device_id = _create_device(client, identifier="device-uuid-other", name="Other Phone")
+
+    response = client.patch(
+        f"/api/v1/devices/{other_device_id}",
+        json={"device_name": "New Name"},
+        headers={"Authorization": "Bearer valid-token"},
+    )
+
+    assert response.status_code == 401
 
 
 def test_delete_device_returns_204_with_empty_body(client: TestClient) -> None:

@@ -106,14 +106,15 @@ export function QrScanScreen() {
 
       isSubmittingRef.current = true;
       setSubmitting(true);
+      const deviceName = getDefaultDeviceName();
       try {
         await submitPairingRequest(desktopBaseUrl, {
           pairing_token: pairingToken,
           device_identifier: generateDeviceIdentifier(),
-          device_name: getDefaultDeviceName(),
+          device_name: deviceName,
           platform: 'android',
         });
-        navigation.navigate('PairingWaiting', { desktopBaseUrl, pairingToken });
+        navigation.navigate('PairingWaiting', { desktopBaseUrl, pairingToken, deviceName });
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'Could not reach that desktop.');
         isSubmittingRef.current = false;

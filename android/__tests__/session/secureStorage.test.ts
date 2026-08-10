@@ -9,6 +9,7 @@ const sampleSession: Session = {
   session_token: 'session-token',
   session_expires_at: '2026-01-01T00:00:00Z',
   desktop_base_url: 'http://192.168.1.10:8000/api/v1',
+  device_name: 'Test Phone',
 };
 
 beforeEach(() => {

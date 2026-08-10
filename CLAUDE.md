@@ -293,6 +293,62 @@ confirmed library limitation; `downloadActions.ts`'s `shareDownloadedFile`
 detects this and rejects with a plain message instead of invoking a broken
 share.
 
+### Android Settings, Navigation & App Identity (P23)
+
+**Android Settings is a small, user-facing screen, not an administrative
+configuration panel.** `screens/settings/SettingsScreen.tsx` exposes
+exactly two sections — `DEVICE` (display name) and `STORAGE` (download
+folder, P14.3, unchanged) — matching the sectioned-card pattern already
+used for the download-folder card. Session token lifetime, backend/session
+configuration, and other internal/developer settings must not be added
+here; that boundary was explicit in the P23 source requirements.
+
+**A device's display name is editable, independent of its identifier.**
+`pairing/deviceIdentifier.ts`'s `device_identifier` (a UUID, generated once
+at pairing) is permanent internal identity and must never change.
+`session/types.ts`'s `Session.device_name` is the human-readable label
+shown on the desktop's Devices list — editable from Settings via
+`api/endpoints/devices.ts`'s `renameDevice` (`PATCH /devices/{id}`),
+committed locally only after the backend call succeeds
+(`SessionManager.updateDeviceName`). A session persisted before this field
+existed falls back to `pairing/deviceName.ts`'s `getDefaultDeviceName()`
+rather than rendering blank — any future field added to `Session` should
+consider the same backward-compatibility gap for an already-paired
+install.
+
+**`PATCH /devices/{id}` is the one `/devices` route with real auth**, added
+because P23 made it the first route on that router a non-loopback (Android)
+caller genuinely calls. `verify_device_owner`
+(`backend/app/api/dependencies.py`) allows the trusted loopback desktop
+caller to rename any device, as before, but requires any other caller to
+present a session token belonging to that exact `device_id` — a device may
+rename only itself. `GET /devices`, `GET /devices/{id}`, and
+`DELETE /devices/{id}` are unchanged and still unauthenticated; do not
+assume this pattern extends to them without the same explicit
+loopback-vs-Android-caller analysis (`backend/README.md`'s "Devices API"
+section has the full reasoning).
+
+**Bottom-navigation icons are hand-drawn `react-native-svg`, not an
+icon-font/library.** `components/icons.tsx` mirrors Desktop's own
+inline-SVG icon language (`desktop/src/renderer/icons.js`: stroke-based,
+`currentColor`-equivalent, round caps/joins) rather than pulling in
+`react-native-vector-icons`/`@expo/vector-icons` for three icons.
+`react-native-svg` itself was added as a rendering primitive (no bundled
+icon set) — reuse it for any future Android icon rather than adding a
+second icon mechanism. `navigation/MainTabs.tsx`'s `ACTIVE_TINT`/
+`INACTIVE_TINT` match Desktop's `--color-primary`/`--color-text-muted`
+tokens (`desktop/styles/app.css`) — keep any new brand-colored Android UI
+consistent with those same values rather than picking a new blue.
+
+**The Android app icon (`android/app/src/main/res/mipmap-anydpi-v26/`,
+`drawable/ic_launcher_foreground.xml`, legacy per-density PNGs) uses the
+same two-opposing-arrows glyph as the Transfers nav icon**, on the shared
+Relay-blue background (`@color/ic_launcher_background`, `#2D6CDF`, matching
+Desktop's `--color-primary`). This is the closest thing to an established
+Relay visual identity in the codebase — Desktop has no equivalent icon
+file yet (tracked under Packaging & Deployment); if one is added later, it
+should reuse this same glyph/color rather than inventing a new mark.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)

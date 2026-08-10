@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -37,6 +37,11 @@ type Navigation = NativeStackNavigationProp<TransfersStackParamList, 'TransferLi
  * the transfer and, mirroring FilesScreen's download flow, immediately hands
  * it to TransferStreamManager to start moving bytes without waiting for a
  * separate desktop decision.
+ *
+ * Clear History (P14.4 functionality, P23 placement) renders in the native
+ * header via navigation.setOptions({ headerRight }), next to the "Transfers"
+ * title set by TransfersStack — not in the content area below the upload
+ * buttons, where it lived before P23.
  */
 export function TransferListScreen() {
   const navigation = useNavigation<Navigation>();
@@ -239,22 +244,15 @@ export function TransferListScreen() {
     );
   }, []);
 
-  const error = transfersError ?? uploadError ?? folderUploadError;
-
-  return (
-    <View style={styles.container}>
-      <View style={styles.uploadRow}>
-        <Pressable style={styles.uploadButton} onPress={handleUpload} disabled={uploading}>
-          <Text style={styles.uploadButtonText}>{uploading ? 'Requesting...' : 'Upload a File'}</Text>
-        </Pressable>
-        <Pressable style={styles.uploadButton} onPress={handleUploadFolder} disabled={uploadingFolder}>
-          <Text style={styles.uploadButtonText}>{uploadingFolder ? 'Uploading...' : 'Upload a Folder'}</Text>
-        </Pressable>
-      </View>
-
-      <View style={styles.clearHistoryRow}>
+  // P23: Clear History lives in the header (next to the "Transfers" title),
+  // not the content area — see this component's own doc comment. Re-set
+  // whenever its enabled/label state changes, since headerRight is a
+  // render function captured once per navigation.setOptions call.
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerRight: () => (
         <Pressable
-          style={styles.clearHistoryButton}
+          style={styles.headerClearHistoryButton}
           onPress={handleClearHistory}
           disabled={!clearedAtLoaded || clearingHistory || !hasHistoryToClear}
           accessibilityRole="button"
@@ -268,6 +266,21 @@ export function TransferListScreen() {
           >
             {clearingHistory ? 'Clearing...' : 'Clear History'}
           </Text>
+        </Pressable>
+      ),
+    });
+  }, [navigation, handleClearHistory, clearedAtLoaded, clearingHistory, hasHistoryToClear]);
+
+  const error = transfersError ?? uploadError ?? folderUploadError;
+
+  return (
+    <View style={styles.container}>
+      <View style={styles.uploadRow}>
+        <Pressable style={styles.uploadButton} onPress={handleUpload} disabled={uploading}>
+          <Text style={styles.uploadButtonText}>{uploading ? 'Requesting...' : 'Upload a File'}</Text>
+        </Pressable>
+        <Pressable style={styles.uploadButton} onPress={handleUploadFolder} disabled={uploadingFolder}>
+          <Text style={styles.uploadButtonText}>{uploadingFolder ? 'Uploading...' : 'Upload a Folder'}</Text>
         </Pressable>
       </View>
 
@@ -379,14 +392,9 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
   },
-  clearHistoryRow: {
-    alignItems: 'flex-end',
-    marginHorizontal: 16,
-    marginTop: 10,
-  },
-  clearHistoryButton: {
+  headerClearHistoryButton: {
     paddingVertical: 6,
-    paddingHorizontal: 4,
+    paddingHorizontal: 16,
   },
   clearHistoryText: {
     color: '#dc2626',

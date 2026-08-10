@@ -65,6 +65,23 @@ export const SessionManager = {
     notify();
   },
 
+  /**
+   * Updates just the display name on the current session and persists it —
+   * called after a successful `PATCH /devices/{id}` (P23's Settings screen
+   * rename), never before. Throws if there is no current session; the
+   * Settings screen only offers renaming once paired, so this should be
+   * unreachable otherwise.
+   */
+  async updateDeviceName(deviceName: string): Promise<void> {
+    if (!currentSession) {
+      throw new Error('updateDeviceName called with no active session.');
+    }
+    const updated: Session = { ...currentSession, device_name: deviceName };
+    await saveSession(updated);
+    currentSession = updated;
+    notify();
+  },
+
   /** Clears the session everywhere: secure storage, memory, and api/config. Used on explicit "forget" or a 401. */
   async clearSession(): Promise<void> {
     await clearStoredSession();

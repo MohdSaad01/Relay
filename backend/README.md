@@ -91,10 +91,13 @@ use `RequestingDeviceDep`; the Android-only transfer-proposal and
 byte-streaming routes (`POST /transfers/requests`,
 `GET /transfers/{id}/download`, `POST /transfers/{id}/upload`) require
 `CurrentDeviceDep` outright — see [Shared Files API](#shared-files-api) and
-[Transfer API](#transfer-api) below. `/settings`, `/devices`, and
-`/pairing` remain unauthenticated — still desktop-only, loopback-trusted
-endpoints in practice, and whether they should ever require a session was
-raised during M9 and left open.
+[Transfer API](#transfer-api) below. `/settings` and `/pairing` remain
+fully unauthenticated — still desktop-only, loopback-trusted endpoints in
+practice, and whether they should ever require a session was raised during
+M9 and left open. `/devices` followed the same pattern until P23 (Android
+Settings), which needed `PATCH /devices/{id}` (device display-name rename)
+to be genuinely callable by Android itself — see [Devices
+API](#devices-api) below for the narrow, route-scoped fix.
 
 ## Shared File Infrastructure
 
@@ -417,6 +420,32 @@ All error responses use the same `ApiResponse` envelope (`success: false`,
 response additionally carries a `WWW-Authenticate: Bearer` header, and its
 message is deliberately generic — see
 [Authentication Infrastructure](#authentication-infrastructure) above.
+
+## Devices API
+
+`app/api/v1/devices.py` exposes `DeviceService` (list, inspect, rename,
+remove a paired device) over HTTP.
+
+| Endpoint | Status codes | Caller |
+|---|---|---|
+| `GET /devices` | 200 | Desktop |
+| `GET /devices/{id}` | 200, 404 | Desktop |
+| `PATCH /devices/{id}` | 200, 400, 401, 404 | Desktop, or the device itself |
+| `DELETE /devices/{id}` | 204, 404 | Desktop |
+
+`PATCH /devices/{id}` is the router's one dual-audience route, added in
+P23 so Android's Settings screen can rename its own device display name
+(the human-readable label a paired device shows on the desktop's Devices
+list — distinct from `device_identifier`, which never changes after
+pairing). The trusted loopback desktop caller may rename any device, as
+before; any other caller must present a `DeviceSession` bearer token
+(`DeviceOwnerAuthDep`/`verify_device_owner`, `app/api/dependencies.py`)
+belonging to the exact `device_id` in the path — a valid token for a
+*different* device is rejected with the same generic 401 as a missing or
+unknown one (`docs/10_Security.md` §11: never reveal which case
+occurred). `GET /devices`, `GET /devices/{id}`, and `DELETE /devices/{id}`
+are unchanged — still desktop-only and unauthenticated in practice, since
+Android has no legitimate reason to list/inspect/unpair devices.
 
 ## Pairing API
 

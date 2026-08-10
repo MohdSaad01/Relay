@@ -19,6 +19,7 @@ from app.services.discovery_service import DiscoveryService
 from app.services.discovery_service import (
     get_discovery_service as _get_discovery_service,
 )
+from app.services.exceptions import AuthenticationError
 from app.services.pairing_manager import PairingManager
 from app.services.pairing_manager import get_pairing_manager as _get_pairing_manager
 from app.services.pairing_service import PairingService
@@ -156,6 +157,35 @@ def get_requesting_device(
     return get_current_device(credentials, auth_service)
 
 
+def verify_device_owner(
+    device_id: int,
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)],
+    auth_service: Annotated[AuthService, Depends(get_auth_service)],
+) -> None:
+    """Gate a path-scoped `/devices/{device_id}` mutation (currently just
+    `PATCH /devices/{device_id}`, the device-display-name rename Android's
+    Settings screen calls — P23) to the trusted loopback desktop caller or a
+    session token belonging to that exact device.
+
+    Every other route on this router (`GET /devices`, `GET /devices/{id}`,
+    `DELETE /devices/{id}`) stays exactly as unauthenticated as before — this
+    closes only the specific gap M9 flagged ("revisit if Android is ever
+    expected to call those routes directly") for the one route Android now
+    genuinely calls, rather than reworking the whole router's auth posture.
+
+    A valid token for a *different* device raises the same generic
+    AuthenticationError as a missing/invalid one (10_Security.md §11: never
+    reveal which case occurred), so this never confirms or denies that
+    `device_id` belongs to some other paired device.
+    """
+    if _is_loopback_request(request):
+        return
+    device = get_current_device(credentials, auth_service)
+    if device.id != device_id:
+        raise AuthenticationError("Invalid or expired session token.")
+
+
 AppSettingsServiceDep = Annotated[AppSettingsService, Depends(get_app_settings_service)]
 DeviceServiceDep = Annotated[DeviceService, Depends(get_device_service)]
 PairingServiceDep = Annotated[PairingService, Depends(get_pairing_service)]
@@ -167,3 +197,4 @@ TransferStreamServiceDep = Annotated[TransferStreamService, Depends(get_transfer
 DiscoveryServiceDep = Annotated[DiscoveryService, Depends(get_discovery_service)]
 CurrentDeviceDep = Annotated[Device, Depends(get_current_device)]
 RequestingDeviceDep = Annotated[Device | None, Depends(get_requesting_device)]
+DeviceOwnerAuthDep = Annotated[None, Depends(verify_device_owner)]

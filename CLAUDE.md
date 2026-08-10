@@ -344,10 +344,10 @@ consistent with those same values rather than picking a new blue.
 `drawable/ic_launcher_foreground.xml`, legacy per-density PNGs) uses the
 same two-opposing-arrows glyph as the Transfers nav icon**, on the shared
 Relay-blue background (`@color/ic_launcher_background`, `#2D6CDF`, matching
-Desktop's `--color-primary`). This is the closest thing to an established
-Relay visual identity in the codebase — Desktop has no equivalent icon
-file yet (tracked under Packaging & Deployment); if one is added later, it
-should reuse this same glyph/color rather than inventing a new mark.
+Desktop's `--color-primary`). Desktop now has a matching icon (P25,
+`desktop/assets/icons/icon.ico`/`tray.png`) rendering the identical arrow
+geometry on the same background — reuse this same glyph/color for any
+future Relay icon surface rather than inventing a new mark.
 
 ### Android Discovery & QR Pairing UX (P24)
 
@@ -376,6 +376,47 @@ pairing succeeds, so `DiscoveryScreen` never renders while a session
 exists. Do not add paired-state handling to the discovered-device row; the
 correct fix for any future "why doesn't this distinguish paired devices"
 question is this structural fact, not new UI.
+
+### Desktop Settings & Application Chrome (P25)
+
+**Session token lifetime is internal-only.** `app_settings.session_token_lifetime_minutes`
+still exists on the backend — `PairingService.approve_pairing` genuinely
+computes `DeviceSession` expiry from it — but the desktop Settings UI
+(`desktop/src/renderer/views/settings.js`) no longer exposes it. `PATCH
+/settings` is a partial-update endpoint, so the field is simply omitted
+from the request body rather than sent with a fixed/dummy value. Do not
+re-add a user-facing control for this, and do not remove the backend
+field/mechanism — only the UI was in scope.
+
+**A stale local `app_settings.download_directory` is dev-database state,
+not a code defect.** `AppSettingsService.get_settings()` already resolves a
+correct first-run default (`Path.home() / "Downloads"`), and
+`TransferStreamService` already reads `download_directory` fresh from
+settings on every upload — there is no second/cached/hard-coded path
+anywhere in the receive flow. If a future session sees an internal-looking
+path in Settings, check the local `backend/relay.db` (gitignored, dev-only)
+for a leftover value written by a previous manual `PATCH /settings` test
+before assuming the default-resolution or receive-path code is broken.
+
+**The desktop app has no `Menu.setApplicationMenu(...)` at all** —
+`desktop/src/main/main.js`'s `startup()` calls
+`Menu.setApplicationMenu(null)`, removing Electron's stock File/Edit/View/
+Window bar outright. Confirmed nothing in `desktop/src/` registers a menu
+role or relies on a menu-provided accelerator (the tray's own context menu,
+`tray.js`, is unrelated and unaffected). Do not reintroduce a visible
+top-level menu bar without first confirming new functionality actually
+needs one — prefer wiring it through the existing UI (nav, dialogs) first.
+
+**The Desktop app icon
+(`desktop/assets/icons/icon.ico`/`tray.png`) renders the same
+two-opposing-arrows glyph as Android's launcher icon on the same
+`#2D6CDF` background**, wired into `main.js`'s `BrowserWindow` `icon` (the
+`.ico`, for crisper Windows title-bar/taskbar rendering) and `tray.js`'s
+`Tray` (the `.png`, resized at runtime). There is still no
+`electron-builder`/packaging config in `desktop/package.json` — a packaged
+installer/executable icon remains open for the Packaging & Deployment
+milestone, which should point that config at `icon.ico` rather than
+regenerating a new asset.
 
 ## Not Yet Implemented
 

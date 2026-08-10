@@ -37,10 +37,6 @@ function render(container, settings) {
         <input type="checkbox" name="discovery_enabled" ${settings.discovery_enabled ? "checked" : ""} />
         Discoverable on the local network
       </label>
-      <label>
-        Session token lifetime (minutes)
-        <input type="number" name="session_token_lifetime_minutes" min="1" value="${settings.session_token_lifetime_minutes}" />
-      </label>
       <div class="button-row">
         <button type="submit" class="primary">Save</button>
         <span id="save-status" class="muted"></span>
@@ -65,7 +61,6 @@ function render(container, settings) {
         device_display_name: form.elements.device_display_name.value,
         download_directory: form.elements.download_directory.value,
         discovery_enabled: form.elements.discovery_enabled.checked,
-        session_token_lifetime_minutes: Number(form.elements.session_token_lifetime_minutes.value),
       });
       statusEl.textContent = "Saved.";
     } catch (err) {

@@ -1,7 +1,7 @@
 "use strict";
 
 const path = require("node:path");
-const { app, BrowserWindow, dialog } = require("electron");
+const { app, BrowserWindow, dialog, Menu } = require("electron");
 
 const { Logger } = require("./logger");
 const { BackendManager } = require("./backend-manager");
@@ -9,7 +9,11 @@ const { createTray } = require("./tray");
 const { registerIpcHandlers } = require("./ipc-handlers");
 
 const BACKEND_PORT = 8000;
-const ICON_PATH = path.join(__dirname, "..", "..", "assets", "icons", "tray.png");
+// Windows taskbar/title-bar icon: a multi-resolution .ico renders crisper
+// than a single PNG at the OS's various icon sizes. The tray icon (below)
+// stays PNG since Tray only ever needs one small raster size.
+const WINDOW_ICON_PATH = path.join(__dirname, "..", "..", "assets", "icons", "icon.ico");
+const TRAY_ICON_PATH = path.join(__dirname, "..", "..", "assets", "icons", "tray.png");
 const PRELOAD_PATH = path.join(__dirname, "..", "preload", "preload.js");
 const INDEX_HTML_PATH = path.join(__dirname, "..", "renderer", "index.html");
 
@@ -65,7 +69,7 @@ function createMainWindow() {
     height: 720,
     show: false,
     backgroundColor: "#f6f7f9",
-    icon: ICON_PATH,
+    icon: WINDOW_ICON_PATH,
     webPreferences: {
       preload: PRELOAD_PATH,
       contextIsolation: true,
@@ -88,6 +92,13 @@ function createMainWindow() {
 }
 
 async function startup() {
+  // P25: the default File/Edit/View/Window menu bar is Electron's stock
+  // template - nothing in this app registers menu roles, accelerators, or
+  // otherwise depends on it (no custom Menu was ever built; devtools/reload
+  // are dev-only concerns, not normal-user functionality). Removing it
+  // outright, rather than hiding it behind a secondary menu, is safe.
+  Menu.setApplicationMenu(null);
+
   backendManager.onStatusChange = (state) => {
     logger.info(`Backend state: ${state}`);
     if (mainWindow) {
@@ -115,7 +126,7 @@ async function startup() {
   mainWindow = createMainWindow();
 
   tray = createTray({
-    iconPath: ICON_PATH,
+    iconPath: TRAY_ICON_PATH,
     onShowWindow: () => {
       mainWindow.show();
       mainWindow.focus();

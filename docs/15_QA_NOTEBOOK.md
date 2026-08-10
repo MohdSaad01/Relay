@@ -2581,6 +2581,150 @@ touched.
 
 ---
 
+# Milestone P25 — Desktop Settings & Application Chrome
+
+**Scope:** remove the user-facing Session Token Lifetime setting (internal
+mechanism must survive), investigate and correct the Download Directory
+default/behavior, remove or relocate the traditional File/Edit/View/Window
+menu bar, and add a real Desktop application icon matching the Android
+identity (P23). Explicitly not touched: Files metadata, received-file
+behavior, deletion, upload picker/folder semantics, Android UI, transfer
+protocol, unrelated backend refactoring.
+
+**Baseline investigation.** `desktop/src/renderer/views/settings.js`
+exposed `session_token_lifetime_minutes` as a plain number input, PATCHed
+verbatim to the backend. `backend/app/services/pairing_service.py:128`
+confirmed the field is genuinely load-bearing (`DeviceSession` expiry is
+computed from it) — it could not simply be deleted from the model/schema,
+only from the desktop UI.
+
+For Download Directory, `backend/app/services/app_settings_service.py`'s
+`get_settings()` already computes a sensible first-run default
+(`Path.home() / "Downloads"`) with no dependency on `RELAY_DATA_DIR` or any
+temp path. Querying the local dev `backend/relay.db` directly showed the
+persisted row's `download_directory` was
+`...\Temp\claude\...\scratchpad\live_verify\downloads` — a value written by
+a *previous milestone's own live-verification session* via `PATCH
+/settings`, then never reset, and reused on every subsequent dev run
+because `get_settings()` only applies its default when no row exists yet.
+This is local, gitignored dev-database state (`backend/relay.db` matches
+`.gitignore`'s `*.db`), not a defect in the default-resolution code or
+anything a real end-user install would ever see. `transfer_stream_service.py`'s
+`receive_upload` (RECEIVE path) and `cleanup_orphaned_upload_temp_files`
+both call `self.app_settings_service.get_settings().download_directory`
+fresh on every use — no caching, no second hard-coded path — so a Settings
+change was already wired all the way to the actual receive path; this
+needed live proof, not a code fix.
+
+For the menu bar, `desktop/src/main/main.js` never called
+`Menu.setApplicationMenu(...)` — the visible File/Edit/View/Window bar was
+purely Electron's stock default template. A repo-wide search found no menu
+role, accelerator, or `Menu`-dependent code anywhere in `desktop/src/`
+outside the unrelated tray context menu (`tray.js`); nothing in the
+renderer relies on menu-provided shortcuts.
+
+For the icon, `desktop/assets/icons/tray.png` (used for both the
+`BrowserWindow` icon and the tray icon) was a flat `#2D6CDF` square with no
+glyph — confirmed by reading the file directly. Android's established
+identity (P23) is a white two-opposing-arrows glyph
+(`android/android/app/src/main/res/drawable/ic_launcher_foreground.xml`) on
+the same `#2D6CDF` background. No `electron-builder`/packaging config
+exists yet in `desktop/package.json` (packaging is still a future
+milestone per `docs/12_Packaging_Deployment.md`), so there is no installer
+icon field to wire.
+
+**What P25 changed:**
+1. `desktop/src/renderer/views/settings.js` — removed the "Session token
+   lifetime (minutes)" label/input and its field from the `PATCH /settings`
+   body. The backend field, `AppSettingsService`'s validation, and
+   `PairingService`'s use of it are untouched — `PATCH /settings` is a
+   partial-update endpoint, so simply omitting the field leaves the stored
+   value alone.
+2. Reset the local dev `app_settings` row (deleted, letting
+   `get_settings()` recreate it) to exercise the real first-run default
+   path live — confirmed it resolves to `C:\Users\Saad\Downloads`, not a
+   temp path. No application code changed for this; the default was
+   already correct.
+3. `desktop/src/main/main.js` — added `Menu.setApplicationMenu(null)`
+   during `startup()`, with a comment recording why it's safe (no roles,
+   accelerators, or menu-dependent functionality found).
+4. Generated `desktop/assets/icons/icon.ico` (multi-resolution: 16–256px)
+   and regenerated `desktop/assets/icons/tray.png`, both rendering the same
+   arrow geometry as the Android adaptive-icon foreground, scaled onto the
+   `#2D6CDF` background — produced with a throwaway Pillow script (Pillow
+   was already present in `backend/.venv`; not added as a project
+   dependency, and the script itself was not committed). `main.js` now
+   points the `BrowserWindow`'s `icon` at the new `.ico` (crisper at
+   Windows' various native sizes) and the tray at the regenerated PNG.
+
+**Root cause:** the Session Token Lifetime UI was simply a setting exposed
+that should have stayed internal — no deeper cause. The Download Directory
+"bug" was leftover local dev-session state, not a code defect — the actual
+default-resolution and receive-path code were already correct; nothing
+there needed changing. The menu bar and icon were both true gaps: an
+unconfigured Electron default and an unfinished placeholder asset,
+respectively.
+
+**Live verification (real running app + real backend, not mocks):**
+- Killed a stale pre-P25 Electron instance (single-instance lock was
+  masking the code changes) and relaunched `npm start` fresh. Screenshots
+  before/after confirm: no File/Edit/View/Window bar, and the title-bar
+  icon shows the Relay glyph instead of a blank blue square.
+- `GET /settings` against the running backend after deleting the dev row
+  returned `download_directory: "C:\\Users\\Saad\\Downloads"` — the real
+  default path, auto-created on first access, no code change required.
+- Settings screen screenshot confirms the Session Token Lifetime field is
+  gone and Download Directory shows the sensible default.
+- `PATCH /settings` to a new directory (`...\Documents\RelayTestDownloads`)
+  persisted correctly (`GET /settings` echoed it back).
+- Directly exercised `TransferStreamService.receive_upload` (the real
+  RECEIVE code path, not a mock) against the live dev DB with a synthetic
+  `IN_PROGRESS` `Transfer` row tied to the already-paired device: the
+  resulting file was written to
+  `C:\Users\Saad\Documents\RelayTestDownloads\p25-verify.txt` with matching
+  content, and the transfer finalized `COMPLETED`. This is the strongest
+  available proof that a Settings change actually redirects where received
+  files land, given no physical Android device was available this session
+  to drive a real phone-to-desktop upload.
+- `GET /transfers` still returned existing transfer history normally after
+  the directory change (no breakage to unrelated functionality).
+- Restored `download_directory` to `C:\Users\Saad\Downloads`, deleted the
+  synthetic transfer row and test file/directory, and removed the
+  temporary `relay.db.p25-backup` — dev environment left clean.
+- `backend`: full `pytest` suite (343 passed, 2 skipped) — unaffected,
+  since no backend source was modified.
+- `desktop`: no lint/type-check/test tooling exists yet in this package
+  (`package.json` has only a `start` script) — nothing to run.
+
+**Remaining limitations:**
+- No physical Android device was available this session to drive an actual
+  phone→desktop upload through the UI end-to-end; the receive path was
+  instead verified directly against the real service layer (see above),
+  which exercises the identical code `POST /transfers/{id}/upload` calls
+  minus the HTTP/ASGI framing itself.
+- The Desktop icon is wired into the `BrowserWindow`/taskbar/title-bar at
+  runtime (the strongest verification available in the current
+  environment) but not into a packaged installer/executable icon resource,
+  since `desktop/package.json` has no `electron-builder` (or equivalent)
+  configuration yet — that lands with the deferred Packaging & Deployment
+  milestone (`docs/12_Packaging_Deployment.md`).
+- The menu-bar removal was verified for this app's own code paths (no
+  registered roles/accelerators) and live launch/navigation/window
+  behavior; it was not exhaustively fuzz-tested against every possible
+  Electron-default keyboard shortcut.
+
+**Final verdict:** all four P25 requirements were real, unimplemented gaps
+except the Download Directory default/receive-path wiring, which was
+already correct — the visible symptom was local dev-database leftover
+state, confirmed and reset, not a code fix. Session Token Lifetime is now
+internal-only (backend mechanism unchanged). The menu bar is removed
+outright (nothing depended on it). The Desktop app now has a real,
+Android-matching icon wired into the running window/taskbar/tray; packaged
+installer-icon verification remains open pending the Packaging &
+Deployment milestone.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:

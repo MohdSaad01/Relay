@@ -233,6 +233,13 @@ body {
   gap: var(--space-5);
 }
 
+.device-card-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
 .device-card-title {
   display: flex;
   align-items: center;
@@ -486,6 +493,20 @@ button.danger:hover {
   background: var(--color-bg);
   color: var(--color-text-muted);
   border: 1px solid var(--color-border);
+}
+
+/* Small, inline icon badge (P27): sits next to text in a row - e.g. a
+   device card's title - instead of leading a centered status card. */
+.icon-badge-sm {
+  width: 36px;
+  height: 36px;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.icon-badge-sm svg {
+  width: 18px;
+  height: 18px;
 }
 
 /* Two-column layout for the "waiting to scan" step: the QR itself next to

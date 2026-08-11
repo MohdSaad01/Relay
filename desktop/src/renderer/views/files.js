@@ -12,6 +12,7 @@ import {
   renderError,
 } from "../dom.js";
 import { buildReceivedItems, markReceivedItemRemoved, resolveReceivedItemPath } from "../receivedFiles.js";
+import { folderIcon } from "../icons.js";
 
 export async function mount(container) {
   await refresh(container);
@@ -54,6 +55,7 @@ function render(container, files, folders, transfers, downloadDirectory) {
     pageHeader({ title: "Shared Files", subtitle: "Files and folders available to your paired devices.", actions }) +
     (items.length === 0
       ? emptyState({
+          icon: folderIcon,
           title: "Nothing shared yet",
           message: "Add a file or folder to make it available for your paired devices to download.",
         })

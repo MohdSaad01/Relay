@@ -449,6 +449,43 @@ structure on the desktop, grouped back into one row by
 "folder gets flattened" description predates P13/P21 and does not
 reproduce against the current codebase.
 
+### Desktop Navigation, Devices & Empty-State Conventions (P27)
+
+**Desktop nav's open-row/underline treatment (§1.5 of the original issue
+list), first-launch routing (Pairing when unpaired, Devices when paired),
+and the device card's "Paired"-only status language were already correct
+going into P27 — all three date to P19 and were re-verified live, not
+reimplemented.** Before assuming a Desktop UX issue from an older issue
+list still applies, check `git log` on the relevant file and launch the
+real app first; P19–P21 already closed several of these.
+
+**`emptyState()` (`desktop/src/renderer/dom.js`) takes an optional
+`icon`/`variant`, rendering a leading `iconBadge()` exactly like Pairing's
+status cards (P20) instead of a bare heading+message.** Devices/Files/
+Transfers all pass one now (`deviceIcon`/`folderIcon`/`transferIcon`,
+`desktop/src/renderer/icons.js`). Any new Desktop empty state should pass
+an icon through this same param rather than hand-rolling a heading-only
+card. `folderIcon`/`transferIcon` intentionally reuse the exact glyph
+geometry of Android's `FolderIcon`/`TransferIcon`
+(`android/src/components/icons.tsx`, P23) per P25's existing
+cross-platform icon-reuse convention.
+
+**`iconBadge({ size: "sm" })` is a smaller, non-centered variant for an
+icon that sits inline in a row (e.g. a device card's title) instead of
+leading a centered status card.** The paired-device card
+(`desktop/src/renderer/views/devices.js`) uses this via a new
+`.device-card-main` wrapper (icon + info block). Reuse this pattern for
+any future Desktop card that needs a small inline identity icon rather
+than inventing a differently-sized badge.
+
+**A sparse Desktop view (one device, an empty list) with a lot of
+whitespace below a single centered card is not automatically a defect.**
+P27 investigated this explicitly and concluded the existing single-card,
+generous-whitespace layout (established by Pairing's idle state, P20) is
+Relay's intentional "one focused state" language, not something to patch
+by inflating card size or adding decorative content — do not "fix" this
+again without a concrete design reason beyond the visual density itself.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)

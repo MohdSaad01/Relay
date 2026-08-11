@@ -1,7 +1,8 @@
 "use strict";
 
 import { api } from "../api/client.js";
-import { emptyState, escapeHtml, formatDateTime, pageHeader, renderError } from "../dom.js";
+import { emptyState, escapeHtml, formatDateTime, iconBadge, loadingState, pageHeader, renderError } from "../dom.js";
+import { deviceIcon } from "../icons.js";
 
 export async function mount(container) {
   await refresh(container);
@@ -9,7 +10,7 @@ export async function mount(container) {
 }
 
 async function refresh(container) {
-  container.innerHTML = "<p>Loading devices...</p>";
+  container.innerHTML = loadingState("Loading devices...");
   try {
     const { data: devices } = await api.get("/devices");
     render(container, devices);
@@ -19,12 +20,16 @@ async function refresh(container) {
 }
 
 function render(container, devices) {
-  container.innerHTML = pageHeader({ title: "Devices" });
+  container.innerHTML = pageHeader({
+    title: "Devices",
+    subtitle: "Android devices paired with this computer.",
+  });
 
   if (devices.length === 0) {
     container.insertAdjacentHTML(
       "beforeend",
       emptyState({
+        icon: deviceIcon,
         title: "No devices paired yet",
         message: "Pair your Android phone with Relay to start sending and receiving files over your local network.",
         actionHtml: '<button class="primary" id="go-to-pairing">Go to Pairing</button>',
@@ -68,15 +73,18 @@ function render(container, devices) {
 function renderDeviceCard(device) {
   return `
     <div class="card device-card" data-id="${device.id}">
-      <div class="device-card-info">
-        <div class="device-card-title">
-          <span class="device-name">${escapeHtml(device.device_name)}</span>
-          <span class="badge badge-success">Paired</span>
-        </div>
-        <div class="device-card-meta">
-          <span class="badge">${escapeHtml(device.platform)}</span>
-          <span class="muted">Paired ${formatDateTime(device.paired_at)}</span>
-          <span class="muted">Last seen ${formatDateTime(device.last_seen_at)}</span>
+      <div class="device-card-main">
+        ${iconBadge({ icon: deviceIcon, variant: "primary", size: "sm" })}
+        <div class="device-card-info">
+          <div class="device-card-title">
+            <span class="device-name">${escapeHtml(device.device_name)}</span>
+            <span class="badge badge-success">Paired</span>
+          </div>
+          <div class="device-card-meta">
+            <span class="badge">${escapeHtml(device.platform)}</span>
+            <span class="muted">Paired ${formatDateTime(device.paired_at)}</span>
+            <span class="muted">Last seen ${formatDateTime(device.last_seen_at)}</span>
+          </div>
         </div>
       </div>
       <div class="device-card-actions">

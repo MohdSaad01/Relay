@@ -2921,6 +2921,174 @@ architecture.
 
 ---
 
+# Milestone P27 — Desktop Navigation, Devices & Overall UX
+
+**Scope:** `New_Issues.txt` §1.1–§1.5 — Desktop navigation treatment,
+Devices screen presentation (empty and paired), first-launch routing, and
+a general Desktop visual-hierarchy/empty-state pass. Explicitly not
+touched: pairing protocol, QR generation/scanning, discovery, transfer
+protocol, upload/download behavior, transfer history semantics, Desktop
+Settings redesign, Desktop Files action redesign, Android.
+
+**Method:** built a throwaway Playwright `_electron` driver script
+(deleted after use, not committed) to launch the real `desktop/` Electron
+app and screenshot it, since this environment has a real Windows session
+(no xvfb needed). Backend state was controlled by running the FastAPI
+backend manually against either the real dev `backend/relay.db` (paired
+device, 1332 historical transfers, zero explicit shares) or a fresh
+temporary SQLite file (`DATABASE_URL` env var) for the zero-data states —
+`BackendManager.start()`'s existing "already responding on this port ->
+externally managed, don't spawn a second one" health-check path (M14)
+made this work without any application code changes. A real Relay
+instance (Electron + its own spawned backend) was already running on this
+machine from an earlier session; it was closed to run these checks and a
+fresh `npm start` was relaunched against the real `relay.db` at the end,
+restoring the original state with the paired device and transfer history
+intact and unmodified.
+
+**Baseline investigation (before any code change):**
+- §1.5 (nav "looks like boxed buttons"): **already fixed.**
+  `desktop/styles/app.css`'s `#nav button` rules (open row, bottom-border
+  underline, no fill) date to Milestone P19 (`git log -- desktop/styles/app.css`
+  shows `0badf44`/`3c8ba4e` "P19 — visual foundation, open nav"). Live
+  screenshots confirm: inactive tabs are quiet gray text, the active tab is
+  bold blue text with a blue underline, and hovering an inactive tab shows
+  a darker text color plus a gray underline — this already satisfies every
+  literal requirement in §1.5. No navigation changes were made.
+- §4/§9 (first-launch routing): **already fixed.** `renderer.js`'s
+  `determineInitialView()` (also P19) calls `GET /devices` once before the
+  first `showView()` and opens Pairing when the list is empty, Devices
+  otherwise, falling back to Devices on lookup failure. Live-verified both
+  directions: launching against the empty-device backend landed directly
+  on Pairing (no Devices-then-flicker-to-Pairing); launching against the
+  real paired-device backend landed directly on Devices. Manually clicking
+  Devices while unpaired still opens Devices and renders its proper empty
+  state (no navigation guard exists) — confirmed live.
+- §10 (device status language): **already correct.** `DeviceResponse`
+  (`backend/app/schemas/device.py`) exposes only `paired_at`/`last_seen_at`
+  — there is no online/connected/availability signal anywhere in the
+  backend (`last_seen_at` only updates on an authenticated API call, not a
+  live heartbeat). `devices.js` already only ever renders a "Paired" badge,
+  never "Connected"/"Online" — no invented status existed to remove.
+- §3/§1.1/§1.4 (Devices/Files/Transfers empty states and the paired-device
+  card): genuinely deficient. All three empty states
+  (`emptyState()`, `dom.js`) rendered a centered card with a heading and a
+  message but **no icon**, unlike every Pairing-view status card
+  (`iconBadge()`, P20). The Devices page header had no subtitle, unlike
+  Files/Pairing, so its hierarchy read as one level flatter. The paired
+  device card had no visual anchor (icon) tying it to "an active part of
+  Relay" per §3's requirement — it was a name, two badges, and two
+  metadata lines with no leading identity element. `devices.js` and
+  `settings.js` used a bare `<p>Loading...</p>` instead of the shared
+  `loadingState()` component already used by `files.js`/`transfers.js`
+  (P19) — a real, if minor, consistency gap. The large empty vertical
+  space below a single centered card (Devices with one device, or any of
+  the three empty states) was investigated and judged **not** a defect:
+  it's the same "one focused card, generous whitespace" language Pairing's
+  idle state (P20) already uses successfully, and the milestone brief
+  explicitly forbids adding decorative filler to compensate for sparse
+  data — inflating a one-device list to look "fuller" would violate that
+  directly.
+
+**What P27 changed:**
+1. `desktop/src/renderer/icons.js` — added `folderIcon`/`transferIcon`,
+   the same glyphs as Android's `FolderIcon`/`TransferIcon`
+   (`android/src/components/icons.tsx`, P23), per P25's "reuse this same
+   glyph/color for any future Relay icon surface" convention. `deviceIcon`
+   already existed (P20) and is reused as-is.
+2. `desktop/src/renderer/dom.js` — `emptyState()` now accepts an optional
+   `icon`/`variant`, rendering a leading `iconBadge()` when given (opt-in,
+   fully backward compatible — every pre-existing call site is unaffected).
+   `iconBadge()` gained an optional `size: "sm"` for an inline, non-centered
+   badge meant to sit next to text in a row instead of leading a centered
+   card.
+3. `desktop/styles/app.css` — added `.icon-badge-sm` (36px badge/18px
+   glyph, no auto-centering margin) and `.device-card-main` (icon + info
+   block, flex row) alongside the existing `.device-card`/`.device-card-title`
+   rules.
+4. `desktop/src/renderer/views/devices.js` — page header gained a
+   subtitle ("Android devices paired with this computer."); the empty
+   state now passes `icon: deviceIcon`; the paired-device card now leads
+   with a small `deviceIcon` badge (`.device-card-main`) ahead of the
+   name/badge/metadata block; loading state switched to the shared
+   `loadingState()` helper. Rename/Remove wiring and click handlers are
+   untouched.
+5. `desktop/src/renderer/views/files.js` — empty state now passes
+   `icon: folderIcon`.
+6. `desktop/src/renderer/views/transfers.js` — page header gained a
+   subtitle ("Files sent to and received from your paired devices.");
+   both empty-state variants (no transfers yet / history cleared) now pass
+   `icon: transferIcon` (the "history cleared" variant uses the neutral
+   tint, matching Pairing's neutral-variant convention for a non-committal
+   state).
+7. `desktop/src/renderer/views/settings.js` — page header gained a
+   subtitle ("This device's name, download location, and network
+   visibility."); loading state switched to the shared `loadingState()`
+   helper. No section/layout redesign — out of scope per the brief.
+
+**Root cause:** §1.5, §4/§9, and §10 were stale — already fixed by P19,
+predating this milestone's source issue list. The genuine gap was narrower
+than the brief implied: missing iconography in the shared `emptyState()`
+component (only ever wired up for Pairing's bespoke status cards, never
+generalized), missing header subtitles on two of five views, and no visual
+anchor on the device card — all straightforward extensions of existing
+P19/P20 conventions, not a redesign.
+
+**Live verification (real Electron app + real/temp backends, not mocks):**
+- Screenshotted all of Devices (empty/paired), Pairing (idle), Files
+  (empty/populated), Transfers (empty/populated), Settings, and nav
+  hover, both before and after the change, against both a fresh temporary
+  database and the real dev `relay.db`.
+- Confirmed first-launch routing both ways (empty -> Pairing tab, paired ->
+  Devices tab) still holds after the change, and manual Devices navigation
+  while unpaired still renders the proper empty state (no lockout).
+- Confirmed the populated Files/Transfers tables (unaffected by this
+  milestone) still render correctly against the real 1332-row transfer
+  history and the derived "Received" file/folder rows.
+- Exercised the paired device card's live DOM wiring directly: `.rename`
+  and `.remove` buttons are present and bound, the new icon badge renders
+  its SVG, and clicking Rename opens the real native `window.prompt`
+  dialog (accepted with the unchanged name — `devices.js`'s existing
+  `if (!name || name === device.device_name) return;` guard means this
+  sent no `PATCH` at all) without error. Remove was **not** exercised
+  end-to-end (its handler and markup are unchanged from before this
+  milestone) to avoid unpairing the one real paired test device
+  (`RMX3997-Test`) on this machine.
+- `node --check` passed on every modified file
+  (`dom.js`, `icons.js`, `devices.js`, `files.js`, `transfers.js`,
+  `settings.js`). `desktop/package.json` still has no lint/test/typecheck
+  script beyond `start` (unchanged since P25/P26) — nothing else to run.
+  No backend or Android source was touched, so `pytest`/Jest were not run.
+- Restored the environment afterward: killed the temporary/manual backend
+  processes used for the empty-state screenshots, relaunched the real app
+  via `npm start` against the untouched `relay.db`, and confirmed
+  `GET /devices` still returns the same paired device with its original
+  `device_name`/`paired_at`/`last_seen_at` unchanged.
+
+**Remaining limitations:**
+- Only one Desktop window size (the app's 1100x720 default) was
+  screenshotted; narrower-window reflow of the new device-card icon or
+  subtitles was not separately verified.
+- "Remove" was verified as wired (DOM query + unchanged handler) but not
+  clicked through to a real unpair, per above.
+- No physical Android device was used this session; all states were
+  produced via direct backend/API control rather than a live pairing or
+  transfer.
+
+**Deferred (out of scope per the brief, not forgotten):** Desktop Settings
+sectioning/redesign, Desktop Files action redesign, and packaging/installer
+work all remain untouched, as explicitly instructed.
+
+**Final verdict:** three of the five source requirements (§1.5 nav, §4/§9
+first-launch routing, §10 status language) were already correct going into
+P27 — verified live and left unchanged. The real gaps were narrower than
+the brief implied: empty-state iconography, header-subtitle consistency,
+and a device-card visual anchor, all implemented as small, backward-compatible
+extensions of P19/P20's existing `emptyState()`/`iconBadge()` components
+rather than new patterns.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:

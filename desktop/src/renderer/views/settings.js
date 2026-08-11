@@ -1,7 +1,7 @@
 "use strict";
 
 import { api } from "../api/client.js";
-import { escapeHtml, pageHeader, renderError } from "../dom.js";
+import { escapeHtml, loadingState, pageHeader, renderError } from "../dom.js";
 
 export async function mount(container) {
   await refresh(container);
@@ -9,7 +9,7 @@ export async function mount(container) {
 }
 
 async function refresh(container) {
-  container.innerHTML = "<p>Loading settings...</p>";
+  container.innerHTML = loadingState("Loading settings...");
   try {
     const { data: settings } = await api.get("/settings");
     render(container, settings);
@@ -20,7 +20,7 @@ async function refresh(container) {
 
 function render(container, settings) {
   container.innerHTML = `
-    ${pageHeader({ title: "Settings" })}
+    ${pageHeader({ title: "Settings", subtitle: "This device's name, download location, and network visibility." })}
     <form id="settings-form" class="card">
       <label>
         Device display name

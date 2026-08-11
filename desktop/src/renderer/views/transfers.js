@@ -4,6 +4,7 @@ import { api } from "../api/client.js";
 import { emptyState, escapeHtml, formatBytes, loadingState, pageHeader, renderError } from "../dom.js";
 import { batchFolderName, groupTransfersByBatch } from "../transferGrouping.js";
 import { applyHistoryReset, clearTransferHistory, getHistoryClearedAt, isHistoricalTransfer } from "../transferHistory.js";
+import { transferIcon } from "../icons.js";
 
 const POLL_INTERVAL_MS = 2000;
 const CANCELLABLE_STATUSES = new Set(["in_progress"]);
@@ -50,15 +51,25 @@ function render(container, transfers) {
   const actions = `<button id="clear-history" class="text-button"${hasHistoryToClear ? "" : " disabled"}>Clear History</button>`;
 
   container.innerHTML =
-    pageHeader({ title: "Transfers", actions }) +
+    pageHeader({
+      title: "Transfers",
+      subtitle: "Files sent to and received from your paired devices.",
+      actions,
+    }) +
     (visibleTransfers.length === 0
       ? emptyState(
           historyWasCleared
             ? {
+                icon: transferIcon,
+                variant: "neutral",
                 title: "History cleared",
                 message: "Your past transfers are hidden. New transfers you send or receive will show up here.",
               }
-            : { title: "No transfers yet", message: "Files you send or receive with a paired device will show up here." }
+            : {
+                icon: transferIcon,
+                title: "No transfers yet",
+                message: "Files you send or receive with a paired device will show up here.",
+              }
         )
       : renderTransfersTable(visibleTransfers));
 

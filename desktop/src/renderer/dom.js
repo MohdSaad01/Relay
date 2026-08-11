@@ -102,11 +102,14 @@ export function pageHeader({ title, subtitle, actions }) {
 /**
  * Consistent "nothing here yet" presentation, used instead of a lone
  * paragraph so empty views read as intentional screens rather than
- * placeholder text.
+ * placeholder text. `icon` (see icons.js) is optional - when given, it's
+ * shown as a leading iconBadge so the empty state reads as an intentional
+ * screen instead of placeholder text (New_Issues.txt/P27 §3, §6).
  */
-export function emptyState({ title, message, actionHtml }) {
+export function emptyState({ title, message, actionHtml, icon, variant = "primary" }) {
   return `
     <div class="empty-state">
+      ${icon ? iconBadge({ icon, variant }) : ""}
       <h2>${escapeHtml(title)}</h2>
       <p>${escapeHtml(message)}</p>
       ${actionHtml ? `<div class="empty-state-actions">${actionHtml}</div>` : ""}
@@ -118,8 +121,11 @@ export function emptyState({ title, message, actionHtml }) {
  * used to give a status card (pairing step, success/failure result) a
  * clear focal point instead of leading straight into a heading. `icon`
  * is a trusted, hand-written inline SVG string (see icons.js) - never
- * user-controlled input.
+ * user-controlled input. `size: "sm"` (P27) renders a smaller, non-centered
+ * badge meant to sit inline next to text (e.g. a device card's title row)
+ * instead of leading a centered status card.
  */
-export function iconBadge({ icon, variant = "primary" }) {
-  return `<div class="icon-badge icon-badge-${variant}">${icon}</div>`;
+export function iconBadge({ icon, variant = "primary", size }) {
+  const sizeClass = size ? ` icon-badge-${size}` : "";
+  return `<div class="icon-badge icon-badge-${variant}${sizeClass}">${icon}</div>`;
 }

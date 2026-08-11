@@ -46,27 +46,72 @@ function render(container, devices) {
 
   devices.forEach((device) => {
     const card = container.querySelector(`[data-id="${device.id}"]`);
+    wireDeviceCard(card, device, container);
+  });
+}
 
-    card.querySelector(".rename").addEventListener("click", async () => {
-      const name = window.prompt("Rename device", device.device_name);
-      if (!name || name === device.device_name) return;
-      try {
-        await api.patch(`/devices/${device.id}`, { device_name: name });
-        await refresh(container);
-      } catch (err) {
-        renderError(container, err);
-      }
-    });
+/**
+ * Electron does not implement window.prompt() (it throws "prompt() is not
+ * supported", confirmed live - unlike window.confirm(), which does work and
+ * is still used for Remove below) so Rename previously threw an unhandled
+ * error before the API call was ever made, making the button appear to do
+ * nothing. Replaced with inline editing within the card instead of a native
+ * prompt substitute - a full custom dialog system is P30's scope, not P29's.
+ */
+function wireDeviceCard(card, device, container) {
+  const titleEl = card.querySelector(".device-card-title");
+  const actionsEl = card.querySelector(".device-card-actions");
+  const renameForm = card.querySelector(".device-card-rename");
+  const renameInput = renameForm.querySelector(".rename-input");
 
-    card.querySelector(".remove").addEventListener("click", async () => {
-      if (!window.confirm("Unpair this device? It will need to pair again to reconnect.")) return;
-      try {
-        await api.del(`/devices/${device.id}`);
-        await refresh(container);
-      } catch (err) {
-        renderError(container, err);
-      }
-    });
+  // Toggled via inline style rather than the `hidden` attribute: both
+  // .device-card-title and .device-card-actions already set `display: flex`
+  // in app.css, which (same specificity, author origin) wins the cascade
+  // over the `[hidden]` UA rule and left them visibly showing through.
+  function showRenameForm() {
+    renameInput.value = device.device_name;
+    titleEl.style.display = "none";
+    actionsEl.style.display = "none";
+    renameForm.style.display = "flex";
+    renameInput.focus();
+    renameInput.select();
+  }
+
+  function hideRenameForm() {
+    renameForm.style.display = "none";
+    titleEl.style.display = "";
+    actionsEl.style.display = "";
+  }
+
+  card.querySelector(".rename").addEventListener("click", showRenameForm);
+  renameForm.querySelector(".rename-cancel").addEventListener("click", hideRenameForm);
+  renameForm.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") hideRenameForm();
+  });
+
+  renameForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const name = renameInput.value.trim();
+    if (!name || name === device.device_name) {
+      hideRenameForm();
+      return;
+    }
+    try {
+      await api.patch(`/devices/${device.id}`, { device_name: name });
+      await refresh(container);
+    } catch (err) {
+      renderError(container, err);
+    }
+  });
+
+  card.querySelector(".remove").addEventListener("click", async () => {
+    if (!window.confirm("Unpair this device? It will need to pair again to reconnect.")) return;
+    try {
+      await api.del(`/devices/${device.id}`);
+      await refresh(container);
+    } catch (err) {
+      renderError(container, err);
+    }
   });
 }
 
@@ -80,6 +125,11 @@ function renderDeviceCard(device) {
             <span class="device-name">${escapeHtml(device.device_name)}</span>
             <span class="badge badge-success">Paired</span>
           </div>
+          <form class="device-card-rename field-row" style="display: none">
+            <input type="text" class="rename-input" value="${escapeHtml(device.device_name)}" maxlength="100" />
+            <button type="submit" class="primary">Save</button>
+            <button type="button" class="text-button rename-cancel">Cancel</button>
+          </form>
           <div class="device-card-meta">
             <span class="badge">${escapeHtml(device.platform)}</span>
             <span class="muted">Paired ${formatDateTime(device.paired_at)}</span>

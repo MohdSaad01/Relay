@@ -3427,6 +3427,332 @@ silently patched.
 
 ---
 
+# Milestone P29 — Desktop Shared Files Lifecycle & Device Rename
+
+**Scope:** two issues deferred from P28 — (A) an externally-deleted
+Shared Files source producing an unhandled `shell:deleteItem` /
+`shell.trashItem` error ("Failed to parse path") instead of a clean
+removal, and (B) the Devices → Rename button doing nothing. Note: the
+task brief cited these as `New_Issues.txt` §3/§5, but the current
+`New_Issues.txt` (unchanged since the commit that introduced it) has §3 =
+"Remove Session Token Lifetime Setting" (already resolved, P25) and §5 =
+"Metadata Consistency Between Desktop and Android" (already resolved,
+P21/P22) — neither matches either issue. This is a stale citation in the
+brief, not a live discrepancy in the repo; both issues themselves were
+described in full, unambiguous detail directly in the brief and were
+investigated/fixed as specified, independent of the section numbers.
+Explicitly out of scope and not touched: the P30 custom dialog system,
+backend `Transfer` deletion, downloaded-file deletion as part of stale-
+entry cleanup, and any change to `SharedFileService`/`SharedFolderService`
+refresh semantics.
+
+**Method:** no project skill existed for launching this Electron app, so
+one was improvised for this session: `playwright`'s `_electron` module
+(installed ad hoc into the scratchpad, not added to the repo) driving the
+project's own already-installed `desktop/node_modules/electron/dist/electron.exe`
+directly (not a system-wide Electron), against the real dev
+`backend/relay.db`/child `uvicorn` process the desktop app spawns itself.
+Every claim below marked "live" was produced this way — real window, real
+IPC, real backend, real filesystem — not a unit test or a source-reading
+inference. Scripts are not committed (throwaway, same as P28's precedent).
+RMX3997 was not used this milestone: both issues are Desktop-only/backend-
+already-covered, and the brief's own §13 only calls for physical-device
+verification "if relevant" — device-name propagation to Android was
+verified by source inspection instead (see below), matching the P23
+architecture that already ties Android's displayed name to the same
+backend `device_name` column Desktop renames.
+
+## Issue A — Externally deleted Shared Files
+
+**Baseline investigation:** Traced the full path: `files.js`'s Delete
+handler (`wireSharedRowActions`) calls `window.relay.deleteItem(filePath)`
+*before* `api.del(...)` (unshare); `deleteItem` is a thin preload bridge to
+`ipcMain.handle("shell:deleteItem", ...)` in `ipc-handlers.js`, which
+called `shell.trashItem(targetPath)` unconditionally. `GET /files`/
+`GET /folders` never check filesystem existence — a shared row is returned
+exactly as stored regardless of whether its source still exists on disk.
+`SharedFileService.refresh_metadata`/`SharedFolderService.refresh_folder`
+*do* validate existence (raising `ValidationError` if missing) but, by
+existing, deliberate design documented in both services' own docstrings,
+never auto-unshare on a missing path — "the user decides explicitly
+whether to remove it." This is a pre-existing, intentional backend
+architecture decision (not something introduced or altered this
+milestone) and constrains the fix: silently auto-unsharing from the
+backend on every list load would contradict it.
+
+**Reproduction (live, before fix):** Shared a real test file and a real
+test folder (nested file included) via direct `POST /files`/`POST
+/folders` calls (equivalent to what the renderer's Add Files/Add Folder
+buttons do after the native picker returns paths — the native picker
+itself can't be scripted, so this exercises the identical downstream code
+without it). Confirmed both rows in Shared Files. Deleted the physical
+file and folder from outside Relay (`fs.rmSync`, simulating Explorer/
+another program). Returned to Shared Files (tab-switch triggers `files.js`'s
+existing `refresh()`) — both stale rows remained listed, exactly as
+expected since nothing yet checks existence on load. Clicked Delete on the
+stale file row: `window.relay.deleteItem` invoked `shell.trashItem` on a
+now-nonexistent path, which threw; the renderer's `try/catch` caught it
+and rendered it via `renderError`, and — critically — because `deleteItem`
+was awaited *before* `api.del`, the unshare call never ran and the stale
+entry survived, unremovable via Delete. (`Unshare`, which never touches
+the filesystem, already worked fine on a stale entry — this is why the bug
+was specifically about Delete, as the brief states.)
+
+**Root cause:** `ipcMain.handle("shell:deleteItem", ...)` assumed its
+target always exists and let `shell.trashItem`'s failure propagate as a
+crash, rather than treating "the thing I was asked to delete is already
+gone" as an equivalent-to-success outcome.
+
+**Fix (smallest correct fix, one file):** `ipc-handlers.js`'s
+`shell:deleteItem` handler now checks `fs.existsSync(targetPath)` first;
+if the path is already gone, it resolves as a no-op instead of calling
+`shell.trashItem`. This is a single, universal fix at the IPC layer (not
+duplicated per call site), and it means the *existing* Delete flow now
+completes correctly on a stale entry: the (now-safe) `deleteItem` call
+resolves, `api.del` unshares the row from the backend, and `refresh()`
+removes it from the visible list — with no new backend endpoint, no new
+existence-polling/auto-detection logic, and no change to the deliberate
+"never auto-unshare on refresh" backend policy (a stale row still stays
+listed until acted on, per that existing design; it just no longer *fails*
+to be removed once the user does act on it via Delete).
+
+**Reproduction again (live, after fix):** Repeated the identical sequence
+(share file + folder, external delete, tab-switch refresh, click Delete on
+each). Zero `pageerror` events (previously: `prompt`-unrelated but same
+category of uncaught renderer exception) captured across the whole run.
+Both stale rows disappeared from the list after Delete; `GET /files`/
+`GET /folders` afterward confirmed the backend rows were actually gone
+(not just hidden client-side). A **control** file that still physically
+existed (`normal_kept.txt`, shared alongside the two stale items) was left
+untouched throughout, and its own Refresh action was exercised
+successfully post-fix (0 page errors, row still present) — confirming the
+fix doesn't affect the normal, non-stale path at all.
+
+**Received files (regression, live):** With the pre-existing
+`historyClearedAt` dev marker temporarily cleared (see Limitations),
+3 real received items (1 file, 2 folders, from prior milestones' physical
+verification) rendered correctly in Shared Files alongside the one
+remaining currently-shared file, each still showing its `Received` badge
+and its own action set (Open/Show in Folder/Delete for a file; Show in
+Folder/Delete for a folder — no Refresh/Unshare, unchanged from P21). The
+stale-source fix only touches `shell:deleteItem`'s own path-existence
+check, which received items' own Delete handler (`wireReceivedRowActions`)
+already calls through — a received item whose downloaded file is itself
+missing would now *also* get the same "no-op instead of crash" treatment,
+which is strictly safer than before, not a new distinction that needed
+building. No change was made to `receivedFiles.js`'s derivation logic
+(still purely transfer-history-based, per P28) — received items are not
+filtered by source/file existence and continue to persist regardless of
+their physical file's state, per the brief's explicit requirement not to
+apply the "shared-source" staleness rule to them.
+
+## Issue B — Devices → Rename does nothing
+
+**Baseline investigation:** `devices.js`'s Rename handler called
+`window.prompt("Rename device", device.device_name)`, then guarded on
+`!name || name === device.device_name`. The backend side was already
+fully correct and unchanged by this milestone: `PATCH /devices/{id}`
+(`backend/app/api/v1/devices.py`) → `DeviceOwnerAuthDep`
+(`verify_device_owner`, P23 — loopback desktop caller allowed to rename
+any device, unchanged) → `DeviceService.rename_device` (trims, rejects
+empty with `ValidationError`, persists, commits) — confirmed by source
+read, and indirectly by the fix working end-to-end against this exact
+unmodified code path.
+
+**Reproduction (live, before fix):** Launched the real app (one real
+paired device, `RMX3997-Test`, in the dev `relay.db`), clicked Rename, and
+also called `window.prompt(...)` directly via `page.evaluate` as a
+targeted probe. Both produced the identical result: a `pageerror` reading
+**`prompt() is not supported.`** — Electron's Chromium build does not
+implement `window.prompt()` at all (unlike `window.confirm()`, which is
+used elsewhere in this same file for Remove/Unshare/Delete and does work,
+confirmed live via the same session's native-dialog event capture). Since
+the `prompt()` call throws synchronously with no surrounding `try/catch`,
+the async click handler's promise rejected before `api.patch` was ever
+reached — from the user's perspective, clicking Rename visibly did
+nothing, matching the reported symptom exactly.
+
+**Root cause:** `window.prompt()` is unimplemented in this Electron
+version (confirmed Electron 43.2.0) and always throws; the renderer never
+degraded to any UI at all for gathering the new name.
+
+**Fix:** Replaced the native-prompt call with inline editing inside the
+device card (`devices.js`): clicking Rename swaps the name/badge row and
+the Rename/Remove buttons for a `<form>` containing a text input
+pre-filled with the current name, plus Save/Cancel. Submitting (Save,
+Enter) trims the value; an empty or unchanged value is treated as a no-op
+(mirrors the original prompt-based guard exactly — same behavior,
+different UI trigger — so no new validation policy was invented). A real
+edit calls the existing `PATCH /devices/{id}`, then `refresh()`s the whole
+Devices list. Cancel (button or Escape) reverts to the display row with no
+API call. This intentionally stays a small, targeted fix rather than a new
+dialog component — a full custom-dialog system is P30's explicit scope,
+and the brief itself says the native-prompt approach would have been
+acceptable "if necessary"; since it turned out to be actively broken
+(not just unstyled), inline editing was chosen as the minimal working
+substitute, reusing only markup/classes P19–P21 already established
+(`.field-row`, `button.primary`, `button.text-button`) — no new CSS rules
+beyond a single Save/Cancel row.
+
+**A second bug found and fixed during verification, not in the original
+brief:** the first implementation toggled visibility via the HTML `hidden`
+attribute (`el.hidden = true/false`). Live screenshotting after the first
+pass showed the Rename/Remove buttons *still visible* alongside the open
+edit form. Root cause: `app.css`'s `.device-card-title`/
+`.device-card-actions` both declare `display: flex` — an author-origin
+rule, which (per the CSS cascade's origin-bucket ordering: normal author
+always outranks normal user-agent, independent of selector specificity)
+unconditionally wins over the UA stylesheet's `[hidden] { display: none }`
+rule. Fixed by toggling `element.style.display` directly instead of the
+`hidden` property, sidestepping the cascade question entirely. Re-verified
+live: the title/actions row now correctly hides during edit and correctly
+reappears on Cancel (screenshotted both states).
+
+**Reproduction again / full behavior matrix (live):**
+- **Normal rename:** typed a new name, clicked Save → `device-name` updated
+  immediately in the DOM: confirmed again after a same-window tab-switch
+  (Pairing → Devices) and, for full rigor, after a **genuine full process
+  restart** (Playwright driver fully closed and relaunched the Electron
+  app from a cold `electron.exe` process, not just a page reload) — the
+  renamed value (`RMX3997-RestartTest`) was still present, proving backend
+  persistence rather than a client-side-only rename.
+- **Cancel:** opened the form, typed a throwaway value, clicked Cancel →
+  original name unchanged, confirmed via both the DOM and a screenshot.
+- **Empty name:** covered by source inspection of the unchanged guard
+  (`if (!name || name === device.device_name) return;`) — matches the
+  original prompt-based code's exact behavior; not re-probed live via the
+  UI (typing then clearing a text input and asserting a no-op is a lower-
+  value repro than the already-covered rename/cancel/same-name paths, and
+  the backend's own `ValidationError` path for a whitespace-only name sent
+  directly to the API was already exercised in earlier milestones).
+- **Same name:** submitting the unchanged value takes the identical no-op
+  branch as empty — confirmed by source read; no additional live probe
+  needed since it's the same code path already exercised by Cancel.
+- **Name consistency:** Desktop Devices is the only surface inspected that
+  displays a device's name outside of the rename flow itself; Pairing has
+  no per-device name display (P24: it structurally cannot render an
+  already-paired device). Android's own displayed name (`Session
+  Manager`/Settings) is populated by `GET /devices` or a paired device's
+  own `PATCH /devices/{id}` self-rename (P23) reading the same
+  `devices.device_name` column this fix now correctly writes to — verified
+  by source inspection (`android/src/session/`, `SettingsScreen.tsx`) that
+  no separate/cached copy of the name exists on that side; not re-verified
+  on the physical RMX3997 this milestone (no rename was initiated from
+  Android, and the desktop-side column is the single source of truth both
+  platforms already read from unchanged).
+
+**Files modified:**
+- `desktop/src/main/ipc-handlers.js` — `shell:deleteItem` now no-ops on an
+  already-missing path instead of throwing.
+- `desktop/src/renderer/views/devices.js` — Rename replaced with inline
+  card editing; visibility toggling via `style.display` rather than
+  `hidden`.
+
+**Automated tests:**
+- `node --check` on both modified files — pass.
+- Desktop has no formal lint/test suite (unchanged from P19–P28's own
+  precedent) — this remains the full extent of Desktop's automated
+  checking.
+- Backend and Android: not modified, not run, per the milestone's own
+  scope (neither issue required a change on either side).
+
+**Desktop live verification (real Electron app + real dev `relay.db`):**
+covered inline above (Issue A and Issue B sections) — screenshots taken at
+every state transition (initial, rename-form-open, after-save, after-tab-
+reload, after-cancel, shared-files-with-3-items, after-external-delete-
+refresh, after-delete-stale-file, after-delete-stale-folder, with-received-
+items). All test artifacts (`normal_kept.txt` share, the two stale shares
+already removed by the test itself) were cleaned up via the real
+`DELETE /files/{id}` API afterward; the device name was restored to
+`RMX3997-Test`; the `relay.db` was left in the same shape it was found in
+(1 device, 0 shared files/folders, unchanged transfer history).
+
+**Physical-device verification:** not performed — RMX3997 was not
+required for either fix per the analysis above (Android displays the same
+backend-owned name; the stale-file issue is Desktop/filesystem-only). Not
+overstating this: device-name propagation to Android is **source-verified,
+not physically confirmed**, this milestone.
+
+**Regression verification (live):**
+- Transfers tab: with the pre-existing `historyClearedAt` marker
+  temporarily cleared, 88 historical transfer rows and the Clear History
+  button rendered correctly; the marker was restored to its original value
+  afterward (see Limitations) — Transfers' own P28 empty/cleared-state
+  behavior was not touched by this milestone and was not re-broken.
+- Devices: paired-device card, badges, and Remove all re-screenshotted and
+  functioned unchanged aside from the fixed Rename control.
+- Shared Files: a real still-existing shared file's Refresh action
+  (unrelated to either fix) was exercised post-change with zero page
+  errors, confirming the non-stale path is unaffected.
+
+**History-preservation verification:** `GET /transfers` was never called
+by anything this milestone added; no code path introduced touches the
+`Transfer` table. The 88 (visible, post-marker-clear) / full historical
+transfer rows were unaffected by either fix, confirmed by them still being
+present and unchanged after both the stale-file and rename testing passed.
+
+**Problems discovered (beyond the original brief) and their disposition:**
+1. The `hidden`-attribute-vs-`display:flex` cascade bug in the first pass
+   of the Rename fix itself — **found and fixed within this milestone**
+   before being reported as done (see "second bug" above).
+2. The `New_Issues.txt` §3/§5 citation mismatch — **documented above**,
+   not a code defect, no action needed beyond this note.
+
+**Documentation changed:** this `docs/15_QA_NOTEBOOK.md` entry.
+`CLAUDE.md` was evaluated and left unchanged — this milestone applies
+already-documented conventions (P21's "no backend delete/undo primitive
+where none exists" boundary was respected, not extended; P23's device-
+rename architecture was reused, not altered) rather than establishing a
+new durable one; the `style.display`-vs-`hidden` cascade detail is
+narrow, single-file, and better suited to this QA entry than a standing
+project rule. `README.md` was evaluated and left unchanged — it does not
+describe Rename or Shared Files deletion at a level of detail either fix
+affects.
+
+**Remaining limitations:**
+- Rename's inline text input has no dedicated visible error message for a
+  rejected (empty/whitespace) name beyond the pre-existing generic
+  `renderError` path a failed `PATCH` would trigger — matches the original
+  prompt-based UI's own fidelity (a native prompt gave no inline
+  validation feedback either), not a regression.
+- The stale-Shared-Files fix only prevents the *crash*; a stale entry is
+  still only removed on explicit user interaction (Delete), not
+  automatically on every list load/refresh — this is a deliberate
+  decision preserving the backend's existing "never auto-unshare" policy
+  (see Architecture discussion above), not an oversight.
+- This session's dev `relay.db` still has completed-receive `Transfer`
+  rows whose backing files don't exist under the current
+  `download_directory` (documented as a known, deferred limitation back in
+  P28) — unrelated to and unaffected by either P29 fix.
+
+**Local dev-environment note (not a code change):** verifying received-
+item/transfer-history rendering required temporarily clearing this
+profile's pre-existing `localStorage` key
+`relay.transfers.historyClearedAt` (a P28-session leftover, correctly
+hiding all pre-cutoff history per its own designed behavior) so that
+history-derived rows would render at all for inspection. Restored to its
+original value (`2026-08-11T19:59:03.387Z`) immediately after that
+verification pass completed — flagged here per this dev database's own
+established "note staleness rather than silently working around it"
+precedent (P25, P28), even though nothing about it needed fixing.
+
+**Suggested commit message:**
+`fix(desktop): handle externally-deleted Shared Files and repair device rename (P29)`
+
+**Final verdict:** both in-scope issues reproduced live against the real
+app before any change, root-caused to a specific line each (an unguarded
+`shell.trashItem` call; an unimplemented `window.prompt()` in this
+Electron build), fixed with the smallest change that closes each root
+cause without altering backend semantics, the P23 device-auth model, or
+P28's history/listing separation, and re-verified live including a genuine
+full-process-restart persistence check for Rename. One additional bug
+(the `hidden`-attribute cascade issue) was introduced and caught by this
+same milestone's own live-screenshot verification step before being
+reported as complete. No `Transfer` row, downloaded file, or received item
+was affected by either fix.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:
@@ -3496,3 +3822,22 @@ A few gotchas worth remembering independent of any single milestone above:
   the error). Prefix the command with `MSYS_NO_PATHCONV=1` for any `adb
   shell` call that takes a bare device-side absolute path as its own
   argument.
+- **`window.prompt()` is unimplemented in Electron and always throws**
+  ("prompt() is not supported") — unlike `window.confirm()`, which does
+  work. Any renderer code that needs free-text input from the user cannot
+  use a native prompt on this platform at all; it needs its own input UI
+  (P29 used inline card editing for Devices Rename). Check for this
+  category of missing-native-dialog support before assuming a `window.*`
+  dialog function behaves like it does in a regular browser.
+- **Toggling an element's visibility via the `hidden` attribute/property
+  silently loses to any author CSS rule that sets `display` on that same
+  element** (`.device-card-actions`/`.device-card-title`'s own
+  `display: flex` beat `[hidden] { display: none }` even though both
+  selectors have equal specificity — per the CSS cascade's origin-bucket
+  ordering, *any* normal-author rule outranks *any* normal-user-agent rule
+  regardless of specificity). Confirmed live in P29 via screenshot: the
+  Rename form and the Rename/Remove buttons were both visible
+  simultaneously until this was caught. Prefer toggling
+  `element.style.display` directly for any element whose class already
+  sets `display` in `app.css`, rather than relying on the `hidden`
+  attribute.

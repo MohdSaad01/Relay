@@ -499,6 +499,37 @@ Relay's intentional "one focused state" language, not something to patch
 by inflating card size or adding decorative content — do not "fix" this
 again without a concrete design reason beyond the visual density itself.
 
+### Desktop Rename Input & Stale-Delete Safety (P29)
+
+**`window.prompt()` is unimplemented in this Electron build and always
+throws (`"prompt() is not supported."`), confirmed live** — unlike
+`window.confirm()`, which does work and remains the mechanism for
+Remove/Unshare/Delete confirmations elsewhere in `desktop/src/renderer/`.
+Any future Desktop UI that needs free-text input from the user cannot use
+a native prompt; `desktop/src/renderer/views/devices.js`'s Rename (an
+inline `<form>` swapped into the device card in place of the name/actions
+row, submitted via Save/Enter, dismissed via Cancel/Escape) is the current
+pattern to extend rather than reaching for `window.prompt()` again. Note
+also: toggling that swap must set `element.style.display` directly, not
+the `hidden` attribute/property — any element whose class already
+declares `display` in `app.css` (e.g. `.device-card-actions`,
+`.device-card-title`) wins the cascade over the `[hidden]` user-agent rule
+regardless of selector specificity, so `hidden` silently fails to hide it.
+
+**`ipcMain.handle("shell:deleteItem", ...)` (`desktop/src/main/ipc-handlers.js`)
+treats an already-missing target path as a no-op success instead of
+propagating `shell.trashItem`'s "Failed to parse path" failure.** This is
+what lets Shared Files' Delete action complete (and therefore unshare/
+remove the entry) on a source file/folder that was deleted outside Relay,
+without a new existence-check call site in the renderer. This does **not**
+change the separate, pre-existing, deliberate policy in
+`SharedFileService.refresh_metadata`/`SharedFolderService.refresh_folder`
+that a missing source is never auto-unshared on Refresh — a stale Shared
+Files entry still only disappears when the user explicitly acts on it
+(Delete), not automatically on every list load. Any future filesystem-
+deleting IPC handler should apply the same already-gone-is-not-an-error
+treatment rather than assuming its target still exists.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)

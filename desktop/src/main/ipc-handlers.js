@@ -1,6 +1,7 @@
 "use strict";
 
 const { ipcMain, dialog, shell, app } = require("electron");
+const fs = require("node:fs");
 const path = require("node:path");
 const QRCode = require("qrcode");
 
@@ -60,7 +61,17 @@ function registerIpcHandlers({ backendManager, getMainWindow, quitApp }) {
   // New_Issues.txt §9: Delete moves the local file/folder to the OS trash
   // (recoverable) rather than a permanent unlink - the safer default for a
   // destructive action the user triggers from a list view.
+  //
+  // P29: shell.trashItem throws ("Failed to parse path") when targetPath no
+  // longer exists - e.g. a Shared Files source deleted outside Relay after
+  // being shared. That's not a real failure from the user's point of view -
+  // the thing they asked to delete is already gone - so treat it as a no-op
+  // success instead of surfacing a crash, letting the caller's own
+  // unshare/remove step proceed and clean up the now-stale entry.
   ipcMain.handle("shell:deleteItem", async (_event, targetPath) => {
+    if (!fs.existsSync(targetPath)) {
+      return;
+    }
     await shell.trashItem(targetPath);
   });
 

@@ -25,6 +25,20 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Bounds how long a request waits for a TCP connection/response before
+ * giving up. Without this, an unreachable desktop (backend down, wrong
+ * network, firewall silently dropping the connection) left fetch() hanging
+ * until the OS's own connection timeout — observed as a multi-minute
+ * apparent freeze before "Network request failed" ever surfaced. 10s is
+ * generous for a LAN request; a real desktop on the same network responds
+ * in well under a second.
+ */
+const REQUEST_TIMEOUT_MS = 10_000;
+
+const UNREACHABLE_MESSAGE =
+  'Unable to reach Relay Desktop. Make sure the PC is running Relay and both devices are on the same network.';
+
 type UnauthorizedListener = () => void | Promise<void>;
 let unauthorizedListener: UnauthorizedListener | null = null;
 
@@ -66,15 +80,29 @@ async function request<T>(
   // TEMP DEBUG LOGGING — remove after pairing QR pipeline is diagnosed.
   console.log('[QR-DEBUG] 8. HTTP request about to be sent:', method, `${baseUrl}${path}`, init.body);
 
+  // Built from AbortController rather than the newer AbortSignal.timeout()
+  // static — React Native polyfills AbortController/AbortSignal via the
+  // `abort-controller` package (see setUpXHR.js), which does not implement
+  // that static method; calling it would throw on-device even though it
+  // passes under Jest's Node environment.
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => timeoutController.abort(), REQUEST_TIMEOUT_MS);
+
   let response: Response;
   try {
-    response = await fetch(`${baseUrl}${path}`, init);
+    response = await fetch(`${baseUrl}${path}`, { ...init, signal: timeoutController.signal });
     // TEMP DEBUG LOGGING
     console.log('[QR-DEBUG] 9. HTTP response received:', response.status, response.ok);
   } catch (err) {
-    // TEMP DEBUG LOGGING
+    // TEMP DEBUG LOGGING — the underlying error (timeout vs. connection
+    // failure vs. something else) stays logged for development, but the
+    // user-facing ApiError below never repeats it verbatim: a bare
+    // "TypeError: Network request failed" or "AbortError" means nothing to
+    // a non-technical user.
     console.error('[QR-DEBUG] 10. fetch() threw:', err);
-    throw new ApiError(`Could not reach the backend: ${(err as Error).message}`, 0);
+    throw new ApiError(UNREACHABLE_MESSAGE, 0);
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   if (response.status === 204) {

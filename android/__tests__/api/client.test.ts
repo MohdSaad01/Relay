@@ -82,11 +82,14 @@ test('returns undefined for a 204 No Content response', async () => {
   await expect(apiClient.del('/transfers/requests/abc')).resolves.toBeUndefined();
 });
 
-test('wraps a network failure as an ApiError', async () => {
+test('wraps a network failure as an ApiError with a user-facing message', async () => {
   setApiConfig({ baseUrl: 'http://desktop:8000/api/v1' });
   (globalThis.fetch as jest.Mock).mockRejectedValueOnce(new Error('Network request failed'));
 
   await expect(apiClient.get('/files')).rejects.toMatchObject(
-    new ApiError('Could not reach the backend: Network request failed', 0),
+    new ApiError(
+      'Unable to reach Relay Desktop. Make sure the PC is running Relay and both devices are on the same network.',
+      0,
+    ),
   );
 });

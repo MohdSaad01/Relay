@@ -105,7 +105,14 @@ class BackendManager {
     const python = path.join(backendDir, ".venv", "Scripts", "python.exe");
     return {
       command: python,
-      args: ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", String(this.port)],
+      // Bound to all interfaces (matching Settings.HOST's own "0.0.0.0"
+      // default, app/core/config.py) rather than loopback-only, so a paired
+      // Android device can reach this backend over the LAN (docs/09_Networking.md
+      // §10: Relay's API port is expected to accept inbound LAN connections).
+      // This process still only ever calls itself back over 127.0.0.1 (see
+      // this.baseUrl above) — binding to 0.0.0.0 does not change how the
+      // desktop UI talks to its own backend, only who else can reach it.
+      args: ["-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", String(this.port)],
       cwd: backendDir,
     };
   }

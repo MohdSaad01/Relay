@@ -290,7 +290,6 @@ export function TransferListScreen() {
   // clear point is hidden.
   const visibleTransfers = applyHistoryReset(transfers, clearedAt);
   const hasHistoryToClear = visibleTransfers.some(isHistoricalTransfer);
-  const historyWasCleared = clearedAt != null && transfers.length > 0 && visibleTransfers.length === 0;
   // P21.1 (Issue 2): grouped after history reset, same order desktop's own
   // batch grouping applies it in — a folder whose children are all hidden by
   // a clear stays hidden, one still 'in_progress' stays visible, exactly
@@ -385,8 +384,13 @@ export function TransferListScreen() {
             )
           }
           ListEmptyComponent={
+            // P28: one ordinary empty state regardless of *why* the list is
+            // empty (never had transfers vs. history cleared) — matching
+            // desktop's own transfers.js. The previous text distinguishing
+            // "cleared" from "never had any" exposed that internal
+            // distinction to the user, which the milestone ruled out.
             <View style={styles.emptyContainer}>
-              <Text style={styles.empty}>{historyWasCleared ? 'Transfer history cleared.' : 'No transfers yet.'}</Text>
+              <Text style={styles.empty}>No transfers yet.</Text>
             </View>
           }
           contentContainerStyle={listItems.length === 0 ? styles.emptyList : undefined}

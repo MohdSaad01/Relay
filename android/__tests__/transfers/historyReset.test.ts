@@ -3,6 +3,7 @@ import {
   applyHistoryReset,
   clearTransferHistory,
   getHistoryClearedAt,
+  isHiddenByHistoryReset,
   isHistoricalTransfer,
 } from '../../src/transfers/historyReset';
 import { TransferResponse } from '../../src/api/types';
@@ -75,6 +76,30 @@ describe('isHistoricalTransfer', () => {
 
   test('false for in_progress — covers both an actively streaming and a locally queued transfer', () => {
     expect(isHistoricalTransfer(makeTransfer({ status: 'in_progress' }))).toBe(false);
+  });
+});
+
+describe('isHiddenByHistoryReset', () => {
+  // P28: the per-transfer predicate applyHistoryReset's own filter is built
+  // on, factored out for FilesScreen's Clear History (Android side) to
+  // reuse without re-deriving the cutoff rule.
+  test('false when history has never been cleared', () => {
+    expect(isHiddenByHistoryReset(makeTransfer({ status: 'completed' }), null)).toBe(false);
+  });
+
+  test('false for an in_progress transfer, however far in the past it started', () => {
+    const transfer = makeTransfer({ status: 'in_progress', completed_at: null, started_at: '2000-01-01T00:00:00.000Z' });
+    expect(isHiddenByHistoryReset(transfer, '2026-06-01T00:00:00.000Z')).toBe(false);
+  });
+
+  test('true for a terminal transfer that finished at or before the clear point', () => {
+    const transfer = makeTransfer({ status: 'completed', completed_at: '2026-01-01T00:00:00.000Z' });
+    expect(isHiddenByHistoryReset(transfer, '2026-01-02T00:00:00.000Z')).toBe(true);
+  });
+
+  test('false for a terminal transfer that finished after the clear point', () => {
+    const transfer = makeTransfer({ status: 'completed', completed_at: '2026-01-03T00:00:00.000Z' });
+    expect(isHiddenByHistoryReset(transfer, '2026-01-02T00:00:00.000Z')).toBe(false);
   });
 });
 

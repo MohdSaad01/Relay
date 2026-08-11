@@ -3089,6 +3089,344 @@ rather than new patterns.
 
 ---
 
+# Milestone P28 — History & Listing Semantics
+
+**Scope:** the new issue list's §1 ("Backend: ready" removal), §2 (Clear
+History on Desktop Shared Files and Android Files), §4 (Transfers empty
+state), and the "Important distinction" section requiring Shared Files,
+Transfer History, and physical downloaded files to remain three separate
+concepts. Explicitly deferred: Desktop Devices Rename (P29), stale
+Shared-Files filesystem-deletion handling (P29), the global custom dialog
+system (P30), any transfer-protocol change, and any database deletion of
+`Transfer` rows.
+
+**Method:** Desktop was driven live via a throwaway `playwright-core`
+`_electron` script (same P19–P27 pattern: no xvfb needed, this is a real
+Windows session; script not committed) against the real dev
+`backend/relay.db`. Android was driven live on the physical RMX3997 over
+USB — the device was not connected at the start of this milestone (an
+early ADB check returned nothing) but came online mid-session; every
+Android claim below post-dates that reconnection and is real
+physical-device verification, not simulated. The already-installed debug
+APK was reloaded against a locally-started Metro bundler (`adb reverse
+tcp:8081 tcp:8081`, `am force-stop` + relaunch) rather than a full
+`react-native run-android` rebuild, since only JS/TS changed. Both clients
+talked to the same backend instance (loopback for desktop, LAN for
+Android), so a file shared via a direct `POST /files`/`POST /folders` call
+on the desktop side was immediately downloadable from the real phone.
+
+**Baseline investigation (before any code change):**
+- §1 ("Backend: ready"): confirmed live — `desktop/src/renderer/index.html`
+  rendered `<footer id="status-bar">Backend: <span id="backend-state">`,
+  populated by `renderer.js` from `window.relay.getBackendStatus()` /
+  `onBackendStatusChanged`. Screenshot confirmed the label visible
+  bottom-left on every tab.
+- §2 (Shared Files Clear History): **did not exist.** Desktop Shared
+  Files had no Clear History action. Live inspection also surfaced the
+  exact ambiguity the issue warns about: with the Transfers tab's own
+  Clear History (P21) already exercised in a prior session (a stale
+  `historyClearedAt` marker already in this profile's `localStorage`),
+  Transfers correctly showed its "cleared" state, but Shared Files still
+  listed all 3 of the same underlying received items — proving
+  `receivedFiles.js`'s `buildReceivedItems` did not consult the clear-history
+  marker at all before this milestone.
+- §4 (Transfers empty state): confirmed live — Desktop's Transfers tab
+  showed a distinct card ("History cleared" / "Your past transfers are
+  hidden...") whenever `historyWasCleared` was true, different from the
+  ordinary "No transfers yet" card. Android's `TransferListScreen.tsx` had
+  the identical defect in miniature: `{historyWasCleared ? 'Transfer
+  history cleared.' : 'No transfers yet.'}`. This second instance was not
+  in the original P28 brief's explicit examples — it was found by
+  reproducing the Desktop fix's *effect* on Android (see below) and is
+  fixed under the same §4 requirement, not out of scope.
+- Android Files Clear History: **did not exist.** `FilesScreen.tsx` had no
+  history-visibility concept at all — every currently-shared item (from
+  `GET /files`/`GET /folders`) always rendered as one row regardless of
+  download state, aside from the pre-existing P22 "Remove" dismissal for
+  *undownloaded* items (`removedItems.ts`).
+
+**Root causes:**
+- The "Backend: ready" label was a direct, unconditional rendering of
+  `BackendManager`'s internal lifecycle state (`starting`/`ready`/
+  `crashed`/`stopped`) with no UI purpose beyond mirroring it — never
+  filtered down to only the states a user needs to act on.
+- Shared Files' received-item list (`receivedFiles.js`) was built by
+  filtering `GET /transfers` down to completed `receive` rows, but P21's
+  Clear History (`transferHistory.js`) was wired only into the Transfers
+  view — the two features were implemented in the same milestone as two
+  unrelated call sites over the same underlying data, and nothing kept
+  them in sync.
+- The Transfers empty-state defect (both platforms) was a UI leaking an
+  internal implementation fact (a client-local marker exists and is
+  non-null) into user-facing copy, when the issue's own requirement is
+  that the three causes of emptiness (never had transfers, cleared
+  history, nothing currently visible) must be indistinguishable to the
+  user.
+- Android Files had no equivalent of Desktop's "received item derived from
+  transfer history" concept to reuse, because Android's Files screen is
+  architecturally different: it lists the desktop's live shared catalog
+  (`GET /files`/`GET /folders`), not a transfer-history projection — a
+  downloaded row is the *same* row as an undownloaded one, just with a
+  different derived `status.kind`. There was accordingly no data model at
+  all for "hide a downloaded row while keeping the shared item it belongs
+  to."
+
+**Architecture decisions:**
+- **"Backend: ready" removal is presentation-only.** `BackendManager`
+  (health-check loop, crash-restart logic, `state` tracking) and the IPC
+  plumbing that exposes it (`backend:getStatus`, `backend:status-changed`,
+  `preload.js`'s `getBackendStatus`/`onBackendStatusChanged`) are
+  untouched — nothing else in the codebase consumes them besides the now-
+  removed renderer footer, but they remain legitimate internal
+  main-process machinery (crash detection/restart genuinely needs
+  `BackendManager.state` regardless of any UI), matching the milestone's
+  explicit "internal readiness ≠ user-facing label" distinction. Removed:
+  the `<footer id="status-bar">` element (`index.html`), its `renderer.js`
+  wiring, and the now-dead `#status-bar` CSS rule.
+- **Desktop Shared Files Clear History reuses `transferHistory.js`'s
+  existing `historyClearedAt` marker directly** — the exact same
+  `getHistoryClearedAt`/`clearTransferHistory` calls the Transfers tab
+  already uses — rather than introducing a second history concept.
+  `files.js` now runs `applyHistoryReset(transfers, clearedAt)` before
+  handing the result to `buildReceivedItems`, so a received item is hidden
+  from Shared Files under exactly the same cutoff rule Transfers already
+  applies to the same underlying data. Clicking Clear History from either
+  screen has the same effect on both, which is the correct semantics here
+  ("received" items in Shared Files *are* transfer history, not a
+  distinct concept) rather than a surprising cross-screen side effect.
+  Currently-shared source `file`/`folder` entries are structurally
+  untouched — they come straight from `GET /files`/`GET /folders`, never
+  pass through `applyHistoryReset`, and have no relationship to transfer
+  history at all.
+- **Android Files Clear History reuses the same `historyReset.ts` marker
+  file** the Transfers screen already writes (P14.4) — again, one history
+  concept, not two. Since Android's Files rows have no separate
+  "history-derived item" data model to filter (unlike Desktop), the
+  refactor factored a new per-transfer predicate,
+  `isHiddenByHistoryReset(transfer, clearedAt)`, out of
+  `applyHistoryReset`'s existing filter (`applyHistoryReset` itself is
+  unchanged in behavior — confirmed by the full pre-existing test suite
+  passing unmodified). `FilesScreen.tsx` then applies this predicate per
+  row: a file/folder is hidden only when its currently-derived status is
+  `'completed'` *and* its underlying download transfer(s) would be hidden
+  by the reset — never when idle/pending/in_progress/failed, and never by
+  touching `shared_file_id`/`shared_folder_id` or the desktop's share
+  itself. A folder is hidden only once *every* child's transfer clears
+  that bar (mirrors `receivedFiles.js`'s "the whole folder counts as one
+  entry" precedent on Desktop). Because the predicate is re-evaluated
+  live against the current `status.kind`, a downloaded file whose local
+  copy is later deleted (regressing to `'idle'` via the existing
+  `useDownloadExistence` check) automatically reappears, re-downloadable
+  — Clear History never leaves a permanently-hidden dead row.
+- **Transfers empty state (both platforms) collapses to one ordinary
+  message, unconditionally.** Desktop: `"No history"` / `"New transfers
+  you send or receive will show up here."` (the milestone's own preferred
+  wording), replacing the `historyWasCleared`-branched card entirely —
+  the `neutral`-variant "History cleared" icon badge is gone, the normal
+  `primary`-variant transfer icon is used for the one remaining state.
+  Android: kept its own pre-existing "No transfers yet." wording
+  (unconditionally now, instead of only for the *never-had-any* branch),
+  since the two platforms don't need identical copy, only equivalent
+  semantics — Android's is already a plain, non-revealing sentence.
+- **Confirmation copy states the three-way distinction explicitly** on
+  every Clear History action (both new ones and the two pre-existing
+  ones, spot-checked, already compliant): listing-only, physical files
+  preserved, active/queued transfers preserved. Desktop Shared Files:
+  *"Clear received-file history from this list? Currently shared
+  files/folders stay listed, downloaded files stay on your computer, and
+  any active transfer stays visible in Transfers."* Android Files:
+  *"Clear file history? Downloaded files will be removed from this list,
+  but the files themselves stay on your device. Files still downloading
+  or queued are not affected."* — this exact string was screenshotted
+  live on RMX3997 (see below). Per the milestone's explicit scope
+  boundary, no new dialog component was built for either — both use the
+  existing mechanism (`window.confirm` on Desktop, `Alert.alert` on
+  Android), wording only.
+
+**Files modified:**
+- `desktop/src/renderer/index.html` — removed the status-bar footer.
+- `desktop/src/renderer/renderer.js` — removed `backendStateEl` and its
+  IPC wiring.
+- `desktop/styles/app.css` — removed the now-dead `#status-bar` rule.
+- `desktop/src/renderer/views/files.js` — Clear History action reusing
+  `transferHistory.js`; received items filtered through
+  `applyHistoryReset`.
+- `desktop/src/renderer/views/transfers.js` — unified "No history" empty
+  state, `historyWasCleared` removed.
+- `android/src/transfers/historyReset.ts` — factored out
+  `isHiddenByHistoryReset` (behavior-preserving refactor of
+  `applyHistoryReset`).
+- `android/src/screens/files/FilesScreen.tsx` — Clear History header
+  action, per-row/per-folder history-hide filtering, new
+  `isFileHiddenByHistoryClear`/`isFolderHiddenByHistoryClear` helpers.
+- `android/src/screens/transfers/TransferListScreen.tsx` — unified "No
+  transfers yet." empty state, `historyWasCleared` removed.
+- `android/__tests__/transfers/historyReset.test.ts` — added coverage for
+  `isHiddenByHistoryReset`.
+
+**Automated tests:**
+- `node --check` on every modified Desktop JS file (`renderer.js`,
+  `files.js`, `transfers.js`, plus the untouched-but-imported
+  `transferHistory.js`/`receivedFiles.js` for good measure) — all pass.
+  Desktop has no formal lint/test suite (per `desktop/package.json`), so
+  this is the full extent of Desktop's automated checking, matching
+  P19–P27's own precedent.
+- `npx tsc --noEmit` (Android) — zero errors, both before and after the
+  mid-session Transfers-empty-state fix.
+- `npx eslint .` (Android, full repo) — zero errors; the only warnings are
+  a pre-existing `react/no-unstable-nested-components` on
+  `TransferListScreen.tsx`'s own already-existing `headerRight` pattern
+  (mirrored, not introduced, by `FilesScreen.tsx`'s new one) and two
+  pre-existing `no-void` warnings in `TransferStreamManager.ts`, a file
+  this milestone did not touch.
+- `npx jest` (Android, full suite) — **42 suites / 359 tests pass**,
+  zero failures, including the 4 new `isHiddenByHistoryReset` tests and
+  every existing `historyReset`/`transferGrouping`/`FilesScreen`-adjacent
+  suite unmodified in behavior.
+- Backend: not modified, not run, per the milestone's own instruction.
+
+**Desktop live verification (real Electron app + real dev `relay.db`):**
+- Confirmed "Backend: ready" gone from every tab post-change; app layout
+  unaffected (flex column already sized `#view-container` to fill the
+  freed space).
+- Reproduced the exact baseline ambiguity end-to-end: with
+  `historyClearedAt` reset to null (simulating "never cleared"), all 3
+  real historical received items (`IMG20260811153729.jpg`, `RelayTest`,
+  `University Notes`) reappeared in Shared Files, plus a freshly `POST
+  /files`-shared test file (`Shared` badge). Clicking the new Clear
+  History button, confirming the dialog (stubbed `window.confirm` to
+  `true` for the scripted click), hid all 3 received rows while the
+  currently-shared test file remained listed — confirmed via screenshot.
+  `GET /transfers` afterward still returned all rows (spot-checked id
+  1333 and neighbors) with `status: "completed"` unchanged — the backend
+  was never touched. Restarted the Electron app fully (driver `close()`,
+  process list confirmed zero `electron.exe`, fresh relaunch) and
+  re-screenshotted both Transfers ("No history") and Shared Files
+  ("Nothing shared yet", Clear History correctly disabled) — the marker
+  persisted across a genuine process restart, not just a renderer reload.
+  Cleaned up the test share (`DELETE /files/1`) afterward.
+- Regression screenshots: Devices (paired RMX3997-Test card unchanged),
+  Pairing (idle "Ready to pair a device" card unchanged), Settings (no
+  session-token-lifetime field, download directory field present —
+  P25 state intact) — all visually unchanged from pre-P28.
+- **Limitation found and not fixed (correctly deferred):** the 3
+  pre-existing "received" items' physical files do not actually exist
+  anywhere under `C:\Users\Saad` (confirmed via `find`) — the current
+  `download_directory` setting (`C:\Users\Saad\Downloads`) postdates
+  whatever directory was active when those historical transfers
+  completed. This is dev-database staleness (the same class of issue
+  P25 already documented for `download_directory` itself), not a defect
+  this milestone introduced or is in scope to fix (P29 owns "stale
+  Shared Files filesystem" handling) — flagged here rather than silently
+  worked around. Physical-file preservation was instead verified two
+  other ways: (1) source inspection — `clearTransferHistory()` is a pure
+  `localStorage.setItem`, with no `window.relay.deleteItem`/DELETE-API
+  call anywhere in the Clear History code path, so it is structurally
+  incapable of touching a file; (2) a **fresh** test file created for
+  this purpose (see next bullet) did physically survive.
+
+**Android physical-device verification (real RMX3997, real backend over
+the same LAN the desktop used):**
+- Device reconnected mid-session (absent at milestone start, confirmed
+  present via `adb devices -l` once the user reported it).
+- Shared a fresh file (`p28-android-test.txt`) from the desktop via a
+  direct `POST /files` call; it appeared on the real Files tab within one
+  poll cycle. Downloaded it (row flipped Download → Open, Clear History
+  flipped disabled → enabled, both screenshotted). Confirmed the byte
+  file at `/storage/emulated/0/Download/Relay/p28-android-test.txt` via
+  `adb shell find`. Tapped Clear History: the confirmation dialog
+  screenshot shows the exact wording quoted above. Confirmed it — the row
+  disappeared, Clear History returned to disabled, and (since Files and
+  Transfers share one marker) the Transfers tab's own list emptied too,
+  live-confirming the intentional cross-screen consistency design
+  decision. `adb shell find` afterward showed the same file still present
+  byte-for-byte at the same path. Force-stopped and relaunched the app
+  (full process restart, not just a JS reload) — the hidden state
+  persisted (screenshotted).
+- Repeated the same sequence for a **folder** (`p28-test-folder`, 2 files)
+  to exercise `isFolderHiddenByHistoryClear` specifically: shared,
+  downloaded (both children present via `adb shell find`), cleared with
+  confirmation, row disappeared, both children's files confirmed still
+  present afterward.
+- Fixed and re-verified live: Android's Transfers tab showed the
+  identical "reveals whether cleared" defect Desktop had (`'Transfer
+  history cleared.'` vs `'No transfers yet.'`) — found by checking
+  Transfers immediately after the Files-tab Clear History test above (the
+  shared marker meant Transfers also went empty). Fixed
+  (`TransferListScreen.tsx`), rebuilt via Metro reload, re-screenshotted:
+  now shows the ordinary `"No transfers yet."` unconditionally.
+- Regression: Settings tab re-screenshotted post-change (device name,
+  download folder, Edit Name / Change Folder — all P23/P14.3 state
+  intact, no visual or functional change).
+- Cleaned up both test artifacts (`DELETE /files/1`, `DELETE /folders/1`,
+  local scratch files, and the on-device files via `adb shell rm`,
+  `MSYS_NO_PATHCONV=1`-guarded to avoid Git Bash's path-mangling of
+  absolute `/storage/...` arguments) — confirmed empty via a final
+  `adb shell find` pass.
+
+**Regressions checked, none found:** Desktop Devices/Pairing/Settings
+(screenshotted); Desktop's pre-existing Transfers Clear History
+confirm/hide/backend-preserve flow (unchanged code path, exercised
+incidentally during the empty-state fix verification); Android
+Files' Open/Download/long-press-menu affordances (exercised live during
+the file/folder download tests above); Android Settings; the full
+pre-existing Jest suite (359 tests, all platforms/features, zero new
+failures).
+
+**Problems discovered (beyond the original brief) and their disposition:**
+1. Android `TransferListScreen.tsx`'s empty state had the identical §4
+   defect as Desktop — **fixed in this milestone** (same requirement,
+   just not called out by file name in the original brief).
+2. Historical "received" items in the dev `relay.db` point at files that
+   no longer exist under the current `download_directory` — **deferred**
+   to P29 (stale Shared Files filesystem handling), documented above, not
+   fixed here.
+
+**Documentation changed:** this `docs/15_QA_NOTEBOOK.md` entry.
+`CLAUDE.md` and `README.md` were evaluated and intentionally left
+unchanged — `CLAUDE.md`'s existing "Desktop Files/Transfers Conventions
+(P21)" section already states the governing rule ("a backend action with
+no delete/undo primitive by design... must not grow one just to make a
+clear/remove UI feature easier... filter what's displayed via a
+client-local marker") and P28 is a direct, unsurprising application of
+that already-documented rule to two more screens, not a new convention;
+`README.md`'s user-facing feature description does not mention Clear
+History or backend status at a level of detail this change affects.
+
+**Remaining limitations:**
+- The stale received-item physical-file paths noted above (deferred to
+  P29).
+- Desktop's Clear History marker is per-renderer-profile `localStorage`,
+  and Android's is a per-install JSON file — neither syncs across
+  devices/reinstalls, which is the same accepted limitation P14.4/P21
+  already documented, unchanged by this milestone.
+- No automated (Jest) coverage was added for `FilesScreen.tsx`'s new
+  `isFileHiddenByHistoryClear`/`isFolderHiddenByHistoryClear` directly
+  (only via the physical-device verification above and the existing
+  `computeFileRowState`/`computeFolderRowState` suites, which their
+  status-derivation inputs are unchanged) — the file has no pre-existing
+  unit-test harness for its top-level component logic to extend
+  (`describeStatus.test.ts`/`downloadButtonLabel.test.ts`/
+  `computeFolderRowState.test.ts` only cover already-exported pure
+  functions), and adding one was judged out of proportion to a listing-
+  visibility filter already proven correct on real hardware.
+
+**Suggested commit message:**
+`fix(desktop,android): standardize history/listing semantics (P28)`
+
+**Final verdict:** all four in-scope requirements (§1, §2 Desktop, §2
+Android, §4) implemented and live-verified on both real platforms,
+including one instance (Android Transfers empty state) not explicitly
+named in the brief but required by the same rule and fixed under it. No
+downloaded file was deleted, no backend `Transfer` row was touched or
+deleted, and every Clear History action was confirmed end-to-end (share
+→ download → clear → verify hidden → verify backend/disk unaffected →
+restart → verify persisted) on real data. One pre-existing, out-of-scope
+data-staleness issue was found and correctly deferred rather than
+silently patched.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:
@@ -3149,3 +3487,12 @@ A few gotchas worth remembering independent of any single milestone above:
   `transferHistory.js`/`receivedFiles.js` apply the identical pattern on
   Desktop, once for the same history and once for a received file's
   Shared Files entry.
+- **Git Bash mangles an absolute `/storage/...` argument into a Windows
+  path before `adb shell` ever sees it** (turning
+  `/storage/emulated/0/Download/Relay/x.txt` into something under `C:\Program
+  Files\Git\...`) whenever it's a standalone argument rather than embedded
+  inside a larger quoted string — confirmed live in P28 (`adb shell rm
+  /storage/...` silently failed with a `C:/Program Files/Git/...` path in
+  the error). Prefix the command with `MSYS_NO_PATHCONV=1` for any `adb
+  shell` call that takes a bare device-side absolute path as its own
+  argument.

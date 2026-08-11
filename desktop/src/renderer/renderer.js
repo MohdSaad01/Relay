@@ -10,7 +10,6 @@ import * as settings from "./views/settings.js";
 const views = { devices, pairing, files, transfers, settings };
 
 const viewContainer = document.getElementById("view-container");
-const backendStateEl = document.getElementById("backend-state");
 
 let activeUnmount = null;
 
@@ -29,14 +28,6 @@ async function showView(name) {
 
 document.querySelectorAll("#nav button").forEach((button) => {
   button.addEventListener("click", () => showView(button.dataset.view));
-});
-
-window.relay.onBackendStatusChanged((state) => {
-  backendStateEl.textContent = state;
-});
-
-window.relay.getBackendStatus().then((state) => {
-  backendStateEl.textContent = state;
 });
 
 /**

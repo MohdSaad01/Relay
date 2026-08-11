@@ -169,6 +169,19 @@ instead of Android's JSON marker file. Any future "hide history"/"remove
 entry" feature over data the backend deliberately never deletes should
 follow the same shape rather than adding a backend delete route.
 
+**P28: Shared Files' own "Clear History" (Desktop) and Files' own "Clear
+History" (Android) reuse the exact same marker as each platform's
+Transfers "Clear History"** (`transferHistory.js`'s `historyClearedAt` on
+Desktop, `historyReset.ts`'s marker file on Android) rather than a second
+history concept — a received item in Shared Files, or a downloaded row in
+Android's Files list, *is* transfer history, filtered by the identical
+cutoff (`applyHistoryReset` / `isHiddenByHistoryReset`). Clearing history
+from either screen on a platform therefore hides the same history-derived
+entries everywhere they're shown on that platform. A currently-*shared*
+Desktop source file/folder (not a received one) is structurally exempt —
+it comes straight from `GET /files`/`GET /folders` and never passes
+through this filter.
+
 A **received file/folder** (an Android upload the desktop accepted) has no
 `SharedFile`/`SharedFolder` row — `TransferStreamService.receive_upload`
 only ever writes bytes and updates the `Transfer` row. Where a view needs

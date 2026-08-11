@@ -52,12 +52,16 @@ build yet — plus the enhancements listed under
   device shows on the desktop's Devices list can be changed from the
   Android Settings screen at any time; the device's underlying identity
   (used for pairing/session lookups) never changes.
-* **Transfer history reset (Desktop and Android)** — a "Clear History"
-  action on each platform's own Transfers screen hides completed, failed,
-  and cancelled transfers from that list. It never deletes downloaded
-  files/folders, never disturbs an active or queued transfer, and is local
+* **Transfer/listing history reset (Desktop and Android)** — a "Clear
+  History" action on each platform's Transfers screen, and on Desktop's
+  Shared Files screen and Android's Files screen, hides completed
+  transfers and their downloaded/received entries from those lists. It
+  never deletes downloaded files/folders, never disturbs an active or
+  queued transfer or a currently-shared source file/folder, and is local
   to that device/app install — clearing it on one platform never affects
-  the other's history or the backend's own records.
+  the other's history or the backend's own records. On a given platform,
+  clearing from any one of these screens hides the same history-derived
+  entries everywhere they'd otherwise appear.
 * **Received files stay manageable on desktop** — a file or folder
   received from Android appears in the desktop's Shared Files list
   alongside locally-shared items (tagged "Received"), with Open, Show in

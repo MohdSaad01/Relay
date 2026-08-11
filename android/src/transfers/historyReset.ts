@@ -84,13 +84,30 @@ function parseTimestamp(value: string): number {
 }
 
 /**
+ * Whether a single `transfer` would be hidden by a history reset at
+ * `clearedAt` — the per-transfer predicate applyHistoryReset filters
+ * `transfers` with below, factored out (P28) so a caller keying visibility
+ * off some other collection derived from transfers (e.g. FilesScreen's
+ * shared-item rows, which show a "Downloaded" file/folder rather than a
+ * transfer itself) can reuse the exact same cutoff rule instead of
+ * re-deriving it. A transfer still 'in_progress' is never hidden,
+ * regardless of `clearedAt` — it is operational state, not history.
+ */
+export function isHiddenByHistoryReset(transfer: TransferResponse, clearedAt: string | null): boolean {
+  if (clearedAt == null || !isHistoricalTransfer(transfer)) {
+    return false;
+  }
+  const cutoff = parseTimestamp(clearedAt);
+  const finishedAt = transfer.completed_at ?? transfer.started_at;
+  return parseTimestamp(finishedAt) <= cutoff;
+}
+
+/**
  * Filters `transfers` down to what the Transfers screen should still show
- * after a history reset at `clearedAt`. A transfer that is still
- * 'in_progress' is never removed, regardless of `clearedAt` — it is
- * operational state, not history. A historical transfer is removed only if
- * it finished (completed_at, or started_at for the rare row that predates
- * that field being set) at or before the clear point, so a transfer that
- * finishes *after* the reset stays visible.
+ * after a history reset at `clearedAt`. A historical transfer is removed
+ * only if it finished (completed_at, or started_at for the rare row that
+ * predates that field being set) at or before the clear point, so a
+ * transfer that finishes *after* the reset stays visible.
  */
 export function applyHistoryReset(
   transfers: TransferResponse[],
@@ -99,12 +116,5 @@ export function applyHistoryReset(
   if (clearedAt == null) {
     return transfers;
   }
-  const cutoff = parseTimestamp(clearedAt);
-  return transfers.filter(transfer => {
-    if (!isHistoricalTransfer(transfer)) {
-      return true;
-    }
-    const finishedAt = transfer.completed_at ?? transfer.started_at;
-    return parseTimestamp(finishedAt) > cutoff;
-  });
+  return transfers.filter(transfer => !isHiddenByHistoryReset(transfer, clearedAt));
 }

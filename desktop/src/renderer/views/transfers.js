@@ -46,10 +46,14 @@ function render(container, transfers) {
   const clearedAt = getHistoryClearedAt();
   const visibleTransfers = applyHistoryReset(transfers, clearedAt);
   const hasHistoryToClear = visibleTransfers.some(isHistoricalTransfer);
-  const historyWasCleared = clearedAt != null && transfers.length > 0 && visibleTransfers.length === 0;
 
   const actions = `<button id="clear-history" class="text-button"${hasHistoryToClear ? "" : " disabled"}>Clear History</button>`;
 
+  // P28: a single ordinary empty state regardless of *why* the list is
+  // empty (never had transfers vs. history cleared vs. nothing currently
+  // visible) - see docs/15_QA_NOTEBOOK.md's P28 entry. The previous
+  // "History cleared" variant exposed that internal distinction to the
+  // user, which the milestone explicitly ruled out.
   container.innerHTML =
     pageHeader({
       title: "Transfers",
@@ -57,20 +61,11 @@ function render(container, transfers) {
       actions,
     }) +
     (visibleTransfers.length === 0
-      ? emptyState(
-          historyWasCleared
-            ? {
-                icon: transferIcon,
-                variant: "neutral",
-                title: "History cleared",
-                message: "Your past transfers are hidden. New transfers you send or receive will show up here.",
-              }
-            : {
-                icon: transferIcon,
-                title: "No transfers yet",
-                message: "Files you send or receive with a paired device will show up here.",
-              }
-        )
+      ? emptyState({
+          icon: transferIcon,
+          title: "No history",
+          message: "New transfers you send or receive will show up here.",
+        })
       : renderTransfersTable(visibleTransfers));
 
   const clearHistoryButton = container.querySelector("#clear-history");

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -9,7 +9,9 @@ import {
   Text,
   View,
 } from 'react-native';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { FilesStackParamList } from '../../navigation/types';
 import { useSharedFiles } from '../../files/useSharedFiles';
 import { useSharedFolders } from '../../files/useSharedFolders';
 import { useFolderFilesMap } from '../../files/useFolderFilesMap';
@@ -25,6 +27,11 @@ import { openDownloadedFile, openDownloadedFolder, shareDownloadedFile } from '.
 import { fileMetaLine, folderMetaLine } from '../../files/metadataFormat';
 import { useTransferRequests } from '../../transfers/useTransferRequests';
 import { useTransfers } from '../../transfers/useTransfers';
+import {
+  clearTransferHistory,
+  getHistoryClearedAt,
+  isHiddenByHistoryReset,
+} from '../../transfers/historyReset';
 import { getFolderFiles } from '../../api/endpoints/folders';
 import { cancelTransfer, getTransfer, proposeTransfer } from '../../api/endpoints/transfers';
 import { ApiError } from '../../api/client';
@@ -195,6 +202,61 @@ export function computeFolderRowState(
 }
 
 /**
+ * P28: "Clear History" for the Files screen — a downloaded file/folder row
+ * is hidden once its underlying download transfer(s) would be hidden by a
+ * history reset (transfers/historyReset.ts's own cutoff rule, shared with
+ * the Transfers tab's identical action rather than a second history
+ * concept). Only a 'completed' row is ever eligible: an idle/pending/failed
+ * row has no download transfer to have "finished" yet, and an in_progress
+ * one must never be hidden regardless of clearedAt (isHiddenByHistoryReset
+ * already encodes both rules per-transfer). Hiding the row here never
+ * touches the underlying shared_file_id/shared_folder_id — the item stays
+ * shared on the desktop and simply reappears, re-downloadable, the moment
+ * its status legitimately regresses from 'completed' (e.g. the local copy
+ * is deleted — see downloadStatus.ts's fileExists handling).
+ */
+function isFileHiddenByHistoryClear(
+  status: FileDownloadStatus,
+  fileId: number,
+  transfers: TransferResponse[],
+  clearedAt: string | null,
+): boolean {
+  if (status.kind !== 'completed') {
+    return false;
+  }
+  const transfer = transfers.find(t => t.id === latestSendTransferId(fileId, transfers));
+  return transfer != null && isHiddenByHistoryReset(transfer, clearedAt);
+}
+
+/**
+ * Folder counterpart of isFileHiddenByHistoryClear above — a folder is only
+ * hidden once *every* child's own download transfer would be hidden, so a
+ * folder with even one recently-downloaded child (post-cutoff) still shows,
+ * matching desktop/src/renderer/receivedFiles.js's own "the whole folder
+ * counts as one entry" precedent for the identical shape of problem.
+ */
+function isFolderHiddenByHistoryClear(
+  status: FolderDownloadStatus,
+  children: AvailableFolderFileResponse[],
+  transfers: TransferResponse[],
+  clearedAt: string | null,
+): boolean {
+  if (status.kind !== 'completed' || children.length === 0) {
+    return false;
+  }
+  const childTransferIds = children
+    .map(child => latestSendTransferId(child.id, transfers))
+    .filter((id): id is number => id != null);
+  if (childTransferIds.length === 0) {
+    return false;
+  }
+  return childTransferIds.every(id => {
+    const transfer = transfers.find(t => t.id === id);
+    return transfer != null && isHiddenByHistoryReset(transfer, clearedAt);
+  });
+}
+
+/**
  * Human-readable state for the Details action — distinct from
  * downloadButtonLabel/folderDownloadButtonLabel, which phrase the same
  * states as a button's call to action ("Download", "Retry") rather than a
@@ -244,6 +306,7 @@ export function describeStatus(kind: FileDownloadStatus['kind'] | FolderDownload
  * single-file downloads — see handleFolderDownload below.
  */
 export function FilesScreen() {
+  const navigation = useNavigation<NativeStackNavigationProp<FilesStackParamList, 'Files'>>();
   const { files, loading, refreshing, error, refresh, refreshSilently } = useSharedFiles();
   const {
     folders,
@@ -285,6 +348,28 @@ export function FilesScreen() {
     null,
   );
   const closeMenu = useCallback(() => setMenuTarget(null), []);
+  // P28: Clear History marker, loaded the same way TransferListScreen loads
+  // it (see that screen's own doc comment for why clearedAtLoaded is kept
+  // distinct from "never cleared") — this screen reads the exact same
+  // marker file rather than a second one, so clearing from either screen
+  // hides the same history-derived rows everywhere they're shown.
+  const [clearedAt, setClearedAt] = useState<string | null>(null);
+  const [clearedAtLoaded, setClearedAtLoaded] = useState(false);
+  const [clearingHistory, setClearingHistory] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getHistoryClearedAt().then(value => {
+      if (!cancelled) {
+        setClearedAt(value);
+        setClearedAtLoaded(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // useTransferRequests/useTransfers/useSharedFiles/useSharedFolders each
   // already fetch once on mount, and a screen's first focus coincides with
   // that same mount — so the immediate refresh below is only needed from the
@@ -827,6 +912,88 @@ export function FilesScreen() {
     [requests, transfers, refreshRequests, refreshTransfers, removeFolder],
   );
 
+  // P28: whether clicking Clear History right now would actually hide
+  // anything — a completed, currently-visible row not already hidden by
+  // the loaded clearedAt. Mirrors TransferListScreen's own hasHistoryToClear
+  // gating (disabled once there's nothing left to clear).
+  const hasHistoryToClear =
+    clearedAtLoaded &&
+    (files.some(file => {
+      if (removedFileIds.has(file.id)) return false;
+      const state = computeFileRowState(file, requests, transfers, existence, localNameByFileId);
+      return state.status.kind === 'completed' && !isFileHiddenByHistoryClear(state.status, file.id, transfers, clearedAt);
+    }) ||
+      folders.some(folder => {
+        if (removedFolderIds.has(folder.id)) return false;
+        const children = folderFilesMap[folder.id] ?? [];
+        const state = computeFolderRowState(
+          children,
+          requests,
+          transfers,
+          reconciledByFolderId[folder.id],
+          localRootByFolderId[folder.id] ? folderExistence[localRootByFolderId[folder.id]] : undefined,
+        );
+        return state.status.kind === 'completed' && !isFolderHiddenByHistoryClear(state.status, children, transfers, clearedAt);
+      }));
+
+  // P28 (New_Issues.txt §2, Android side): hides downloaded file/folder rows
+  // from this screen without touching the desktop's share, the backend
+  // Transfer history, or the downloaded bytes themselves — see
+  // isFileHiddenByHistoryClear/isFolderHiddenByHistoryClear's own doc
+  // comment. Reuses transfers/historyReset.ts's marker directly (P14.4),
+  // the same one TransferListScreen's own Clear History writes, rather than
+  // a second history concept.
+  const handleClearHistory = useCallback(() => {
+    Alert.alert(
+      'Clear file history?',
+      'Downloaded files will be removed from this list, but the files themselves stay on your device. Files still downloading or queued are not affected.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear History',
+          style: 'destructive',
+          onPress: async () => {
+            setClearingHistory(true);
+            try {
+              const newClearedAt = await clearTransferHistory();
+              setClearedAt(newClearedAt);
+            } finally {
+              setClearingHistory(false);
+            }
+          },
+        },
+      ],
+    );
+  }, []);
+
+  // Renders in the native header, next to the "Shared Files" title set by
+  // FilesStack — the same placement TransferListScreen uses for its own
+  // Clear History (P23). Re-set whenever its enabled/label state changes,
+  // since headerRight is a render function captured once per
+  // navigation.setOptions call.
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerRight: () => (
+        <Pressable
+          style={styles.headerClearHistoryButton}
+          onPress={handleClearHistory}
+          disabled={!clearedAtLoaded || clearingHistory || !hasHistoryToClear}
+          accessibilityRole="button"
+          accessibilityLabel="Clear file history"
+        >
+          <Text
+            style={[
+              styles.clearHistoryText,
+              (!clearedAtLoaded || clearingHistory || !hasHistoryToClear) && styles.clearHistoryTextDisabled,
+            ]}
+          >
+            {clearingHistory ? 'Clearing...' : 'Clear History'}
+          </Text>
+        </Pressable>
+      ),
+    });
+  }, [navigation, handleClearHistory, clearedAtLoaded, clearingHistory, hasHistoryToClear]);
+
   if (loading || foldersLoading) {
     return (
       <View style={styles.center}>
@@ -838,10 +1005,33 @@ export function FilesScreen() {
   // P22: a locally "Removed" (removedItems.ts) file/folder is filtered out
   // of the list entirely — see useRemovedItems's own doc comment for why
   // this is a client-local dismissal rather than anything the backend
-  // knows about.
+  // knows about. P28: a downloaded file/folder hidden by Clear History
+  // (isFileHiddenByHistoryClear/isFolderHiddenByHistoryClear) is filtered
+  // out the same way — both are client-local "don't show this row"
+  // decisions, not anything the backend's shared_files/shared_folders list
+  // knows about either.
   const items: SharedItem[] = [
-    ...files.filter(file => !removedFileIds.has(file.id)).map(file => ({ kind: 'file' as const, data: file })),
-    ...folders.filter(folder => !removedFolderIds.has(folder.id)).map(folder => ({ kind: 'folder' as const, data: folder })),
+    ...files
+      .filter(file => !removedFileIds.has(file.id))
+      .filter(file => {
+        const state = computeFileRowState(file, requests, transfers, existence, localNameByFileId);
+        return !isFileHiddenByHistoryClear(state.status, file.id, transfers, clearedAt);
+      })
+      .map(file => ({ kind: 'file' as const, data: file })),
+    ...folders
+      .filter(folder => !removedFolderIds.has(folder.id))
+      .filter(folder => {
+        const children = folderFilesMap[folder.id] ?? [];
+        const state = computeFolderRowState(
+          children,
+          requests,
+          transfers,
+          reconciledByFolderId[folder.id],
+          localRootByFolderId[folder.id] ? folderExistence[localRootByFolderId[folder.id]] : undefined,
+        );
+        return !isFolderHiddenByHistoryClear(state.status, children, transfers, clearedAt);
+      })
+      .map(folder => ({ kind: 'folder' as const, data: folder })),
   ].sort((a, b) => new Date(b.data.shared_at).getTime() - new Date(a.data.shared_at).getTime());
 
   // P14.1: resolves the long-press menu's content from the *current* files/
@@ -1183,6 +1373,18 @@ const styles = StyleSheet.create({
   errorText: {
     color: '#dc2626',
     textAlign: 'center',
+  },
+  headerClearHistoryButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+  },
+  clearHistoryText: {
+    color: '#dc2626',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  clearHistoryTextDisabled: {
+    color: '#999',
   },
   row: {
     flexDirection: 'row',

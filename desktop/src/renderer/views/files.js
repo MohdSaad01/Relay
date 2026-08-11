@@ -12,6 +12,7 @@ import {
   renderError,
 } from "../dom.js";
 import { buildReceivedItems, markReceivedItemRemoved, resolveReceivedItemPath } from "../receivedFiles.js";
+import { applyHistoryReset, clearTransferHistory, getHistoryClearedAt } from "../transferHistory.js";
 import { folderIcon } from "../icons.js";
 
 export async function mount(container) {
@@ -39,17 +40,30 @@ function render(container, files, folders, transfers, downloadDirectory) {
   // from Android (New_Issues.txt §8) - all in one list, sorted
   // newest-first, so the user manages both from the same place instead of
   // received items only ever showing up in Transfers.
+  //
+  // P28: received items are entirely derived from completed transfers
+  // (see receivedFiles.js's own doc comment), so "Clear History" here
+  // reuses the exact same clearedAt cutoff/marker as the Transfers tab's
+  // own Clear History (transferHistory.js) rather than inventing a second
+  // history concept - clearing from either screen hides the same
+  // history-derived entries everywhere they're shown. This never touches
+  // `files`/`folders` (currently shared source entries), which have no
+  // relationship to transfer history and must survive a history clear.
+  const clearedAt = getHistoryClearedAt();
+  const visibleTransfers = applyHistoryReset(transfers, clearedAt);
+  const receivedItems = buildReceivedItems(visibleTransfers);
   const items = [
     ...files.map((file) => ({ kind: "file", ...file })),
     ...folders.map((folder) => ({ kind: "folder", ...folder })),
-    ...buildReceivedItems(transfers),
+    ...receivedItems,
   ].sort((a, b) => new Date(itemDate(b)) - new Date(itemDate(a)));
 
   const rows = items.map((item) => renderRow(item)).join("");
 
   const actions = `
     <button id="add-files">Add Files...</button>
-    <button id="add-folders">Add Folder...</button>`;
+    <button id="add-folders">Add Folder...</button>
+    <button id="clear-history" class="text-button"${receivedItems.length > 0 ? "" : " disabled"}>Clear History</button>`;
 
   container.innerHTML =
     pageHeader({ title: "Shared Files", subtitle: "Files and folders available to your paired devices.", actions }) +
@@ -63,6 +77,18 @@ function render(container, files, folders, transfers, downloadDirectory) {
       <thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Source</th><th>Date</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`);
+
+  container.querySelector("#clear-history").addEventListener("click", () => {
+    if (
+      !window.confirm(
+        "Clear received-file history from this list? Currently shared files/folders stay listed, downloaded files stay on your computer, and any active transfer stays visible in Transfers."
+      )
+    ) {
+      return;
+    }
+    clearTransferHistory();
+    refresh(container);
+  });
 
   container.querySelector("#add-files").addEventListener("click", async () => {
     const paths = await window.relay.selectFiles();

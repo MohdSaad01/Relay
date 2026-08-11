@@ -418,6 +418,37 @@ installer/executable icon remains open for the Packaging & Deployment
 milestone, which should point that config at `icon.ico` rather than
 regenerating a new asset.
 
+### Android Upload Selection & Confirmation (P26)
+
+**Picking a file/folder to upload (Android → desktop) never proposes a
+transfer by itself — it only stashes the pick and shows
+`android/src/components/UploadConfirmSheet.tsx`, a bottom-sheet `Modal`
+matching `FileActionMenu.tsx`'s (P14.1) existing convention.** Nothing is
+sent to the backend until the user taps that sheet's own explicit action
+("Upload this file"/"Upload these files"/"Upload folder" — the exact
+wording `New_Issues.txt` §7 asked for); Cancel discards the pick with zero
+backend calls. This exists because neither native picker's own confirm
+action can be relabeled to say "upload" — a single-file tap has no
+persistent button at all, and the folder picker's "USE THIS FOLDER" is
+Android system chrome. Any future upload-entry-point work (a new picker,
+a new upload button) should route through this same pick → confirm →
+`runFileUploads`/`runFolderUpload` shape in
+`android/src/screens/transfers/TransferListScreen.tsx` rather than
+proposing a transfer straight out of a picker callback.
+
+**Folder-upload identity is already fully preserved end-to-end — do not
+"fix" this again without live proof it's actually broken.** P26
+re-verified (nested folders, Unicode names, a zero-byte file, an empty
+folder) that `android/src/streaming/folderPicker.ts`'s enumerated
+`folder_relative_path`s, combined with
+`backend/app/services/upload_batch_registry.py`'s per-batch root-name
+resolution and `TransferStreamService._resolve_upload_final_path`'s
+`os.makedirs` reconstruction, already recreate the picked folder's exact
+structure on the desktop, grouped back into one row by
+`transferGrouping.js`/`receivedFiles.js` (P21). `New_Issues.txt` §6's
+"folder gets flattened" description predates P13/P21 and does not
+reproduce against the current codebase.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)

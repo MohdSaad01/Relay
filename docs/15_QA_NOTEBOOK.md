@@ -2725,6 +2725,202 @@ Deployment milestone.
 
 ---
 
+# Milestone P26 — Upload & File/Folder Selection UX
+
+**Scope:** `New_Issues.txt` §6 (folder upload wording vs. behavior) and §7
+(file selection's generic "Select" action). Explicitly not touched:
+`TransferStreamService`, `ActiveStreamRegistry`, the Android FIFO download
+queue, folder/file identity, pairing/discovery, download location, Clear
+History, transfer history semantics, or any general Android/Desktop visual
+redesign.
+
+**Baseline investigation.** Desktop's "Add Files.../Add Folder..." buttons
+(Shared Files tab, `desktop/src/main/ipc-handlers.js`) use Electron's
+native Windows `dialog.showOpenDialog` with the OS's own button text
+("Open"/"Select Folder") — not "Use this folder"/"Select", and this is the
+desktop's *share* mechanism, not an "upload." §6/§7's exact wording
+("Use this folder", "Select") is Android's Storage Access Framework
+picker text, so both issues are Android-only. In
+`android/src/screens/transfers/TransferListScreen.tsx`:
+`handleUpload` called `pick()` (`@react-native-documents/picker`) with no
+options, so `allowMultiSelection` defaulted to `false` — single-file only,
+despite the issue text describing "select one or more files." Tapping a
+file returned control to the app immediately, which immediately proposed
+and started the upload with zero confirmation step.
+`handleUploadFolder` (`android/src/streaming/folderPicker.ts`'s
+`pickAndEnumerateFolder`, built on `react-native-saf-x`'s
+`openDocumentTree`) showed Android's system "USE THIS FOLDER" button and,
+once access was granted, also began uploading immediately with zero
+confirmation step.
+
+**Live reproduction (RMX3997, realme C65 5G, Android 16/API 36, physical
+device via ADB).** Confirmed both baselines live: a single-file tap started
+an unconfirmed upload (screenshot: "Requesting..." → "In progress" with no
+intermediate step), and granting folder access likewise started an
+unconfirmed multi-file upload.
+
+**Root cause investigation for §6.** Traced the full pipeline: `folderPicker.ts`'s
+`walk()` preserves each file's path relative to the picked root;
+`handleUploadFolder` sends `folder_relative_path` + `upload_batch_id` +
+`upload_folder_name` per file; backend's
+`TransferService._validate_folder_upload_payload` +
+`UploadBatchRegistry.resolve` prepend one conflict-free root folder name to
+every child in the batch; `TransferStreamService._resolve_upload_final_path`
+recreates every intermediate directory via `os.makedirs`; Desktop's
+`transferGrouping.js`/`receivedFiles.js` (P21) group every batch child back
+into a single "Folder (N items)" row in both Transfers and Shared Files.
+Live-tested by creating, on-device via `adb shell`, a nested tree:
+```
+University Notes/
+├── Mathematics/{algebra.pdf, calculus.pdf}
+├── Programming/{python.txt, 日本語ファイル名.txt}
+├── EmptyFolder/
+├── README.txt
+└── zerobyte.txt (0 bytes)
+```
+Picking "University Notes" via "USE THIS FOLDER" reconstructed the
+identical tree byte-for-byte (verified via `find`/`cat` against
+`C:\Users\Saad\Downloads\University Notes\...`, including the Unicode
+filename and the 0-byte file) and rendered as one
+"University Notes · Folder (6 items)" row on Desktop (`EmptyFolder`
+correctly contributes nothing, since only files are enumerated — matches
+folder-transfer semantics elsewhere in the app). A second pick one level up
+(`RelayTest`, containing `University Notes` nested inside) reproduced the
+identical *two*-level nesting on disk and a single "RelayTest · Folder (6
+items)" row. **§6's premise does not reproduce against the current
+codebase** — P13 (folder-upload transfer protocol) and P21 (received-folder
+grouping) already fully solved it. No code was changed for §6.
+
+**Architecture decision.** Because §6 was already correct, and because the
+native pickers' own confirm actions either have no relabelable button
+(single-file tap-to-select) or already say exactly what they do ("USE THIS
+FOLDER" matches actual behavior), replacing or fighting the native picker
+was unnecessary and out of scope. The smallest architecture-compatible fix
+for §7 is an intermediate confirmation step shown after the native picker
+returns and before any transfer is proposed to the backend — Option B from
+the milestone brief.
+
+**UX decision.** Added `android/src/components/UploadConfirmSheet.tsx`, a
+bottom-sheet `Modal` following the exact convention `FileActionMenu.tsx`
+(P14.1) already established (transparent+fade, backdrop-dismiss) — no new
+dialog primitive or dependency. It renders two variants:
+- **Files:** "Upload File"/"Upload Files" title, "N file(s) selected · X
+  total" subtitle, a scrollable list of names, Cancel + **"Upload this
+  file"/"Upload these files"** (the exact wording §7 asked for).
+- **Folder:** "Upload Folder" title, "`<name>` · N items · X" subtitle,
+  Cancel + "Upload folder".
+
+`TransferListScreen.tsx`'s `handleUpload`/`handleUploadFolder` now only
+invoke the native picker and stash the result in new `pendingUpload`
+state; the existing `proposeTransfer`/`registerUploadSource`/
+`TransferStreamManager.start` loop (unchanged) only runs from new
+`runFileUploads`/`runFolderUpload`, dispatched by the sheet's confirm
+button — Cancel discards the pick with zero backend calls. Also enabled
+`allowMultiSelection: true` on the file `pick()` call (previously
+single-file only) and extended `handleUpload` to loop over every
+successfully-read picked item, mirroring the per-item loop pattern
+`handleUploadFolder` already used.
+
+**Files modified:**
+- `android/src/components/UploadConfirmSheet.tsx` (new)
+- `android/src/screens/transfers/TransferListScreen.tsx` — `handleUpload`/
+  `handleUploadFolder` split into pick-only handlers; new
+  `runFileUploads`/`runFolderUpload`/`handleConfirmUpload`/
+  `handleCancelUpload`; `allowMultiSelection: true`; doc comments updated.
+
+**Automated test results:** `npx tsc --noEmit` clean. `npx eslint .` clean
+(0 errors; the 3 pre-existing warnings, one in this file's already-existing
+`headerRight` nested-component pattern and two in
+`TransferStreamManager.ts`, are unrelated to this change and unchanged in
+count). `npx jest`: 42/42 suites, 359/359 tests passed — no regressions.
+No existing test file covers `TransferListScreen.tsx` directly (consistent
+with this codebase's existing pattern of testing hooks/services/utils
+rather than screen components), so no test needed updating.
+
+**Desktop live verification:** fresh `npm start` launch (a stale
+tray-minimized instance from an earlier session was killed first — restoring
+it via raw Win32 `ShowWindow`/`SetForegroundWindow` left the Chromium
+surface uncomposited, a launch-environment quirk unrelated to any app
+code). Shared Files/Transfers tabs correctly showed grouped folder rows and
+individual files with correct "Received" badges after each Android upload.
+`GET /files`/`GET /folders` both returned zero rows throughout, confirming
+received uploads never create spurious `SharedFile`/`SharedFolder` rows
+(P21 architecture unchanged). Pre-existing transfer history from earlier
+milestones' testing was untouched. (Note: this session's screen-capture
+tooling became unreliable partway through for OS-level screenshots — likely
+a virtual-desktop/session quirk in this environment, not an app defect;
+later desktop-side checks used the backend HTTP API and direct filesystem
+inspection instead, which are more authoritative than a screenshot anyway.)
+
+**Android physical-device verification (RMX3997, real device, ADB +
+Metro live reload — ​not a simulator):**
+- Post-fix multi-file: selected 2 files via the OS picker's own multi-select
+  mode (only reachable once `allowMultiSelection: true` was set) →
+  `UploadConfirmSheet` showed "Upload Files / 2 files selected · 15 B
+  total" listing both names → tapped "Upload these files" → both completed.
+- Post-fix single-file: → sheet showed "Upload File / 1 file selected · 15
+  B total" → confirm button read exactly **"Upload this file"**.
+- Post-fix cancel: tapped Cancel on the single-file sheet → Transfers list
+  unchanged (no new transfer proposed) — confirmed via screenshot.
+- Post-fix folder (two picks — "University Notes" directly, and "RelayTest"
+  containing it one level deeper): sheet showed "Upload Folder / `<name>` ·
+  6 items · 70 B" → "Upload folder" → both completed, correct nested
+  structure reconstructed on Desktop both times.
+
+**File/folder integrity verification:** every uploaded test file's content
+verified byte-for-byte on the Desktop filesystem (`README.txt`, `algebra.pdf`
+etc.), the 0-byte file genuinely 0 bytes, and the Unicode filename
+(`日本語ファイル名.txt`) and its content preserved exactly, for both the
+1-level and 2-level-deep folder picks.
+
+**Before/after UI verification:** before — generic immediate-upload, no
+confirmation, single-file-only picker. After — an explicit review-then-confirm
+step reading exactly "Upload this file"/"Upload these files"/"Upload
+folder", with working multi-file selection.
+
+**Problems discovered during implementation:** one Android app crash
+(`NullPointerException` in
+`com.facebook.react.devsupport.CxxInspectorPackagerConnection`, React
+Native's dev-mode Metro inspector websocket bridge) during folder-pick
+testing — root-caused via `adb logcat`
+(`ApplicationExitInfo reason=4 APP CRASH(EXCEPTION)`), confirmed unrelated
+to any P26 code path (it lives in RN's own dev-tooling, present only in a
+debug build connected to Metro) and did not recur on retry. Documented as
+known dev-build flakiness, not a P26 defect — not fixed, since a real fix
+would mean patching React Native's own dev inspector, well outside this
+milestone's scope.
+
+**Deferred issues:** none within §6/§7. The broader visual-redesign items
+in `New_Issues.txt` remain explicitly out of scope for P26.
+
+**Documentation changed:** this entry;
+`CLAUDE.md` (`### Android Upload Selection & Confirmation (P26)`, a new
+durable convention for future upload-flow work).
+
+**Documentation intentionally left unchanged:** `docs/11_File_Transfer.md`
+§6 describes the *desktop's* share-selection/folder-transfer protocol,
+which P26 did not touch — only the Android client's pre-upload UX gating
+changed. `README.md`'s feature bullets don't describe picker-level UI
+wording at a granularity P26 would make incomplete. `.gitignore` — no new
+generated artifact was introduced.
+
+**Remaining limitations:** the RN dev-inspector crash above is a known,
+unfixed flakiness of this debug build under Metro; a release build (no
+Metro connection) would not hit it. No automated test exercises
+`UploadConfirmSheet.tsx` or `TransferListScreen.tsx`'s new pick/confirm
+split directly — coverage here is the live physical-device verification
+above plus the unchanged unit coverage for everything downstream
+(`folderPicker.test.ts`, `uploadSourceRegistry.test.ts`, etc.).
+
+**Final verdict:** §7 was a real, unimplemented gap — fixed with a
+lightweight confirmation sheet reusing the app's existing bottom-sheet
+pattern, plus multi-file selection that hadn't existed before. §6 was
+already fully correct (P13/P21); the milestone's own investigation-first
+requirement caught this before any unnecessary rework of the transfer
+architecture.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:

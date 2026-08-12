@@ -510,11 +510,13 @@ a native prompt; `desktop/src/renderer/views/devices.js`'s Rename (an
 inline `<form>` swapped into the device card in place of the name/actions
 row, submitted via Save/Enter, dismissed via Cancel/Escape) is the current
 pattern to extend rather than reaching for `window.prompt()` again. Note
-also: toggling that swap must set `element.style.display` directly, not
-the `hidden` attribute/property — any element whose class already
-declares `display` in `app.css` (e.g. `.device-card-actions`,
-`.device-card-title`) wins the cascade over the `[hidden]` user-agent rule
-regardless of selector specificity, so `hidden` silently fails to hide it.
+also: the `hidden` attribute/property must not be used for that swap — any
+element whose class already declares `display` in `app.css` (e.g.
+`.device-card-actions`, `.device-card-title`) wins the cascade over the
+`[hidden]` user-agent rule regardless of selector specificity, so `hidden`
+silently fails to hide it. **P29's original fix for this — setting
+`element.style.display` directly — was itself wrong and is superseded by
+P29.1 below; do not reintroduce it.**
 
 **`ipcMain.handle("shell:deleteItem", ...)` (`desktop/src/main/ipc-handlers.js`)
 treats an already-missing target path as a no-op success instead of
@@ -529,6 +531,40 @@ Files entry still only disappears when the user explicitly acts on it
 (Delete), not automatically on every list load. Any future filesystem-
 deleting IPC handler should apply the same already-gone-is-not-an-error
 treatment rather than assuming its target still exists.
+
+### Desktop Rename Edit-State Lifecycle & the Renderer's CSP (P29.1)
+
+**`desktop/src/renderer/index.html`'s CSP (`style-src 'self'`, no
+`unsafe-inline`) silently blocks all inline `style` application — the
+HTML `style=""` attribute *and* JS `element.style.property = value`
+mutations alike — without throwing a JS error.** The `style` attribute's
+*text* still updates when JS writes to it (so `outerHTML`/`getAttribute`
+read back exactly what the code intended), but Chromium never uses that
+value when computing the actual rendered style; only same-origin
+stylesheet rules (`desktop/styles/app.css`, loaded via `<link>`) are
+exempt. This made P29's Rename fix (`element.style.display` mutations,
+see above) render the edit form permanently visible regardless of state —
+confirmed live via `getComputedStyle` polling and via an isolated
+`width:50%` test on a standalone element (computed width stayed at the
+parent's full 100px). **Any future Desktop renderer code that needs to
+change an element's visual style at runtime must use a CSS class toggle
+(`classList.add`/`remove` plus a rule in `app.css`) — never
+`element.style.property =` or an inline `style=""` attribute.**
+`desktop/src/renderer/views/devices.js`'s `.device-card.is-renaming`
+class (toggled by `showRenameForm`/`hideRenameForm`) is the current
+pattern to extend. Desktop device rename is transient renderer state and
+must default to non-editing on every mount/remount; edit mode is entered
+only through the explicit Rename click, matching this same class-toggle
+mechanism.
+
+**`desktop/src/renderer/views/transfers.js`'s progress bar
+(`style="width:${progress}%"` on `.progress-fill`) has the identical bug
+and remains unfixed** — discovered as a byproduct of root-causing P29.1
+but out of scope for it (Transfers was excluded from that milestone's
+boundary). It currently always renders at full width regardless of actual
+transfer progress. Fix with the same class-toggle-or-stylesheet-variable
+approach when Transfers is next in scope; do not reach for
+`element.style.width =` there either.
 
 ## Not Yet Implemented
 

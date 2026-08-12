@@ -3751,6 +3751,236 @@ same milestone's own live-screenshot verification step before being
 reported as complete. No `Transfer` row, downloaded file, or received item
 was affected by either fix.
 
+**Correction (P29.1):** the fix this entry shipped for the `hidden`-
+attribute cascade issue — switching to `element.style.display` mutations —
+did **not** actually work. `index.html`'s CSP (`style-src 'self'`, no
+`unsafe-inline`) silently blocks all inline `style` application, including
+JS `.style.property =` mutations, not just the HTML `style=""` attribute.
+See P29.1 below: this made the Rename form permanently visible regardless
+of state, the exact opposite of what this entry believed it had verified.
+The "cosmetic noise" cross-cutting lesson this entry relied on (originally
+from P21, further down this file) was itself a false negative from testing
+only at the one progress value (100%) where a blocked inline style is
+visually indistinguishable from a correctly-applied one — see P29.1 and
+the corrected cross-cutting lesson at the end of this file.
+
+---
+
+## P29.1 — Desktop Device Rename Edit-State Lifecycle Fix
+
+**Reported issue:** opening Desktop's Devices tab (or returning to it after
+visiting another tab) showed the paired device card already in rename/edit
+mode (name input, Save, Cancel all visible) without the user ever clicking
+Rename — and Rename/Remove and the normal title row stayed visible
+*at the same time*, matching this excerpt from the report:
+
+```
+RMX3997
+Paired
+RMX3997
+Save
+Cancel
+android
+Paired 8/12/2026, 10:46:54 PM
+Last seen -
+Rename
+Remove
+```
+
+**Baseline (source inspection):** `desktop/src/renderer/views/devices.js`
+(post-P29) looked correct on paper — `renderDeviceCard()`'s template set
+`style="display: none"` on `.device-card-rename`, and `showRenameForm`/
+`hideRenameForm` toggled `.style.display` on the form, title, and actions
+elements, exactly the pattern P29's own QA entry (above) claimed it had
+verified. `renderer.js`'s `showView()` fully rebuilds the view container on
+every mount (`viewContainer.innerHTML = ""` then `mount()`), so there was
+no obvious stale-DOM or double-render path either. Nothing in source
+review alone explained the report.
+
+**Live reproduction (real Electron app):** an Electron instance from
+before this session (PID group, `StartTime` ~23 min prior) was already
+running and had to be closed (Electron's single-instance lock rejects a
+second launch) before a Playwright-driven instance could take over; no
+device data was at risk (SQLite-backed). The dev `relay.db` had 0 paired
+devices at the time (a prior device had since been unpaired) — one test
+device row was inserted directly via `sqlite3` for the duration of this
+verification and removed again afterward (see Regression verification).
+
+- **Case A (initial launch, no click):** polling `getComputedStyle` every
+  100ms for ~6s immediately after the auto-navigation to Devices (a device
+  is paired, so `determineInitialView()` lands there without any click)
+  showed the rename form's raw `style` attribute reading `"display: none"`
+  the entire time, while its **computed** `display` was `"flex"` the
+  entire time — reproduced with zero clicks, confirming this was not a
+  click-driven race.
+- **Case B (tab remount):** confirmed identical to Case A after navigating
+  away and back.
+- The browser console logged, at the exact moment the card first rendered:
+  `Applying inline style violates the following Content Security Policy
+  directive 'style-src 'self''... The action has been blocked.`
+
+**Root cause:** `desktop/src/renderer/index.html`'s CSP
+(`style-src 'self'`, no `unsafe-inline`) blocks the browser from
+*applying* any inline style — both the HTML-authored `style=""` attribute
+and, critically, **JS `element.style.property = value` mutations as
+well**. The attribute's *text* still updates (so `getAttribute('style')`/
+`outerHTML` read back exactly what the code wrote, which is why P29's own
+source-level review and even a shallow live check could look correct), but
+Chromium never uses that value when computing the actual rendered style.
+The only display rule actually in effect is therefore whichever CSS
+*class* rule applies — `.field-row { display: flex }` for the rename form,
+`.device-card-title { display: flex }` for the title,
+`.device-card-actions { display: flex }` for the actions row — all three
+`display: flex`, all three always visible, completely independent of
+`showRenameForm()`/`hideRenameForm()` ever running. This is not a race and
+not a lifecycle bug in the mount/remount logic itself; the mount logic was
+always correct. The entire rename/edit *toggle mechanism* P29 shipped had
+simply never had any visual effect, in any Electron session, since the day
+it was written.
+
+This also means the pre-existing cross-cutting lesson (below, originally
+written during P21) claiming this exact CSP warning is "cosmetic noise"
+that "does not actually strip" the style is **incorrect** and is corrected
+in this pass — see the corrected lesson at the end of this file, and the
+newly-discovered Transfers progress-bar bug in Deferred issues below.
+
+**Architecture/state-management decision:** keep rename/edit state as
+UI-only transient state (per the milestone's own required model), but
+represent it with a CSS class (`.device-card.is-renaming`) toggled via
+`classList.add`/`classList.remove`, instead of direct inline-style
+mutation. `classList` writes the `class` attribute, which the CSP's
+`style-src` directive has no authority over, so this is unaffected by the
+restriction that broke P29's approach. No new state-management library, no
+backend involvement, no persistence — matches the milestone's explicit
+"do not over-engineer" boundary.
+
+**Implementation:**
+- `desktop/styles/app.css` — added `form.device-card-rename { display:
+  none; }` as the class's real default (element+class selector,
+  deliberately outranking `.field-row`'s single-class rule regardless of
+  stylesheet order), plus `.device-card.is-renaming form.device-card-rename
+  { display: flex; }` and `.device-card.is-renaming .device-card-title,
+  .device-card.is-renaming .device-card-actions { display: none; }`.
+- `desktop/src/renderer/views/devices.js` — `showRenameForm()`/
+  `hideRenameForm()` now do `card.classList.add("is-renaming")` /
+  `card.classList.remove("is-renaming")` instead of touching
+  `titleEl`/`actionsEl`/`renameForm` `.style.display` individually; the
+  now-nonfunctional `style="display: none"` was removed from
+  `renderDeviceCard()`'s template (the CSS default above replaces it).
+  `titleEl`/`actionsEl` local variables were removed as unused.
+
+**Automated tests:** `node --check desktop/src/renderer/views/devices.js`
+— pass. Desktop still has no formal lint/test suite (unchanged since
+P19). `app.css` is not JS and has no applicable automated check.
+
+**Live Electron verification (real app, real `relay.db`, Playwright-driven,
+screenshots at every step):**
+- **Case A / initial launch:** normal card, `is-renaming` class absent,
+  Save/Cancel not present — screenshot confirms visually (title, badge,
+  meta, Rename/Remove only).
+- **Case B / tab remount (Devices → Files → Devices):** identical normal
+  state, `is-renaming` absent.
+- **Case C / explicit Rename:** `is-renaming` class present on the card;
+  screenshot shows only the input (pre-filled, focused, text selected),
+  Save, Cancel — title and Rename/Remove genuinely hidden this time
+  (computed, not just attribute text).
+- **Cancel:** `is-renaming` removed; screenshot shows normal card restored,
+  no residual Save/Cancel. Re-tested navigating away (Transfers) and back —
+  still normal, no auto-reactivation.
+- **Save:** changed name to `RMX3997-RENAMED` via the inline input,
+  clicked Save — card updated to the new name, `is-renaming` absent, no
+  Save/Cancel visible; confirmed unchanged after a tab remount.
+- **Application restart:** closed the Electron process entirely and
+  launched a fresh instance (a real second process reading the same
+  `relay.db`, not an SPA reload) — Devices showed `RMX3997-RENAMED` in
+  normal (non-editing) mode, proving both the backend persistence and the
+  UI's default-to-normal state survive a genuine process restart.
+- **CSP-blocking mechanism, isolated confirmation:** injected a standalone
+  `<div class="progress-bar"><div class="progress-fill"
+  style="width:50%"></div></div>` (identical markup shape to
+  `desktop/src/renderer/views/transfers.js`'s real progress bar) into the
+  live page and read back `getComputedStyle` — computed width was `100px`
+  (the parent's full width), not the `50px` the inline style specified,
+  proving the CSP blocks inline style unconditionally and is not specific
+  to the `display` property or to `devices.js`.
+
+**Regression verification (live):** Remove button still present and
+unaffected; device status/meta (platform badge, Paired/Last seen
+timestamps) rendered correctly throughout; all other nav tabs (Files,
+Transfers, Settings) opened without error during the navigation tests
+above. The test device row inserted for this verification
+(`device_name` `RMX3997-TEST` → `RMX3997-RENAMED`) was deleted from
+`relay.db` via direct `sqlite3 DELETE` afterward, restoring the 0-device
+state found at the start of this session.
+
+**P29 stale Shared Files smoke test:** not exercised live this pass
+(no in-scope reason to touch Shared Files) — confirmed via `git diff`
+that `desktop/src/main/ipc-handlers.js` (the P29 IPC fix) has zero
+changes in this milestone. Source-inspection-level confidence only, not
+re-verified live.
+
+**Problems discovered (beyond the reported issue):**
+1. **The P29 QA entry's "hidden-attribute cascade" fix never worked** —
+   documented and corrected above; this *is* the reported P29.1 bug, not a
+   separate issue.
+2. **The P21 "cosmetic noise" cross-cutting lesson about this same CSP
+   warning was a false negative** — it tested only the 100%-progress case,
+   where a blocked inline `width` and a correctly-applied one render
+   identically. Corrected in the cross-cutting lessons section below.
+3. **New, separate, currently-shipping bug (deferred, not fixed this
+   pass):** `desktop/src/renderer/views/transfers.js`'s progress bar
+   (`style="width:${progress}%"` on `.progress-fill`) is subject to the
+   exact same CSP blocking and therefore always renders at its container's
+   full 100px width regardless of actual transfer progress — confirmed in
+   isolation above. Out of scope for P29.1 (Transfers is explicitly
+   excluded from this milestone's boundary); needs its own follow-up using
+   the same class-toggle-or-CSS-variable approach, not inline `style=`.
+
+**Documentation changed:** this `docs/15_QA_NOTEBOOK.md` entry, a
+correction appended to the P29 entry above, and a correction + new entry
+in the Cross-Cutting Lessons section at the end of this file. `CLAUDE.md`
+was updated: a new "Desktop Rename Edit-State (P29.1)" note under the
+existing P29 section, since this establishes a durable, easy-to-repeat
+trap (inline-style state toggling silently doing nothing under this app's
+CSP) worth flagging before any future Desktop UI work reaches for
+`.style.property =` again. `README.md` was not touched — it does not
+describe Rename or CSP behavior at a level either fix affects.
+
+**Documentation intentionally unchanged:** no other `docs/` file describes
+the CSP or the rename mechanism at an architectural level requiring an
+update; this stays a QA-notebook and CLAUDE.md-level correction rather
+than a docs/09_Networking.md or docs/10_Security.md change, since Version
+1's CSP itself was not modified.
+
+**Remaining limitations:**
+- The newly-discovered Transfers progress-bar bug (item 3 above) is
+  documented but not fixed — deferred per the milestone's explicit scope
+  boundary (Transfer History changes excluded).
+- The P29 stale-Shared-Files IPC fix was smoke-tested only via `git diff`
+  (unchanged), not re-exercised live this pass.
+- No Android or backend testing was performed or needed — this is a
+  Desktop-renderer-only fix, confirmed not to require Android/backend
+  changes during investigation (rename already worked correctly at the
+  data layer; only the Desktop UI's own show/hide mechanism was broken).
+
+**Suggested commit message:**
+`fix(desktop): keep device rename inactive until explicitly opened`
+
+**Final verdict:** the reported bug reproduced live with zero clicks
+required (Case A alone was sufficient), root-caused with definitive
+evidence (`getComputedStyle` polling plus an isolated CSP reproduction
+using a second, unrelated element) to the CSP blocking *all* inline style
+application — not a mount/remount race, not a lifecycle bug, not stale
+state — meaning the P29 fix for the equivalent-looking `hidden`-attribute
+bug had silently never worked. Fixed with a CSS-class toggle, which is
+unaffected by `style-src` since it never touches the `style` attribute.
+Re-verified live across initial launch, tab remount, explicit Rename,
+Cancel, Save, post-save remount, and a genuine full-process restart, all
+matching the milestone's required state machine exactly. One related,
+currently-shipping bug in an out-of-scope view (Transfers' progress bar)
+was discovered as a byproduct of root-causing this issue and is documented
+above as deferred, not fixed.
+
 ---
 
 # Cross-Cutting Lessons
@@ -3798,12 +4028,39 @@ A few gotchas worth remembering independent of any single milestone above:
   `patch-package`** (`android/patches/`) — check `docs/upstream/` for the
   full writeup before assuming a library behaves per its own docs; the
   Okio `Source` contract violation (P10) is the current example.
-- **The desktop's `style-src 'self'` CSP logs a console violation for every
+- **CORRECTED by P29.1 — do not trust this lesson's original claim below.**
+  The desktop's `style-src 'self'` CSP (no `unsafe-inline`) logs a console
+  violation for every inline `style="..."` — whether HTML-authored
+  (innerHTML-injected, e.g. the transfer progress bar's `width:N%`) or set
+  imperatively via JS (`element.style.property = value`) — **and it
+  genuinely blocks the style from being applied in both cases.** P21's
+  original check here (below, left for the record) tested the transfer
+  progress bar at exactly 100% progress, where a blocked inline `width`
+  (falling back to the block-level element's default `width: auto`, which
+  fills its 100px parent) is visually and numerically indistinguishable
+  from a correctly-applied `width: 100%` — a false negative, not a real
+  confirmation. P29.1 proved the block is real by testing a non-100% value
+  (`width:50%` read back as computed `100px`, not `50px`) and by finding
+  the identical mechanism made P29's Desktop Devices Rename UI permanently
+  stuck visible (`docs/15_QA_NOTEBOOK.md`'s P29.1 entry). **Any renderer
+  code that needs to change an element's visual style at runtime must use
+  a CSS class toggle (`classList.add`/`remove`, unaffected by `style-src`)
+  or a CSS custom property set via a `<style>` rule already declared in a
+  same-origin stylesheet — never `element.style.property =` or an inline
+  `style=""` attribute — regardless of what the DOM's `style` attribute
+  *text* appears to show, since that text updates even when the CSP
+  silently prevents it from ever being rendered.** `transfers.js`'s
+  progress-fill bar is a confirmed-live, currently-unfixed instance of
+  this same bug (always renders full width regardless of actual progress)
+  — deferred as of P29.1, not yet fixed.
+  <br><br>
+  Original (superseded) P21 text, kept for the record: "The desktop's
+  `style-src 'self'` CSP logs a console violation for every
   innerHTML-injected `style="..."` attribute (e.g. the transfer progress
-  bar's `width:N%`), but does not actually strip it** — confirmed via
+  bar's `width:N%`), but does not actually strip it — confirmed via
   `getComputedStyle` (P21). Treat this specific warning as cosmetic noise,
   not a real rendering bug, unless a future check shows the style genuinely
-  failing to apply.
+  failing to apply."
 - **A backend action that has no delete/undo primitive by design (a
   `Transfer` row, per `docs/13_Database_Design.md` §7/§10) means any
   client-facing "clear"/"remove" feature over that data must be
@@ -3837,7 +4094,13 @@ A few gotchas worth remembering independent of any single milestone above:
   ordering, *any* normal-author rule outranks *any* normal-user-agent rule
   regardless of specificity). Confirmed live in P29 via screenshot: the
   Rename form and the Rename/Remove buttons were both visible
-  simultaneously until this was caught. Prefer toggling
-  `element.style.display` directly for any element whose class already
-  sets `display` in `app.css`, rather than relying on the `hidden`
-  attribute.
+  simultaneously until this was caught. **P29's own fix for this —
+  "prefer toggling `element.style.display` directly" — turned out to be
+  wrong** (see the CSP lesson above and the P29.1 entry): this app's CSP
+  blocks inline style application entirely, including JS `.style.property
+  =` mutations, so that fix silently never worked either. **The correct
+  fix for this class of problem is a CSS class toggle**
+  (`classList.add`/`remove` plus a same-origin-stylesheet rule for the
+  toggled state), which is subject to neither the `[hidden]`-vs-author-CSS
+  cascade issue described here nor the CSP restriction — this is what
+  P29.1 replaced both broken approaches with.

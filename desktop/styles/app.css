@@ -256,6 +256,29 @@ body {
   flex-shrink: 0;
 }
 
+/* Rename edit-state toggle: driven by the `.is-renaming` class rather than
+ * inline `style.display` (P29.1) - index.html's CSP declares `style-src
+ * 'self'` with no `unsafe-inline`, which silently blocks ALL inline style
+ * application (both HTML `style=""` attributes and JS `.style.property =`
+ * mutations alike) without throwing a JS error, so P29's inline-style
+ * show/hide had no visual effect at all and every section rendered
+ * permanently visible. A stylesheet-defined class rule is unaffected by
+ * that policy. `form.device-card-rename` (element + class) intentionally
+ * outweighs `.field-row`'s single-class rule so this hidden default wins
+ * regardless of stylesheet source order. */
+form.device-card-rename {
+  display: none;
+}
+
+.device-card.is-renaming form.device-card-rename {
+  display: flex;
+}
+
+.device-card.is-renaming .device-card-title,
+.device-card.is-renaming .device-card-actions {
+  display: none;
+}
+
 table {
   border-collapse: collapse;
   width: 100%;

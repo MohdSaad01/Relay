@@ -59,28 +59,23 @@ function render(container, devices) {
  * prompt substitute - a full custom dialog system is P30's scope, not P29's.
  */
 function wireDeviceCard(card, device, container) {
-  const titleEl = card.querySelector(".device-card-title");
-  const actionsEl = card.querySelector(".device-card-actions");
   const renameForm = card.querySelector(".device-card-rename");
   const renameInput = renameForm.querySelector(".rename-input");
 
-  // Toggled via inline style rather than the `hidden` attribute: both
-  // .device-card-title and .device-card-actions already set `display: flex`
-  // in app.css, which (same specificity, author origin) wins the cascade
-  // over the `[hidden]` UA rule and left them visibly showing through.
+  // Toggled via the `is-renaming` class (P29.1) rather than inline
+  // style.display: index.html's CSP (`style-src 'self'`, no
+  // `unsafe-inline`) silently blocks all inline style application, so a
+  // direct style.display mutation has no visual effect in this app - see
+  // app.css's `.device-card.is-renaming` rules for the actual show/hide.
   function showRenameForm() {
     renameInput.value = device.device_name;
-    titleEl.style.display = "none";
-    actionsEl.style.display = "none";
-    renameForm.style.display = "flex";
+    card.classList.add("is-renaming");
     renameInput.focus();
     renameInput.select();
   }
 
   function hideRenameForm() {
-    renameForm.style.display = "none";
-    titleEl.style.display = "";
-    actionsEl.style.display = "";
+    card.classList.remove("is-renaming");
   }
 
   card.querySelector(".rename").addEventListener("click", showRenameForm);
@@ -125,7 +120,7 @@ function renderDeviceCard(device) {
             <span class="device-name">${escapeHtml(device.device_name)}</span>
             <span class="badge badge-success">Paired</span>
           </div>
-          <form class="device-card-rename field-row" style="display: none">
+          <form class="device-card-rename field-row">
             <input type="text" class="rename-input" value="${escapeHtml(device.device_name)}" maxlength="100" />
             <button type="submit" class="primary">Save</button>
             <button type="button" class="text-button rename-cancel">Cancel</button>

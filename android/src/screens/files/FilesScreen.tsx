@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   FlatList,
   Pressable,
   RefreshControl,
@@ -46,6 +45,7 @@ import { formatFileSize } from '../../utils/formatFileSize';
 import { TransferStreamManager } from '../../streaming/TransferStreamManager';
 import { ensureEmptyFolderStaged } from '../../streaming/blobUtil';
 import { FileActionMenu, FileActionMenuAction } from '../../components/FileActionMenu';
+import { AppDialog, useAppDialog } from '../../components/AppDialog';
 
 const POLL_INTERVAL_MS = 2000;
 // Deliberately longer than the transfer-progress poll above: the shared-file
@@ -320,6 +320,7 @@ export function FilesScreen() {
   const { reconciledByFolderId, localRootByFolderId, refresh: refreshReconciliation } = useFolderReconciliation(folders);
   const { localNameByFileId, refresh: refreshFileIdentity } = useFileIdentity(files);
   const { removedFileIds, removedFolderIds, removeFile, removeFolder } = useRemovedItems(files, folders);
+  const dialog = useAppDialog();
   const { requests, refresh: refreshRequests } = useTransferRequests();
   const { transfers, refresh: refreshTransfers } = useTransfers();
   const { existence, verify } = useDownloadExistence();
@@ -571,16 +572,20 @@ export function FilesScreen() {
   // milestone's "use-existing-system" scope. P22: no longer shows the raw
   // MIME type — see metadataFormat.ts's own doc comment for why that's
   // redundant with a file's own extension for a normal user.
-  const handleFileDetails = useCallback((file: AvailableFileResponse, state: { status: FileDownloadStatus; queued: boolean }) => {
-    Alert.alert(
-      file.file_name,
-      [
-        `Size: ${formatFileSize(file.file_size)}`,
-        `Shared: ${new Date(file.shared_at).toLocaleString()}`,
-        `Status: ${describeStatus(state.status.kind, state.queued)}`,
-      ].join('\n'),
-    );
-  }, []);
+  const handleFileDetails = useCallback(
+    (file: AvailableFileResponse, state: { status: FileDownloadStatus; queued: boolean }) => {
+      dialog.show({
+        title: file.file_name,
+        message: [
+          `Size: ${formatFileSize(file.file_size)}`,
+          `Shared: ${new Date(file.shared_at).toLocaleString()}`,
+          `Status: ${describeStatus(state.status.kind, state.queued)}`,
+        ].join('\n'),
+        buttons: [{ text: 'Close' }],
+      });
+    },
+    [dialog],
+  );
 
   // P22 (New_Issues.txt §12): "Share" for a completed file download — hands
   // it to another app via shareDownloadedFile's ACTION_SEND. See that
@@ -591,10 +596,14 @@ export function FilesScreen() {
       try {
         await shareDownloadedFile(localFileName(file, localNameByFileId), file.mime_type);
       } catch (err) {
-        Alert.alert('Could not share this file', err instanceof Error ? err.message : 'Please try again.');
+        dialog.show({
+          title: 'Could not share this file',
+          message: err instanceof Error ? err.message : 'Please try again.',
+          buttons: [{ text: 'OK' }],
+        });
       }
     },
-    [localNameByFileId],
+    [localNameByFileId, dialog],
   );
 
   // P22: "Delete" for a completed file download — removes the on-device
@@ -607,10 +616,10 @@ export function FilesScreen() {
   // matching handleOpen's own re-verify-on-failure precedent.
   const handleDeleteFile = useCallback(
     (file: AvailableFileResponse) => {
-      Alert.alert(
-        'Delete file?',
-        `"${file.file_name}" will be removed from this device. You can download it again from the desktop.`,
-        [
+      dialog.show({
+        title: 'Delete file?',
+        message: `"${file.file_name}" will be removed from this device. You can download it again from the desktop.`,
+        buttons: [
           { text: 'Cancel', style: 'cancel' },
           {
             text: 'Delete',
@@ -622,9 +631,9 @@ export function FilesScreen() {
             },
           },
         ],
-      );
+      });
     },
-    [localNameByFileId, verify],
+    [localNameByFileId, verify, dialog],
   );
 
   // P22: "Remove" for a file with no downloaded content of its own — its
@@ -650,13 +659,17 @@ export function FilesScreen() {
           }
           await Promise.all([refreshRequests(), refreshTransfers()]);
         } catch (err) {
-          Alert.alert('Could not remove this download', err instanceof ApiError ? err.message : 'Please try again.');
+          dialog.show({
+            title: 'Could not remove this download',
+            message: err instanceof ApiError ? err.message : 'Please try again.',
+            buttons: [{ text: 'OK' }],
+          });
         }
         return;
       }
       await removeFile(file);
     },
-    [transfers, refreshRequests, refreshTransfers, removeFile],
+    [transfers, refreshRequests, refreshTransfers, removeFile, dialog],
   );
 
   /**
@@ -834,17 +847,18 @@ export function FilesScreen() {
   // metadata.
   const handleFolderDetails = useCallback(
     (folder: AvailableFolderResponse, state: { status: FolderDownloadStatus; queued: boolean }) => {
-      Alert.alert(
-        folder.folder_name,
-        [
+      dialog.show({
+        title: folder.folder_name,
+        message: [
           `Items: ${folder.file_count}`,
           `Total size: ${formatFileSize(folder.total_size)}`,
           `Shared: ${new Date(folder.shared_at).toLocaleString()}`,
           `Status: ${describeStatus(state.status.kind, state.queued)}`,
         ].join('\n'),
-      );
+        buttons: [{ text: 'Close' }],
+      });
     },
-    [],
+    [dialog],
   );
 
   // P22: "Delete" for a completed folder download — mirrors handleDeleteFile
@@ -855,10 +869,10 @@ export function FilesScreen() {
   // recursively — see downloadExistence.ts).
   const handleDeleteFolder = useCallback(
     (folder: AvailableFolderResponse) => {
-      Alert.alert(
-        'Delete folder?',
-        `"${folder.folder_name}" and everything inside it will be removed from this device. You can download it again from the desktop.`,
-        [
+      dialog.show({
+        title: 'Delete folder?',
+        message: `"${folder.folder_name}" and everything inside it will be removed from this device. You can download it again from the desktop.`,
+        buttons: [
           { text: 'Cancel', style: 'cancel' },
           {
             text: 'Delete',
@@ -870,9 +884,9 @@ export function FilesScreen() {
             },
           },
         ],
-      );
+      });
     },
-    [verifyFolderExists],
+    [verifyFolderExists, dialog],
   );
 
   // P22: "Remove" for a folder with no downloaded content of its own —
@@ -903,13 +917,17 @@ export function FilesScreen() {
           }
           await Promise.all([refreshRequests(), refreshTransfers()]);
         } catch (err) {
-          Alert.alert('Could not remove this download', err instanceof ApiError ? err.message : 'Please try again.');
+          dialog.show({
+            title: 'Could not remove this download',
+            message: err instanceof ApiError ? err.message : 'Please try again.',
+            buttons: [{ text: 'OK' }],
+          });
         }
         return;
       }
       await removeFolder(folder);
     },
-    [requests, transfers, refreshRequests, refreshTransfers, removeFolder],
+    [requests, transfers, refreshRequests, refreshTransfers, removeFolder, dialog],
   );
 
   // P28: whether clicking Clear History right now would actually hide
@@ -944,10 +962,11 @@ export function FilesScreen() {
   // the same one TransferListScreen's own Clear History writes, rather than
   // a second history concept.
   const handleClearHistory = useCallback(() => {
-    Alert.alert(
-      'Clear file history?',
-      'Downloaded files will be removed from this list, but the files themselves stay on your device. Files still downloading or queued are not affected.',
-      [
+    dialog.show({
+      title: 'Clear file history?',
+      message:
+        'Downloaded files will be removed from this list, but the files themselves stay on your device. Files still downloading or queued are not affected.',
+      buttons: [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Clear History',
@@ -963,8 +982,8 @@ export function FilesScreen() {
           },
         },
       ],
-    );
-  }, []);
+    });
+  }, [dialog]);
 
   // Renders in the native header, next to the "Shared Files" title set by
   // FilesStack — the same placement TransferListScreen uses for its own
@@ -1161,6 +1180,7 @@ export function FilesScreen() {
         contentContainerStyle={items.length === 0 ? styles.emptyList : undefined}
       />
       <FileActionMenu visible={menuVisible} title={menuTitle} subtitle={menuSubtitle} actions={menuActions} onClose={closeMenu} />
+      <AppDialog {...dialog.props} />
     </View>
   );
 }

@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Pressable,
   StyleSheet,
   Text,
@@ -17,6 +16,7 @@ import { SessionManager } from '../../session/SessionManager';
 import { renameDevice } from '../../api/endpoints/devices';
 import { ApiError } from '../../api/client';
 import { getDefaultDeviceName } from '../../pairing/deviceName';
+import { AppDialog, useAppDialog } from '../../components/AppDialog';
 
 /**
  * A small, user-facing settings screen — deliberately not an administrative
@@ -38,6 +38,7 @@ export function SettingsScreen() {
   const { location, isRestored } = useDownloadLocation();
   const [permissionRevoked, setPermissionRevoked] = useState(false);
   const [changing, setChanging] = useState(false);
+  const dialog = useAppDialog();
 
   // Re-checked every time this tab regains focus (not just on mount) —
   // permission can be revoked from outside the app (e.g. the folder itself
@@ -81,14 +82,15 @@ export function SettingsScreen() {
       });
       setPermissionRevoked(false);
     } catch (err) {
-      Alert.alert(
-        'Could not set download location',
-        err instanceof Error ? err.message : 'Please try again.',
-      );
+      dialog.show({
+        title: 'Could not set download location',
+        message: err instanceof Error ? err.message : 'Please try again.',
+        buttons: [{ text: 'OK' }],
+      });
     } finally {
       setChanging(false);
     }
-  }, []);
+  }, [dialog]);
 
   const handleResetToDefault = useCallback(async () => {
     await DownloadLocationManager.resetToDefault();
@@ -143,6 +145,7 @@ export function SettingsScreen() {
           location.
         </Text>
       </View>
+      <AppDialog {...dialog.props} />
     </View>
   );
 }

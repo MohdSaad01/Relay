@@ -3983,6 +3983,459 @@ above as deferred, not fixed.
 
 ---
 
+## P30 — Application-Wide Dialog & Confirmation UX
+
+**Scope:** audit and standardize every Desktop and Android dialog/
+confirmation prompt so custom Relay dialogs feel like a deliberate part of
+the design system (P19/P20 Desktop, P14.1/P22 Android) instead of a mix of
+native OS prompts and hand-rolled cards — same behavior, better
+presentation, per the milestone's own explicit boundary. No transfer
+protocol, database schema, transfer state machine, pairing protocol,
+identity, history semantics, filesystem behavior, or auth changes.
+
+### Baseline (Phase A audit, no code changed)
+
+**Desktop** (`desktop/src/renderer/`) — every `window.confirm()` site, via
+`grep -rn "window\.\(confirm\|prompt\|alert\)"`:
+
+| Site | File | Style before |
+|---|---|---|
+| Unpair device | `views/devices.js` | plain `window.confirm()` |
+| Clear History (Shared Files' received-item history) | `views/files.js` | plain `window.confirm()` |
+| Unshare file/folder | `views/files.js` | plain `window.confirm()` |
+| Delete shared file/folder (source) | `views/files.js` | plain `window.confirm()` |
+| Delete received file/folder | `views/files.js` | plain `window.confirm()` |
+| Clear History (Transfers) | `views/transfers.js` | plain `window.confirm()` |
+
+Also inventoried and found **already correct / intentionally out of scope**:
+- Pairing approve/reject/expired/success/rejected — P20 `iconBadge` status
+  cards, never used `window.confirm`.
+- Rename (Devices) — P29/P29.1 inline-edit card, not a confirmation prompt;
+  re-confirmed still correct per P30 §8 (see below) and left untouched.
+- Backend-startup fatal error (`main.js`'s `dialog.showMessageBoxSync`) —
+  fires in the Electron **main** process before any renderer/window exists,
+  so there is no HTML/CSS surface to render a custom dialog into; correctly
+  stays a native Electron dialog.
+- `dialog.showOpenDialog` (Add Files/Add Folder/Browse Settings pickers,
+  `ipc-handlers.js`) — native OS file pickers, the Desktop equivalent of
+  Android's document/directory picker; correctly stays native (same
+  reasoning as P30 §9's camera-permission exemption).
+
+**Android** (`android/src/`) — every `Alert.alert()` site, via
+`grep -rn "Alert\.alert" android/src`:
+
+| Site | File | Style before |
+|---|---|---|
+| File Details (info only) | `screens/files/FilesScreen.tsx` | plain `Alert.alert` |
+| Folder Details (info only) | `screens/files/FilesScreen.tsx` | plain `Alert.alert` |
+| "Could not share this file" (error) | `screens/files/FilesScreen.tsx` | plain `Alert.alert` |
+| Delete file (destructive) | `screens/files/FilesScreen.tsx` | plain `Alert.alert` |
+| Delete folder (destructive) | `screens/files/FilesScreen.tsx` | plain `Alert.alert` |
+| "Could not remove this download" ×2 (file/folder error) | `screens/files/FilesScreen.tsx` | plain `Alert.alert` |
+| Clear file history (destructive) | `screens/files/FilesScreen.tsx` | plain `Alert.alert` |
+| Clear transfer history (destructive) | `screens/transfers/TransferListScreen.tsx` | plain `Alert.alert` |
+| "Could not set download location" (error) | `screens/settings/SettingsScreen.tsx` | plain `Alert.alert` |
+
+10 call sites total. Also inventoried and found **already correct /
+intentionally out of scope**:
+- `FileActionMenu.tsx` (P14.1) and `UploadConfirmSheet.tsx` (P26) — already
+  custom `Modal`-based bottom sheets matching Relay's visual language; not
+  redundant with the new dialog primitive (an action-list sheet and an
+  upload-details sheet are a different shape than a confirm/alert dialog),
+  reused as the architectural precedent instead of replaced.
+- Device rename (`SettingsScreen.tsx`'s `DeviceNameCard`) — inline-edit
+  card (P23), same reasoning as Desktop's Rename; not a confirmation
+  prompt.
+- Cancel Transfer (`TransferProgressDetail.tsx`'s `handleCancel`) — **no
+  dialog exists today**, confirmed via source read; the Cancel button acts
+  immediately. Left as-is: P30 is a presentation-consistency pass over
+  existing dialogs, not a mandate to add new confirmations for actions
+  that don't currently have one.
+- Remove (idle/failed row dismiss, `FilesScreen.tsx`'s `handleRemoveFile`/
+  `handleRemoveFolder`) — silent, no dialog, by original P22 design (dismisses
+  a local marker only; nothing is destroyed since the item stays shared and
+  reappears if re-shared — see CLAUDE.md's P22 section). Left as-is.
+- Camera permission (`QrScanScreen.tsx`) — the OS permission prompt itself
+  (`PermissionsAndroid.request`) is untouched, per P30 §9. The
+  explanation/blocked/retry UI around it was already a full-screen state
+  (not a dialog) predating this milestone; re-confirmed still correct and
+  left alone.
+- Pairing result/waiting screens — full-screen states, not dialogs;
+  unaffected.
+
+### Root cause
+
+Both `window.confirm()`/`window.prompt()`/`Alert.alert()` render the host
+OS's own unstyled system prompt — outside `app.css`'s design tokens on
+Desktop and outside `FileActionMenu`/`UploadConfirmSheet`'s established
+white-card/rounded-corner/`#2563eb`-primary/`#dc2626`-destructive language
+on Android. Every one of these dialogs also used the vague "OK" for its
+destructive action's own label where a more explicit one (Unpair/Delete/
+Clear History) was available and appropriate, per P30 §6.
+
+### Architecture decision
+
+Investigated existing reusable primitives first (P30 §5), per CLAUDE.md
+Rule 5 (don't duplicate logic) and Rule 2 (don't add dependencies without
+justification):
+
+- **Desktop:** no existing "dialog" component existed — `iconBadge()`/
+  `pageHeader()`/`emptyState()` (`dom.js`) are markup helpers for a
+  *view's* content, not an overlay. Built **one** new primitive,
+  `desktop/src/renderer/dialog.js`'s `confirmDialog({ title, message,
+  confirmLabel, cancelLabel, destructive })`, returning a `Promise<boolean>`
+  so a call site's control flow barely changes (`if (!window.confirm(...))
+  return;` → `if (!(await confirmDialog({...}))) return;`). Renders a
+  backdrop + `.card`-styled card appended to `document.body` (not
+  `#view-container`, which `renderer.js`'s `showView()` wipes on every nav
+  click) using **existing** `app.css` tokens (`.card`, `button.primary`/
+  `.danger`/`.text-button`, `--space-*`/`--radius-*`) — two small new CSS
+  rule blocks (`.dialog-backdrop`, `.dialog`) rather than a parallel style
+  system. No new npm dependency.
+- **Android:** `FileActionMenu.tsx`/`UploadConfirmSheet.tsx` (P14.1/P26)
+  already established the right building blocks — `Modal` (transparent +
+  fade), a backdrop `Pressable` that dismisses, an inner no-op `Pressable`
+  isolating the card from backdrop taps. Built **one** new primitive on the
+  same foundation, `android/src/components/AppDialog.tsx`: a *centered*
+  card (not their bottom-sheet shape, since a confirm/alert dialog isn't
+  tied to a specific list row) plus `useAppDialog()`, a small local-state
+  hook so a screen's call sites read almost identically to
+  `Alert.alert(title, message, buttons)` — `dialog.show({ title, message,
+  buttons })` in place of `Alert.alert(...)`, one `<AppDialog {...dialog.props}
+  />` rendered once per screen. No new npm dependency (`react-native`'s own
+  `Modal`/`Pressable`, same as the two precedents).
+
+Per P30 §5's explicit instruction, Desktop and Android were **not** forced
+into one shared component — different rendering stacks (DOM/CSS vs. React
+Native), and each platform already had its own established visual
+language to extend rather than replace.
+
+**Desktop dialog styling decisions** (destructive vs. primary, matching
+each action's *existing* button-danger-class semantics elsewhere in the
+same view, not invented fresh):
+
+| Dialog | Confirm label | Style | Why |
+|---|---|---|---|
+| Unpair | "Unpair" | destructive (red) | Existing Remove button is already `class="remove danger"` |
+| Delete (shared/received) | "Delete" | destructive (red) | Existing button is already `class="delete danger"` |
+| Clear History (Files/Transfers) | "Clear History" | destructive (red) | P30 §6 explicitly names Clear History as destructive, even though its *trigger* button (`.text-button`) isn't red — only the dialog's own confirm action needed to be |
+| Unshare | "Unshare" | primary (blue) | Existing `.unshare` button was never `.danger` — stopping sharing doesn't destroy anything; the item stays on disk and can be re-shared |
+
+**Android dialog styling** mirrors `Alert.alert`'s own `style: 'cancel' |
+'destructive' | 'default'` per-button API 1:1, so no new semantic mapping
+was needed — each call site's existing `style: 'destructive'`/`'cancel'`
+carried over unchanged.
+
+**Special case — Rename (P30 §8):** re-audited both platforms' inline-edit
+Rename (Desktop `devices.js` `.is-renaming` class-toggle from P29/P29.1,
+Android `SettingsScreen.tsx`'s `DeviceNameCard`). Neither is a
+confirmation prompt — both are a persistent inline edit-state, already
+consistent with the rest of each platform's design language. Left
+untouched, per the milestone's own explicit instruction not to regress a
+working P29 fix just because a dialog system now exists.
+
+### Implementation
+
+**Files created:**
+- `desktop/src/renderer/dialog.js` — `confirmDialog()`.
+- `android/src/components/AppDialog.tsx` — `AppDialog` + `useAppDialog()`.
+
+**Files modified:**
+- `desktop/styles/app.css` — `.dialog-backdrop`/`.dialog` rules (new
+  section, uses only existing design tokens).
+- `desktop/src/renderer/views/devices.js` — Unpair confirmation.
+- `desktop/src/renderer/views/files.js` — Clear History, Unshare, Delete
+  (shared), Delete (received) confirmations (4 call sites).
+- `desktop/src/renderer/views/transfers.js` — Clear History confirmation.
+- `android/src/screens/files/FilesScreen.tsx` — all 8 `Alert.alert` sites
+  (File/Folder Details, Share error, Delete file/folder, Remove-error
+  file/folder, Clear file history) converted to `dialog.show(...)` +
+  `useAppDialog()`; `Alert` import removed (no longer used in this file).
+- `android/src/screens/transfers/TransferListScreen.tsx` — Clear transfer
+  history; `Alert` import removed.
+- `android/src/screens/settings/SettingsScreen.tsx` — "Could not set
+  download location" error; `Alert` import removed.
+
+No backend file touched — matches the milestone's "UI only" boundary; `git
+diff --stat` confirms zero changes under `backend/`.
+
+### Automated tests
+
+- **Desktop:** `node --check <file>` on all 4 modified/created `.js` files
+  initially reported false confidence — **discovered problem**: plain
+  `node --check file.js` silently stops validating a `.js` file's body
+  after its first `import` statement (Node treats the file as CommonJS by
+  default with no `"type": "module"` in `desktop/package.json`, and a
+  leading `import` short-circuits the parse rather than erroring). Verified
+  with a deliberately-broken file (`function( {` after an `import` line):
+  plain `node --check` reported exit 0 (false pass), while `node
+  --input-type=module --check < file.js` correctly caught the syntax
+  error. Re-ran all 4 files with the corrected form — all pass (exit 0,
+  no output). **This is now the correct command for any future Desktop
+  ESM `node --check` in this project** — see the new Cross-Cutting Lessons
+  entry below.
+- **Android:** `npx tsc --noEmit` — clean, zero errors.
+  `npx eslint .` — 10 `react-hooks/exhaustive-deps` errors on first pass
+  (each `useCallback` referencing `dialog.show` inside its body but only
+  listing `dialog.show` — not the parent `dialog` object — in its
+  dependency array); fixed by listing `dialog` itself in each affected
+  array (`useAppDialog()` returns a fresh object each render, but the
+  lint rule tracks the object identity referenced in the callback body,
+  not just the specific member path listed). Re-ran — 0 errors, 4
+  warnings, and a `git stash`/re-lint comparison confirmed all 4 warnings
+  (2 `react/no-unstable-nested-components`, 2 `no-void` in
+  `TransferStreamManager.ts`) pre-exist on `main` at the same lines,
+  unrelated to this milestone. `npx jest` — 42/42 suites, 363/363 tests
+  passing, unchanged from baseline (no test in this codebase asserts on
+  `Alert.alert` call shape directly — all existing Files/Transfers/Settings
+  tests target pure logic functions, not the dialog call itself).
+
+### Desktop live verification (real Electron app, Playwright-driven)
+
+Launched the actual `desktop/` Electron app (`electron .`, not a mock) via
+`playwright-core` (already present in `desktop/node_modules` from prior
+sessions), against the real dev `backend/relay.db` — one genuinely paired
+device (`RMX3997`), a large real transfer history, and a pre-existing
+`historyClearedAt` localStorage marker (`2026-08-12T18:39:27.149Z`) left
+over from an earlier session, which initially disabled both Clear History
+buttons (nothing left to clear) and hid every received-item row. Verified
+each in turn, screenshots captured at every step:
+
+- **Unpair (devices.js):** opened the dialog on the one real paired
+  device. **Did not click the real Unpair action** — P30 §3 explicitly
+  forbids unpairing the only physical Android test device to manufacture a
+  test state. Verified Cancel-button dismiss, Escape-key dismiss, and
+  backdrop-click dismiss all correctly close the dialog with the device
+  still paired afterward (`document.activeElement` confirmed default
+  focus lands on the Cancel button on open, not the destructive action).
+- **Unshare / Delete (files.js):** shared a real throwaway file (`POST
+  /files` directly, bypassing the native OS picker Playwright can't drive)
+  and drove the real UI. Unshare dialog: opened, screenshot, Cancel.
+  Delete dialog: opened, screenshot (destructive red confirm), **real
+  confirm click** — row disappeared from the table, confirmed via DOM
+  query. This is the one throwaway file this script itself created;
+  nothing pre-existing was touched.
+- **Received-item Delete (files.js):** the pre-existing `historyClearedAt`
+  marker was temporarily cleared (`localStorage.removeItem`, then
+  restored to the exact original value in a `finally` block after) to make
+  a real received-item row visible again — opened its Delete dialog,
+  screenshot, **Cancel only** (this is real transfer history from an
+  earlier session, not this script's own data, so it was not deleted).
+- **Clear History (files.js and transfers.js):** with the marker
+  temporarily cleared, opened each dialog, screenshot, Cancel-tested, then
+  real-confirmed once on the Files tab (its own effect — setting a new
+  `historyClearedAt` — was itself overwritten back to the original value
+  in the same `finally` block, so the net effect on this dev environment
+  is zero) and Cancel-tested on the Transfers tab. `historyClearedAt` was
+  verified byte-for-byte restored (`restored === original: true`) before
+  closing the app.
+- **Regression sweep:** a separate clean run navigated Devices → Pairing →
+  Files → Transfers → Settings → Devices, opened and cancelled the Unpair
+  dialog mid-sweep, and captured every `console`/`pageerror` event via
+  Playwright's page listeners — **zero errors**.
+
+### Android physical-device verification (RMX3997, real installed app)
+
+Confirmed the connected device first (`adb devices -l`):
+`69DADENFONAIOZS4`, `RMX3997IN`/`RMX3997`, package `com.relay.mobile`,
+`versionName=1.0`, installed 2026-08-11, **DEBUGGABLE** build flag
+confirmed via `dumpsys package`. Since this is a debug build (JS fetched
+from Metro at runtime, not baked into the APK), started `npx react-native
+start` (Metro) plus `adb reverse tcp:8081 tcp:8081`, force-stopped and
+relaunched the app (`am force-stop` / `am start -n
+com.relay.mobile/.MainActivity`) so it picked up this session's actual
+code changes, and started the real Electron desktop app (`npm start`,
+bound `0.0.0.0:8000`) so the phone had a real backend to talk to over the
+LAN (matching Version 1's actual local-network transfer model, not
+localhost-only).
+
+Two unrelated real-world events surfaced on the device during this pass
+and were left untouched, not interacted with beyond dismissing a purely
+cosmetic overlay: a genuine incoming/missed phone call from the device
+owner's own contacts (Truecaller overlay), dismissed only via its own "X"
+close control so the Relay UI underneath was visible again — no call
+action (answer/decline) was ever touched. A pre-existing RN debug-only
+warning banner ("Open debugger to view warnings") and an unrelated
+`[QR-DEBUG]` instrumentation toast (both pre-existing dev tooling, not
+part of this milestone) intermittently overlapped the bottom of the
+screen and had to be dismissed via their own "X" buttons before some taps
+would land — documented as a **live-verification friction point**, not an
+app defect (see Problems discovered, below).
+
+Verified live, screenshots captured at every step:
+- **Delete file (FilesScreen, destructive):** shared a real throwaway file
+  via a direct `POST /files` call (same technique as Desktop, since
+  Playwright can't drive Android's native document picker either),
+  downloaded it through the real UI, long-pressed for the action menu
+  (confirmed state-dependent menu: idle row → Remove/Details only, no
+  Delete; completed row → Open/Share/Delete, matching P22's documented
+  per-state action set), opened the Delete dialog. Verified: Cancel button
+  dismiss (file still present), Android hardware **back button** dismiss
+  (`KEYCODE_BACK`, maps to `Modal`'s `onRequestClose`) with the dialog
+  closing cleanly and no residual state, backdrop-tap dismiss, and finally
+  a **real confirm** — the row correctly downgraded from "Open" back to
+  "Download" (local copy actually deleted, re-verified against the real
+  filesystem via the app's own `verify()` call), and Clear History
+  correctly re-disabled itself since nothing completed remained.
+- **File Details (info-only, single-button):** opened via the idle-state
+  action menu; the multi-line `\n`-joined message (Size/Shared/Status)
+  rendered correctly with a single "Close" button (not "OK" — chosen
+  since a details dialog is a close action, not a generic acknowledgment);
+  Close dismissed cleanly.
+- **Clear transfer history (TransferListScreen, destructive):** opened
+  with one real completed transfer in the list (this session's own
+  throwaway download), screenshot confirmed correct title/message/
+  destructive-red styling, **real confirm** — list correctly emptied to
+  "No transfers yet.", Clear History button correctly re-disabled.
+- **Not independently re-clicked live** (verified via identical
+  underlying component + source read instead, per this project's own
+  established practice of distinguishing live-tested from
+  source-verified-only — see P29.1's own precedent): the Files-tab Clear
+  History confirm/cancel (Transfers-tab equivalent already exercised with
+  the same `AppDialog`/`useAppDialog` code path and identical
+  config shape), the Share-file and two Remove-download-error alerts, and
+  the Settings screen's download-location error. All four call sites
+  invoke the exact same `dialog.show()`/`<AppDialog {...dialog.props} />`
+  mechanism proven live at the Delete/Details/Clear-History sites above,
+  with no site-specific rendering logic of their own to diverge.
+
+**Cleanup after Android verification:** the throwaway shared file was
+unshared via `DELETE /files/{id}` (confirmed `shared_files` back to 0
+rows), the local scratch file deleted, `adb reverse --remove-all` run, and
+every Metro/Electron process this session spawned was identified by full
+command line (all rooted under `C:\Thomas\Encipher\Python\Relay\`) and
+terminated — confirmed via a follow-up `tasklist`/backend-health check
+that nothing Relay-related was left running. The Transfers-tab Clear
+History confirm was a **real, intentional use of the shipping feature**
+(not test-only scaffolding) against this session's own one throwaway
+transfer; it was not reverted, matching how a real user exercising Clear
+History is expected to behave — see Remaining limitations below for the
+resulting device-local state.
+
+### Regressions checked
+
+**Desktop:** Devices, Pairing, Shared Files, Transfers, Settings all
+navigated without console/page errors (see regression sweep above);
+Rename (Desktop) re-confirmed unaffected — `is-renaming` class toggle
+untouched, no dialog-related code path anywhere near it; Remove Device
+(Unpair) dialog open/cancel cycle included directly in the same
+error-free sweep.
+
+**Android:** `npx tsc --noEmit` and `npx jest` (both project-wide, not
+scoped to changed files) confirm Files/Transfers/Settings/Discovery/
+Pairing logic is unaffected; the long-press action menu (`FileActionMenu`)
+confirmed still opens/closes correctly and its state-dependent action set
+(idle vs. completed row) is unchanged; live-clicked Upload confirmation
+sheet was not re-tested this pass (untouched by this milestone — `git
+diff` shows zero changes to `UploadConfirmSheet.tsx`) but its `Modal`
+pattern is exactly what `AppDialog` was modeled on, so no shared-code risk
+was introduced.
+
+### Problems discovered during implementation
+
+1. **`node --check file.js` silently under-validates an ESM `.js` file
+   with a leading `import`** on this Node version (confirmed v24.18.1) —
+   documented above and in Cross-Cutting Lessons below. Not a Relay bug;
+   a Node/CommonJS-vs-ESM tooling gap worth remembering for any future
+   Desktop `node --check` run.
+2. **`react-hooks/exhaustive-deps` wants the parent object (`dialog`), not
+   a specific member path (`dialog.show`), in a `useCallback` dependency
+   array** when the object itself isn't memoized across renders (unlike
+   e.g. `props.onClick`, which react-hooks' static analysis handles at the
+   member-path level). Fixed by depending on `dialog` directly at all 10
+   call sites; a future `useAppDialog()`-based `useCallback` should do the
+   same rather than trying `dialog.show` again.
+3. **A pre-existing dev-only debug warning banner and an unrelated
+   `[QR-DEBUG]` instrumentation toast on the physical test device
+   intermittently overlap the bottom ~250px of the screen**, including
+   the tab bar and any dialog rendered near the bottom, and must be
+   dismissed via their own "X" controls before a `adb shell input tap` at
+   that location reliably lands on the intended Relay UI element
+   underneath. Confirmed via `uiautomator dump` bounds overlap (`[20,1393]
+   [700,1564]` for the banner vs. `[40,1386][680,1429]` for a menu item
+   directly behind it). Not a Relay defect — this banner and toast are
+   both pre-existing dev/debug-only instrumentation, invisible in a
+   release build — but worth recording as a live-verification friction
+   point for any future `adb shell input tap` script on this device.
+4. **A real, unrelated incoming phone call and a Truecaller missed-call
+   overlay appeared on the physical test device mid-session** (the
+   device's owner's own personal call, not anything triggered by this
+   work). Handled by dismissing only the overlay's own close control,
+   never touching call-answer/decline — documented here per this
+   project's own standard of noting anything unexpected encountered
+   during live device testing, not because it reflects on the app under
+   test.
+
+### Documentation changed
+
+- This `docs/15_QA_NOTEBOOK.md` P30 entry.
+- `CLAUDE.md` — new "Application-Wide Dialog Convention (P30)" section
+  (durable convention: future Desktop confirmations go through
+  `dialog.js`'s `confirmDialog()`, future Android confirmations/alerts go
+  through `AppDialog`/`useAppDialog()`, neither `window.confirm()` nor
+  `Alert.alert()` should be reintroduced for a new confirmation).
+- A new Cross-Cutting Lessons entry (below) for the `node --check`
+  ESM-detection gap.
+
+**Documentation intentionally unchanged:** `README.md` — this milestone
+changed dialog presentation only, nothing README describes at the
+user-facing feature/setup level. `.gitignore` — no new generated artifact
+introduced (the two new source files are ordinary tracked source, not
+build output).
+
+### Remaining limitations
+
+- The RMX3997 device's Transfers-tab history now has a fresh
+  `historyClearedAt` marker (real, intentional use of the feature during
+  live verification — see Cleanup above), hiding this session's own single
+  throwaway transfer going forward. No pre-existing user data was hidden
+  by this — the device had already had its history cleared in an earlier
+  session before this milestone began, and the only transfer created and
+  then hidden was this session's own test download.
+- Four Android call sites (Files-tab Clear History, Share-file error, two
+  Remove-download-error alerts, Settings download-location error) were
+  verified via identical-component reasoning plus `tsc`/`eslint`/`jest`
+  rather than individually live-tapped on the device — documented above
+  under Android verification, not silently assumed.
+- Desktop still has no formal automated lint/test suite beyond `node
+  --check` (unchanged from every prior Desktop milestone's own
+  limitation) — `app.css`'s two new rule blocks have no automated check
+  at all, only the live Playwright screenshots above.
+- Packaging/distribution (`docs/12_Packaging_Deployment.md`) remains the
+  next milestone, unaffected by this pass.
+
+### Suggested Git commit message
+
+`feat(desktop,android): standardize confirmation dialogs across the app`
+
+### Final verdict
+
+Every native/plain dialog found in the Phase A audit (6 Desktop
+`window.confirm()` sites, 10 Android `Alert.alert()` sites) now renders
+through one small, reusable, platform-appropriate primitive
+(`confirmDialog()` on Desktop, `AppDialog`/`useAppDialog()` on Android),
+matching each platform's existing design language (P19/P20 Desktop
+tokens; P14.1/P26 Android `Modal` conventions) with no shared
+cross-platform component forced where the two rendering stacks
+genuinely differ, per P30 §5. Every dialog identified as already correct
+(Pairing status cards, both platforms' inline Rename, `FileActionMenu`/
+`UploadConfirmSheet`, camera-permission UI, Cancel Transfer, idle-row
+Remove) was independently re-confirmed correct and left untouched rather
+than assumed. All automated checks pass (`node --check` via the corrected
+`--input-type=module` form; `tsc --noEmit` clean; `eslint` 0 errors, 4
+pre-existing unrelated warnings; `jest` 363/363). Both platforms were
+live-verified against real state — the real Electron app via Playwright
+with real `relay.db` data (destructive Delete genuinely executed and
+confirmed against a throwaway file; the one real paired device's Unpair
+was deliberately never confirmed), and the real RMX3997 physical device
+over a real LAN connection to the real backend (destructive Delete and
+Clear History both genuinely executed and confirmed against real
+device state, with cleanup verified afterward). No backend file was
+touched. No unrelated visual redesign, animation, or new feature was
+introduced.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:
@@ -4104,3 +4557,16 @@ A few gotchas worth remembering independent of any single milestone above:
   toggled state), which is subject to neither the `[hidden]`-vs-author-CSS
   cascade issue described here nor the CSP restriction — this is what
   P29.1 replaced both broken approaches with.
+- **Plain `node --check file.js` silently under-validates a Desktop
+  renderer `.js` file once it hits a leading `import` statement** —
+  confirmed live in P30 with a deliberately-broken file (a syntax error
+  placed right after an `import` line reported exit 0, a false pass).
+  `desktop/package.json` has no `"type": "module"`, so Node treats a
+  `.js` file as CommonJS by default; `--check` appears to stop meaningfully
+  parsing the rest of the file once it hits ESM `import` syntax it can't
+  fully validate under that assumption, rather than erroring outright.
+  **Use `node --input-type=module --check < file.js` instead** (piping the
+  file through stdin with `--input-type=module` forces a real ESM parse)
+  for any future Desktop renderer `node --check` — confirmed this form
+  correctly catches the same deliberately-broken file plain `--check`
+  missed.

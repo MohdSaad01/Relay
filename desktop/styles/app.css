@@ -684,3 +684,42 @@ form input[type="number"]:focus {
   outline: 2px solid var(--color-primary-bg);
   border-color: var(--color-primary);
 }
+
+/* Confirmation dialog (P30, dialog.js's confirmDialog()): a backdrop +
+   card appended to document.body, replacing window.confirm()'s unstyled OS
+   prompt. Layered above the whole app (#nav included), not just
+   #view-container, since a dialog can be opened from any view. */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+  background: rgba(26, 29, 35, 0.45);
+}
+
+.dialog {
+  width: 100%;
+  max-width: 420px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+}
+
+.dialog h2 {
+  margin: 0 0 var(--space-2);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.dialog p {
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
+.dialog-actions {
+  justify-content: flex-end;
+}

@@ -566,6 +566,49 @@ transfer progress. Fix with the same class-toggle-or-stylesheet-variable
 approach when Transfers is next in scope; do not reach for
 `element.style.width =` there either.
 
+### Application-Wide Dialog Convention (P30)
+
+**Every Desktop confirmation dialog goes through
+`desktop/src/renderer/dialog.js`'s `confirmDialog({ title, message,
+confirmLabel, cancelLabel, destructive })` — never `window.confirm()`
+(and never `window.prompt()`, which P29 already established Electron
+doesn't implement).** It returns `Promise<boolean>` (resolves `false` on
+Cancel, Escape, or a backdrop click, matching `window.confirm()`'s own
+cancel semantics) and renders using `app.css`'s existing `.card`/button/
+badge tokens, appended to `document.body` so it survives `renderer.js`'s
+per-view `#view-container` wipes. `destructive: true` renders the confirm
+button in the danger/red style — reserve it for an action that actually
+destroys or permanently discards something (Unpair, Delete, Clear
+History), not merely a reversible state change (Unshare, which keeps the
+item on disk and re-shareable, stays primary/blue). Give the confirm
+button an explicit label (`"Delete"`, `"Unpair"`, `"Clear History"`, ...),
+never a bare `"OK"`.
+
+**Every Android confirmation/alert/info dialog goes through
+`android/src/components/AppDialog.tsx`'s `AppDialog` + `useAppDialog()` —
+never `Alert.alert()`.** `useAppDialog()` gives a screen `dialog.show({
+title, message, buttons })` (a `buttons` array shaped like
+`Alert.alert`'s own, each with an optional `style: 'cancel' |
+'destructive' | 'default'`) and a `dialog.props` spread onto one
+`<AppDialog {...dialog.props} />` rendered near the bottom of the
+screen's JSX, exactly where `FileActionMenu`/`UploadConfirmSheet` already
+render. A `useCallback` that calls `dialog.show` must list the whole
+`dialog` object in its dependency array (not `dialog.show` alone) —
+`react-hooks/exhaustive-deps` flags the narrower form, since
+`useAppDialog()` returns a fresh object every render (see
+`docs/15_QA_NOTEBOOK.md`'s P30 entry for why).
+
+Both primitives were deliberately kept separate per-platform (P30 §5) —
+Desktop is DOM/CSS, Android is React Native's `Modal`, and each already
+had its own established visual language (P19/P20 Desktop tokens, P14.1/
+P26 Android `Modal` conventions) to extend rather than a reason to force
+a shared cross-platform component. Neither platform's native OS-owned
+prompts (Desktop's pre-window fatal-startup `dialog.showMessageBoxSync`,
+both platforms' native file/folder pickers, Android's camera-permission
+system prompt) should be replaced — only dialogs Relay's own UI renders.
+Rename (inline-edit on both platforms, P29/P23) is not a confirmation
+prompt and does not go through either dialog primitive.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)

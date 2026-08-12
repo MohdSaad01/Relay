@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { errorCodes, isErrorWithCode, pick } from '@react-native-documents/picker';
@@ -22,6 +22,7 @@ import {
   isHistoricalTransfer,
 } from '../../transfers/historyReset';
 import { UploadConfirmDetails, UploadConfirmSheet } from '../../components/UploadConfirmSheet';
+import { AppDialog, useAppDialog } from '../../components/AppDialog';
 
 /** A file picked via the native document picker, once its size/name are known to be readable. */
 interface PickedUploadFile {
@@ -80,6 +81,7 @@ export function TransferListScreen() {
   // or once the user confirms via UploadConfirmSheet — nothing is proposed
   // to the backend while this is non-null.
   const [pendingUpload, setPendingUpload] = useState<PendingUpload | null>(null);
+  const dialog = useAppDialog();
 
   useEffect(() => {
     let cancelled = false;
@@ -297,10 +299,11 @@ export function TransferListScreen() {
   const listItems = groupTransfers(visibleTransfers);
 
   const handleClearHistory = useCallback(() => {
-    Alert.alert(
-      'Clear transfer history?',
-      'Completed, failed, and cancelled transfers will be removed from this list. Downloaded files are not deleted, and active or queued transfers are not affected.',
-      [
+    dialog.show({
+      title: 'Clear transfer history?',
+      message:
+        'Completed, failed, and cancelled transfers will be removed from this list. Downloaded files are not deleted, and active or queued transfers are not affected.',
+      buttons: [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Clear History',
@@ -316,8 +319,8 @@ export function TransferListScreen() {
           },
         },
       ],
-    );
-  }, []);
+    });
+  }, [dialog]);
 
   // P23: Clear History lives in the header (next to the "Transfers" title),
   // not the content area — see this component's own doc comment. Re-set
@@ -403,6 +406,7 @@ export function TransferListScreen() {
         onCancel={handleCancelUpload}
         onConfirm={handleConfirmUpload}
       />
+      <AppDialog {...dialog.props} />
     </View>
   );
 }

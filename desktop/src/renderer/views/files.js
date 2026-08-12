@@ -14,6 +14,7 @@ import {
 import { buildReceivedItems, markReceivedItemRemoved, resolveReceivedItemPath } from "../receivedFiles.js";
 import { applyHistoryReset, clearTransferHistory, getHistoryClearedAt } from "../transferHistory.js";
 import { folderIcon } from "../icons.js";
+import { confirmDialog } from "../dialog.js";
 
 export async function mount(container) {
   await refresh(container);
@@ -78,14 +79,15 @@ function render(container, files, folders, transfers, downloadDirectory) {
       <tbody>${rows}</tbody>
     </table>`);
 
-  container.querySelector("#clear-history").addEventListener("click", () => {
-    if (
-      !window.confirm(
-        "Clear received-file history from this list? Currently shared files/folders stay listed, downloaded files stay on your computer, and any active transfer stays visible in Transfers."
-      )
-    ) {
-      return;
-    }
+  container.querySelector("#clear-history").addEventListener("click", async () => {
+    const confirmed = await confirmDialog({
+      title: "Clear received-file history?",
+      message:
+        "Currently shared files/folders stay listed, downloaded files stay on your computer, and any active transfer stays visible in Transfers.",
+      confirmLabel: "Clear History",
+      destructive: true,
+    });
+    if (!confirmed) return;
     clearTransferHistory();
     refresh(container);
   });
@@ -239,7 +241,12 @@ function wireSharedRowActions(container) {
     });
 
     row.querySelector(".unshare").addEventListener("click", async () => {
-      if (!window.confirm(`Stop sharing this ${noun}? It will no longer be available to paired devices.`)) return;
+      const confirmed = await confirmDialog({
+        title: `Stop sharing this ${noun}?`,
+        message: "It will no longer be available to paired devices.",
+        confirmLabel: "Unshare",
+      });
+      if (!confirmed) return;
       try {
         await api.del(`/${resource}/${id}`);
         await refresh(container);
@@ -249,12 +256,13 @@ function wireSharedRowActions(container) {
     });
 
     row.querySelector(".delete").addEventListener("click", async () => {
-      if (
-        !window.confirm(
-          `Delete this ${noun} from your computer? This moves it to the Recycle Bin and removes it from Shared Files.`
-        )
-      )
-        return;
+      const confirmed = await confirmDialog({
+        title: `Delete this ${noun} from your computer?`,
+        message: "This moves it to the Recycle Bin and removes it from Shared Files.",
+        confirmLabel: "Delete",
+        destructive: true,
+      });
+      if (!confirmed) return;
       try {
         await window.relay.deleteItem(filePath);
         await api.del(`/${resource}/${id}`);
@@ -295,12 +303,14 @@ function wireReceivedRowActions(container, items, downloadDirectory) {
     });
 
     row.querySelector(".delete").addEventListener("click", async () => {
-      if (
-        !window.confirm(
-          `Delete this received ${noun} from your computer? This moves it to the Recycle Bin and removes it from Shared Files. The original on the Android device is not affected.`
-        )
-      )
-        return;
+      const confirmed = await confirmDialog({
+        title: `Delete this received ${noun} from your computer?`,
+        message:
+          "This moves it to the Recycle Bin and removes it from Shared Files. The original on the Android device is not affected.",
+        confirmLabel: "Delete",
+        destructive: true,
+      });
+      if (!confirmed) return;
       try {
         const path = await resolveReceivedItemPath(downloadDirectory, item);
         await window.relay.deleteItem(path);

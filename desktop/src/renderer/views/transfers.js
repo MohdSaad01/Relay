@@ -5,6 +5,7 @@ import { emptyState, escapeHtml, formatBytes, loadingState, pageHeader, renderEr
 import { batchFolderName, groupTransfersByBatch } from "../transferGrouping.js";
 import { applyHistoryReset, clearTransferHistory, getHistoryClearedAt, isHistoricalTransfer } from "../transferHistory.js";
 import { transferIcon } from "../icons.js";
+import { confirmDialog } from "../dialog.js";
 
 const POLL_INTERVAL_MS = 2000;
 const CANCELLABLE_STATUSES = new Set(["in_progress"]);
@@ -69,10 +70,14 @@ function render(container, transfers) {
       : renderTransfersTable(visibleTransfers));
 
   const clearHistoryButton = container.querySelector("#clear-history");
-  clearHistoryButton.addEventListener("click", () => {
-    if (!window.confirm("Clear completed, failed, and cancelled transfers from this list? Active transfers stay visible, and nothing is deleted from your files.")) {
-      return;
-    }
+  clearHistoryButton.addEventListener("click", async () => {
+    const confirmed = await confirmDialog({
+      title: "Clear completed, failed, and cancelled transfers from this list?",
+      message: "Active transfers stay visible, and nothing is deleted from your files.",
+      confirmLabel: "Clear History",
+      destructive: true,
+    });
+    if (!confirmed) return;
     clearTransferHistory();
     render(container, transfers);
   });

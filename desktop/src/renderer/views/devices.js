@@ -3,6 +3,7 @@
 import { api } from "../api/client.js";
 import { emptyState, escapeHtml, formatDateTime, iconBadge, loadingState, pageHeader, renderError } from "../dom.js";
 import { deviceIcon } from "../icons.js";
+import { confirmDialog } from "../dialog.js";
 
 export async function mount(container) {
   await refresh(container);
@@ -52,11 +53,12 @@ function render(container, devices) {
 
 /**
  * Electron does not implement window.prompt() (it throws "prompt() is not
- * supported", confirmed live - unlike window.confirm(), which does work and
- * is still used for Remove below) so Rename previously threw an unhandled
- * error before the API call was ever made, making the button appear to do
+ * supported", confirmed live) so Rename previously threw an unhandled error
+ * before the API call was ever made, making the button appear to do
  * nothing. Replaced with inline editing within the card instead of a native
- * prompt substitute - a full custom dialog system is P30's scope, not P29's.
+ * prompt substitute (P29) - still correct under P30's dialog system, since
+ * Rename isn't a confirmation prompt. Remove's confirmation now goes through
+ * dialog.js's confirmDialog() instead of window.confirm() (P30).
  */
 function wireDeviceCard(card, device, container) {
   const renameForm = card.querySelector(".device-card-rename");
@@ -100,7 +102,13 @@ function wireDeviceCard(card, device, container) {
   });
 
   card.querySelector(".remove").addEventListener("click", async () => {
-    if (!window.confirm("Unpair this device? It will need to pair again to reconnect.")) return;
+    const confirmed = await confirmDialog({
+      title: "Unpair this device?",
+      message: "It will need to pair again to reconnect.",
+      confirmLabel: "Unpair",
+      destructive: true,
+    });
+    if (!confirmed) return;
     try {
       await api.del(`/devices/${device.id}`);
       await refresh(container);

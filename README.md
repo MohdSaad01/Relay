@@ -253,6 +253,7 @@ here before release._
 | M13 | Device discovery (UDP broadcast) | Done |
 | M14 | Electron desktop application | Done |
 | — | Android client (React Native) | Done |
+| P38 | Backend production bundle (PyInstaller) | Done |
 | — | Packaging & distribution (installer, signed APK) | Not started |
 
 See `CLAUDE.md` for the detailed, per-milestone implementation notes.

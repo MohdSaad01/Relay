@@ -6799,3 +6799,1116 @@ was a scratchpad one-off, not added to the repo).
   characteristic, not related to the icon change itself.
 
 P36 ends here.
+
+---
+
+# Milestone P37 — Production Readiness & Packaging Audit
+
+**Scope:** an investigation-only milestone. No application source, build
+config, dependencies, or documentation-adjacent behavior were changed — the
+deliverable is knowledge: a repository-specific answer to "what does P38+
+actually have to do to produce a Windows installer and a signed Android
+APK." Every finding below was confirmed by reading the real repository
+(four parallel read-only research passes covering desktop/, backend/,
+android/, and a repo-wide grep sweep for dev-only assumptions), not by
+inferring from documentation or from the fact that the app works in
+development.
+
+## Documentation reviewed
+
+All of `docs/00_Project_Overview.md`, `02_Architecture.md`,
+`03_Tech_Stack.md`, `05_API_Design.md`, `06_Coding_Standards.md`,
+`08_Architecture_Decisions.md`, `09_Networking.md`, `10_Security.md`,
+`11_File_Transfer.md` §1–3, `12_Packaging_Deployment.md`,
+`13_Database_Design.md`, `14_Testing_Plan.md`, this file's own T8 and P36
+entries, `CLAUDE.md`, and `README.md`. No conflicts found between them on
+packaging matters — `12_Packaging_Deployment.md` explicitly leaves the
+backend-bundling tool and the exact Windows data-directory layout open,
+and `14_Testing_Plan.md`/§6 already correctly lists packaging as the one
+outstanding item blocking Version 1 completion.
+
+## Desktop findings (`desktop/`)
+
+- `desktop/package.json`: `name: relay-desktop`, `version: 0.1.0`, `main:
+  src/main/main.js`, one script (`start: electron .`), `devDependencies`
+  has only `electron ^43.2.0` (resolved `43.2.0`), `dependencies` has only
+  `qrcode`. **No `build` key, no electron-builder/electron-forge
+  dependency, no `engines` field, no `.nvmrc` anywhere in the repo.**
+  There is currently no packaging tool installed at all.
+- `desktop/src/main/backend-manager.js` **already has a packaged-mode
+  branch that anticipates the eventual bundling decision**:
+  `resolveCommand()` checks `app.isPackaged` and, if true, spawns
+  `path.join(process.resourcesPath, "backend", "relay-backend.exe")` with
+  `env: { ...process.env, RELAY_DATA_DIR: app.getPath("userData") }` — a
+  single self-contained executable at a fixed `resources/backend/` path.
+  Its own comment states this assumption explicitly and says only that one
+  path needs to change once a bundler is chosen. **Nothing currently
+  builds `relay-backend.exe`** — this branch is dead code until P38 lands.
+- Dev-mode branch: `backendDir = path.join(__dirname, "..", "..", "..",
+  "backend")` (reaches out of `desktop/src/main/` into the sibling
+  `backend/` source tree — would not exist in a packaged app, correctly
+  gated behind `!app.isPackaged`) and `python = path.join(backendDir,
+  ".venv", "Scripts", "python.exe")` — a **hardcoded Windows venv path
+  with no fallback to a system Python or `python`/`py` on `PATH`**. This is
+  fine for dev (matches `README.md`'s own `python -m venv .venv` setup
+  instructions) but confirms the backend cannot run at all today without
+  that exact venv existing at that exact relative path.
+- Backend health/lifecycle: `healthCheck()` polls `GET /health` on
+  `http://127.0.0.1:<port>/api/v1/health`; `start()` first probes once to
+  detect an already-running dev backend (`externallyManaged`) before
+  spawning; shutdown sends a normal kill, waits 5s, escalates to
+  `SIGKILL` after another 5s; crash recovery retries up to 3 times. This
+  logic is bundling-tool-agnostic and needs no changes for packaging.
+- `desktop/src/main/main.js:11`: `const BACKEND_PORT = 8000;` is a
+  **hardcoded literal, independently duplicating `backend/app/core/
+  config.py`'s `PORT` default** rather than sharing one source of truth.
+  Functionally consistent today (Electron always passes `--port 8000`
+  explicitly), but fragile — a future port conflict/change requires
+  editing two files that don't reference each other.
+- CSP (`desktop/src/renderer/index.html`, full directive line): `default-
+  src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;
+  connect-src http://127.0.0.1:*`. No `unsafe-inline` anywhere — already
+  production-appropriate, no packaging-driven change needed.
+- Icons: `desktop/assets/icons/icon.ico` (7-frame multi-resolution ICO)
+  and `tray.png` (256px) are the only files under `desktop/assets/`, both
+  the P36-regenerated assets. `main.js` and `tray.js` reference them by
+  the same fixed relative path used today — **confirmed a packaged build
+  will pick up the current, correct P36 geometry**, not a stale icon,
+  since nothing overrides these paths conditionally.
+- No Node version is pinned anywhere for the desktop app or the repo as a
+  whole (no `.nvmrc`, no `engines` field) — `README.md`'s stated
+  requirement ("Node.js >= 22.11.0") is documentation-only, not enforced.
+
+## Backend findings (`backend/`)
+
+- Entry point: `backend/app/main.py` is a pure ASGI module — **no
+  `if __name__ == "__main__"` block, no `run.py`**. It is only ever started
+  by invoking Uvicorn externally (`python -m uvicorn app.main:app --host
+  0.0.0.0 --port <port>`, from `backend-manager.js`'s dev-mode branch).
+  Any bundling approach must produce an executable that performs this same
+  invocation itself (e.g. a small `__main__`/entry-point wrapper calling
+  `uvicorn.run(...)`), since nothing in `backend/app/` currently does.
+- `backend/app/core/config.py`'s `Settings` class is the single source of
+  runtime configuration, loaded from `.env` via `pydantic-settings`
+  (`env_file=".env"`, `extra="ignore"`). Relevant fields: `HOST = "0.0.0.0"`,
+  `PORT = 8000`, `DEBUG = True` (**defined but never read anywhere else in
+  the codebase — dead setting**), `DATABASE_URL`/`LOG_DIR` both resolve
+  under `RELAY_DATA_DIR` when that env var is set (the T8 fix), otherwise
+  fall back to paths relative to the process's current working directory.
+  No CORS middleware exists anywhere (not needed — Android's HTTP client
+  isn't a browser making cross-origin requests).
+- **Note:** `Settings.HOST`/`PORT` are defined but not actually what
+  determines the bind address today — Electron passes `--host 0.0.0.0
+  --port <port>` as explicit CLI args to Uvicorn, bypassing these fields
+  entirely. They are correct/consistent by coincidence, not by wiring.
+  Confirm this is still true if a bundled backend's launch command changes
+  in P38 (a PyInstaller-built exe with its own `__main__` entry point would
+  need to read `Settings.HOST`/`PORT` explicitly, or continue accepting
+  `--host`/`--port` CLI args as `backend-manager.js`'s packaged-mode branch
+  already assumes it will via `args: ["--port", ...]`).
+- Dependencies (`requirements.txt`/`requirements-dev.txt`, repo root):
+  **entirely unpinned** — `fastapi`, `uvicorn[standard]`, `sqlalchemy`,
+  `pydantic`, `pydantic-settings`, `ruff`, `pytest`, `httpx`, no version
+  specifiers at all. This was already flagged as an open item at T9 and
+  remains unresolved. Any bundling step will freeze whatever happens to
+  resolve at build time unless this is pinned first — a genuine
+  reproducibility risk (§11 below).
+- No Alembic — schema is created via `Base.metadata.create_all(bind=
+  engine)` in `app/database/init_db.py`, called from the `main.py`
+  lifespan on every startup. Fine for a from-scratch first run; there is
+  no migration path if a future schema change needs to alter an existing
+  user's already-populated `relay.db` — out of scope for packaging itself
+  but worth flagging as a pre-existing gap.
+- Logging: `app/core/logging_config.py` writes to `<LOG_DIR>/relay.log`
+  via a plain `FileHandler` (**no rotation**) plus a console
+  `StreamHandler`. A spot check of `pairing_service.py`'s logging calls
+  near token/secret generation confirmed only `device_identifier`/
+  `device_name`/`platform`/`device_id` are logged — actual secrets/tokens
+  are never passed to a logger call.
+- Shutdown: the `lifespan` shutdown block stops the discovery thread and
+  logs a shutdown message, but never calls `engine.dispose()` and there is
+  no `atexit` hook — SQLAlchemy connection cleanup relies entirely on
+  per-request `finally: db.close()`. Not a packaging blocker (T7's crash-
+  reconciliation already handles an unclean shutdown), but worth noting
+  for a future hardening pass.
+- No hardcoded developer-machine paths anywhere under `backend/app/`. No
+  `.python-version`/`pyproject.toml` — the "Python 3.13+" requirement
+  (`docs/03_Tech_Stack.md`) is documentation-only, not enforced in code.
+  No static/template file serving (pure JSON API) — nothing extra to bundle
+  as "resources" beyond the Python dependency closure itself.
+- No debug-gated or mock/test-only endpoints exist in `app/api/` — the
+  unused `DEBUG` setting has no behavioral effect to worry about.
+
+## Android findings (`android/`)
+
+- `android/android/app/build.gradle`: `applicationId
+  "com.relay.mobile"`, `versionCode 1`, `versionName "1.0"`. `minSdk 26`,
+  `compileSdk`/`targetSdk 36` (from the root `build.gradle`'s
+  `rootProject.ext`).
+- **Release signing currently falls back to the debug keystore.** The
+  `signingConfigs` block defines only `debug` (pointing at the committed,
+  intentionally-non-secret `debug.keystore` with the RN-template default
+  credentials), and `buildTypes.release` sets `signingConfig
+  signingConfigs.debug` with the stock RN-template comment "Caution! In
+  production, you need to generate your own keystore file." This matches
+  `docs/14_Testing_Plan.md` T8's already-known open item — confirmed still
+  true, unchanged. No release keystore exists anywhere in the repo (none
+  was generated or requested during this audit, per P37's explicit
+  boundary).
+- `minifyEnabled` is `false` on release (`enableProguardInReleaseBuilds =
+  false` in `gradle.properties`); `proguard-rules.pro` exists but is
+  boilerplate-only (no custom keep rules) and is currently inert.
+- **Confirmed packaging blocker, not merely a theoretical risk:**
+  `AndroidManifest.xml:22` sets `android:usesCleartextTraffic=
+  "${usesCleartextTraffic}"` — a Gradle manifest placeholder. No
+  `manifestPlaceholders` assignment for this key exists anywhere in
+  `android/android/app/build.gradle`, `gradle.properties`, or any other
+  project file. Tracing it further: `@react-native/gradle-plugin`'s own
+  `AgpConfiguratorUtils.kt` (in `android/node_modules/`) is what actually
+  supplies the value, per build type — `debug → "true"`, `release →
+  "false"` (confirmed by reading that file directly). **Relay's entire
+  networking model is plain HTTP over an untrusted-by-Android-default LAN
+  connection (`docs/10_Security.md` §12, an already-accepted V1 trade-
+  off)** — a release build's default `usesCleartextTraffic="false"` means
+  Android's built-in Network Security Config will block every HTTP request
+  the app makes to the desktop backend, with no code-level error to debug
+  from (the OS refuses the connection before it leaves the device). This
+  has never surfaced in any of P1–P36's live-device testing because every
+  physical-device verification so far used a **debug** build. **This must
+  be fixed in P40**, either by explicitly setting
+  `manifestPlaceholders["usesCleartextTraffic"] = "true"` for the release
+  build type too (simplest, matches the already-accepted "HTTP over
+  trusted LAN" security posture) or by adding a
+  `network_security_config.xml` scoping cleartext exceptions to private/
+  local network ranges (more defense-in-depth, more moving parts) — see
+  Recommended Architecture below.
+- No hardcoded LAN IPs, `localhost`, or `10.0.2.2` in `android/src/` —
+  the two hits found (`api/config.ts:13`, `pairing/qrPayload.ts:48`) are
+  both JSDoc example comments; the real `baseUrl` is only ever set at
+  runtime from pairing/QR data. Clean.
+- No `console.error`/`console.log` calls anywhere in `android/src/`; the
+  9 remaining `console.warn` calls all wrap already-handled, non-fatal
+  paths, consistent with the P31.1 convention. `[QR-DEBUG]` is fully gone
+  (only a historical comment remains in a test file). No `__DEV__`-gated
+  behavior exists anywhere in `android/src/` — nothing needs to change
+  between a debug and release JS bundle.
+- No Flipper dependency, no `react-native-config`. `app.json` is minimal
+  (`name`/`displayName` only).
+- Icon assets: all five mipmap densities × `ic_launcher.png`/
+  `ic_launcher_round.png` (10 files) plus the `mipmap-anydpi-v26` adaptive-
+  icon XML wrappers are present and current (filesystem timestamps and the
+  last commit touching them are consistent with the P36 regeneration) —
+  **confirmed a release build will use the correct, current icon.**
+
+## Development-only assumptions (repo-wide sweep)
+
+Full classification detail lives in the research pass; the items that
+actually matter for packaging:
+
+- **`New_Issues.txt` (repo root, ~22KB) is tracked in git** — a dev
+  scratch/issue-tracking text file with no `.gitignore` rule covering it,
+  apparently added before any ignore pattern would have caught it. Every
+  other dev artifact checked (`relay.db`, `backend/relay.db`, all
+  `backend/backend-live*.log`, `logs/`, `desktop/desktop-launch.log`,
+  `desktop/electron.log`, `android/metro.log`, `scratch_test_files/`) is
+  correctly untracked/gitignored. `New_Issues.txt` is the one exception —
+  not a packaging blocker, but repo hygiene worth cleaning up before a
+  release tag.
+- `backend/app/core/config.py`'s `DEBUG: bool = True` field (see Backend
+  findings above) is unused but still a smell for a production audit —
+  worth removing or wiring to something meaningful, and defaulting `False`
+  if kept, before a release build.
+- `desktop/src/main/main.js`'s hardcoded `BACKEND_PORT = 8000` (see
+  Desktop findings) duplicates `config.py`'s default with no shared
+  source of truth.
+- `backend/.env` exists locally, is correctly gitignored and untracked;
+  its contents were not inspected (sandbox restricted direct access this
+  session) but its variable set is expected to mirror the tracked,
+  non-secret `backend/.env.example` (`HOST`, `PORT`, `DEBUG`,
+  `DATABASE_URL`, `LOG_LEVEL`, `LOG_DIR`, etc.) — no evidence of any
+  embedded secret in either file.
+- No hardcoded machine-specific absolute paths, no embedded real secrets/
+  tokens/credentials, and no CORS/debug backdoor endpoints were found
+  anywhere in `backend/`, `desktop/src/`, or `android/src/`.
+
+## Filesystem & data findings
+
+- `relay.db` currently lives at `backend/relay.db` in a dev checkout
+  (relative `sqlite:///./relay.db`, cwd-dependent) — this is **already
+  superseded for a packaged build** by the T8 `RELAY_DATA_DIR` mechanism:
+  `backend-manager.js` sets `RELAY_DATA_DIR` to Electron's
+  `app.getPath("userData")` only `if (app.isPackaged)`, and
+  `config.py`'s `_default_database_url()`/`_default_log_dir()` both
+  resolve under it when set. **No further filesystem-path change is
+  required for P38/P39** — this was already solved ahead of time at T8,
+  confirmed still correctly wired.
+- The database is single-row/single-install by design (`docs/13_Database_
+  Design.md` §2) — inherently "per-user" once it lives under
+  `app.getPath("userData")`, which is itself already a per-Windows-user
+  directory (`%APPDATA%\<app>` / `%LOCALAPPDATA%\<app>` depending on
+  Electron's resolution). No separate per-user database concern exists
+  beyond what `userData` already provides.
+- The installer should never need to write to `Program Files` for user
+  data — application binaries (wherever `electron-builder`/NSIS installs
+  them) and user data (`userData`, already separated by the T8 fix) are
+  already correctly split; this only needs to hold once an actual
+  installer exists.
+- Upgrade/uninstall behavior cannot be validated — no installer exists
+  yet to exercise. Because `RELAY_DATA_DIR` already points outside the
+  install directory, the natural expectation is that upgrading in place
+  preserves `relay.db`/logs and uninstalling does not delete them
+  (standard NSIS default: uninstall removes the install directory, not
+  `userData`) — this should be explicitly verified once P39 produces a
+  real installer, not assumed.
+- Shared files themselves are always referenced by path, never copied
+  into the database or a Relay-owned directory (`docs/02_Architecture.md`
+  §5) — nothing about packaging changes this.
+
+## Networking & firewall findings
+
+- FastAPI/Uvicorn binds `0.0.0.0` (LAN-reachable), confirmed both in
+  `config.py`'s default and in the actual `--host 0.0.0.0` CLI arg
+  `backend-manager.js` passes. UDP discovery broadcasts on
+  `Settings.DISCOVERY_PORT = 40890` (`config.py`), one-directional (no
+  listening socket for a reply — `08_Architecture_Decisions.md` ADR-010).
+- **Two ports need a Windows Firewall allow rule the first time a
+  packaged build runs:** the API's TCP port (8000 by default) and the UDP
+  discovery port (40890). Per `docs/09_Networking.md` §10, Relay "must
+  never modify firewall settings automatically" — so the correct,
+  least-invasive approach is to **let Windows' own first-run "Windows
+  Defender Firewall has blocked some features of this app" prompt handle
+  it** (the standard behavior for any inbound-listening Win32/packaged
+  app) rather than have the installer or app code touch firewall rules
+  itself. This requires no new code — it is a consequence of how Windows
+  already treats any newly-installed app that opens a listening socket,
+  and matches the "no firewall automation" rule already set. The one
+  concrete packaging implication: **NSIS should not suppress or need to
+  work around this prompt** — first-launch UX should expect it and could
+  optionally mention it in a first-run message (a UI nicety, not a
+  packaging requirement).
+- Without that firewall allow, Android could discover a broadcast but
+  fail to reach the API port (or vice versa depending on which rule the
+  user allows/denies) — worth calling out explicitly in the P41 validation
+  matrix (already included below).
+- No `adb reverse` or emulator-only networking assumption exists anywhere
+  in `android/src/` — discovery/pairing already work over real Wi-Fi/
+  hotspot in every physical-device test done through P36, so nothing
+  about Android's networking code depends on a dev-only path.
+
+## Security findings (distribution-focused only)
+
+- No bundled secrets, no embedded API keys/credentials anywhere in the
+  three components (confirmed by the repo-wide sweep).
+- Session tokens/device secrets are stored hashed server-side
+  (`device_secret_hash`, `token_hash`) and only ever held in plaintext
+  transiently — unaffected by packaging.
+- The Android release-signing gap (debug keystore reused for release, see
+  Android findings) is a real distribution concern: a debug-signed APK
+  cannot be installed by most manufacturers/users' security settings
+  without an explicit "unknown sources" override, and Google Play (if
+  ever targeted) rejects debug-signed release builds outright. Confirmed
+  present; not fixed here (explicitly deferred to P40 per this milestone's
+  boundary — no keystore was generated or requested).
+- The `usesCleartextTraffic` release-build gap (see Android findings) is
+  simultaneously a **security-posture question and a packaging blocker**:
+  fixing it by allowing cleartext in release (matching V1's already-
+  accepted "HTTP over trusted LAN" design, `docs/10_Security.md` §12) is
+  consistent with existing scope; a `network_security_config.xml` scoped
+  to private IP ranges would be more defense-in-depth but is a scope
+  expansion beyond what V1's security model currently requires. Flagged
+  as a P40 decision point, not resolved here.
+- No unauthenticated route was newly discovered — the existing loopback-
+  vs-session-token model (`CLAUDE.md`'s "Current Architecture" section) is
+  unaffected by packaging and was not re-audited beyond confirming no new
+  routes exist.
+- No packaged-resource exposure risk found: the backend serves no static
+  files/templates, so there is no source/resource directory that could be
+  accidentally shipped inside a web-servable path.
+
+## Versioning findings
+
+Confirmed **no single authoritative version source exists** — three
+independently maintained values, already drifted at T9's own review and
+still drifted now:
+
+| Component | Value | Source |
+|---|---|---|
+| Backend | `0.1.0` | `backend/app/core/config.py`'s `APP_VERSION` |
+| Desktop | `0.1.0` | `desktop/package.json`'s `version` |
+| Android | `versionName "1.0"`, `versionCode 1` | `android/android/app/build.gradle` |
+
+Backend and Desktop happen to already agree (`0.1.0`); Android uses an
+unrelated scheme (`1.0`/`1`) with no connection to the other two. One git
+tag exists (`backend-v1-complete`), backend-only, not a whole-repo release
+tag. **Recommendation:** adopt a single semantic version for the "Relay
+V1.0.0" release, set identically in all three places at the same commit
+(`backend/app/core/config.py`'s `APP_VERSION`, `desktop/package.json`'s
+`version`, and `android/android/app/build.gradle`'s `versionName`, with
+`versionCode` incremented independently per Android's own required
+integer-monotonic scheme — `versionCode` and `versionName` are allowed to
+diverge in format by Android's own convention, this is not a discrepancy
+to "fix"). No existing mechanism ties these together; this would be a new,
+lightweight convention (e.g. a documented "bump all three before tagging a
+release" step), not a build-time syncing tool — proportionate to a
+single-developer, infrequent-release project.
+
+## Build-machine prerequisites
+
+(Required on the developer/release machine only — not shipped to end
+users.)
+
+- Node.js ≥ 22.11.0 and npm (desktop + Android tooling) — stated in
+  `README.md`, not version-locked anywhere.
+- Python 3.13+ with `venv`/`pip` (backend dev + the future PyInstaller
+  build step) — stated in `README.md`/docs, not version-locked in code.
+- Android Studio + Android SDK, JDK 17, CMake 4.1.2 (via SDK Manager),
+  Windows Long Paths enabled (`README.md`, `android/README.md`,
+  documented in this file's own "Android Build — CMake/Ninja Path-Length
+  Failure" entry) — required to produce a release APK.
+- Gradle/AGP: versions resolved via the RN template's own Gradle wrapper;
+  `buildToolsVersion "36.0.0"`, `compileSdk`/`targetSdk 36`,
+  `ndkVersion "27.1.12297006"`, `kotlinVersion "2.1.20"` — all pinned in
+  `android/android/build.gradle`, so the native toolchain itself is
+  already reasonably reproducible.
+- A release keystore + its password (not yet generated — P40) once
+  release signing is added; must be kept off the release machine's git
+  history (standard: environment variables or a local, gitignored
+  `keystore.properties`, following the same "committed template, real
+  values gitignored" pattern already used for `backend/.env`/`.env.example`).
+- Whatever the P38 bundling tool needs (PyInstaller itself, installed via
+  `requirements-dev.txt` once added) and whatever P39's packaging tool
+  needs (electron-builder, installed via `desktop/package.json`
+  `devDependencies` once added) — neither exists yet.
+- No Rust/native build requirement exists anywhere in the repo.
+- No Visual C++/Build Tools requirement was found referenced by any
+  existing script or doc — PyInstaller for a pure-Python dependency set
+  (FastAPI/Uvicorn/SQLAlchemy/Pydantic, none of which need a C compiler at
+  build time on Windows with prebuilt wheels) should not introduce one;
+  worth re-confirming once P38 is actually attempted.
+
+## End-user prerequisites
+
+(Required on the machine/phone actually running the packaged app —
+minimizing this list is the entire point of packaging.)
+
+- **Windows:** none beyond Windows 10/11 itself, once P38/P39 land — no
+  Python, no Node.js, no repository checkout. The one-time Windows
+  Firewall allow-prompt (see Networking findings) is a user *action*, not
+  a *prerequisite* to install.
+- **Android:** none beyond Android ≥ 8.0 (`minSdk 26`) — no dev tooling,
+  no Metro, no `adb`. The user must grant the app's requested runtime
+  permissions (notifications, foreground service) at first launch, as
+  already implemented.
+- Neither platform requires internet access at any point (`docs/00_
+  Project_Overview.md` §1, unaffected by packaging).
+
+## Packaging risks / blockers
+
+Ranked by how directly each blocks a working packaged release:
+
+1. **Android release cleartext traffic is blocked by default**
+   (`usesCleartextTraffic` resolves to `"false"` on `release` via the RN
+   Gradle plugin, with no override) — confirmed root cause, not yet fixed.
+   Silently breaks 100% of networking in a release APK. **Blocker for
+   P40.**
+2. **Android release APK is unsigned in any real sense** (falls back to
+   the debug keystore) — confirmed, not yet fixed. **Blocker for P40.**
+3. **No backend bundling tool is chosen or implemented** — `resources/
+   backend/relay-backend.exe` is referenced by Electron but nothing
+   produces it. **Blocker for P38** (see Recommended Architecture).
+4. **No Electron packaging tool is chosen or implemented** — no
+   installer can be produced today. **Blocker for P39.**
+5. **Unpinned backend dependencies** — a reproducibility risk for
+   whichever bundling tool P38 picks (an unpinned build today could
+   resolve different transitive versions tomorrow). Should be pinned
+   (`pip freeze` or explicit `==` pins) as part of P38, before the first
+   real bundled build, not after.
+6. Everything else found (unused `DEBUG` flag, duplicated `BACKEND_PORT`
+   literal, tracked `New_Issues.txt`, no rotation on `relay.log`, no
+   `engine.dispose()` on shutdown) is real but **not blocking** — cleanup
+   items, correctly scoped to land inside P38/P39 rather than justifying
+   a new interstitial milestone.
+
+## Recommended architecture
+
+**Backend bundling: PyInstaller, `--onedir` (not `--onefile`).**
+Rationale: `backend-manager.js`'s packaged-mode branch already hardcodes
+a single fixed path, `resources/backend/relay-backend.exe` — PyInstaller
+is the most widely adopted tool for exactly this (a pure-Python FastAPI/
+Uvicorn/SQLAlchemy dependency closure, no exotic C extensions), satisfying
+`docs/12_Packaging_Deployment.md` §13's "prefer widely adopted packaging
+solutions" rule. `--onedir` (an executable sitting alongside its
+dependency files in one folder) is preferred over `--onefile` because
+`--onefile` re-extracts its entire payload to a temp directory on every
+launch, directly conflicting with `docs/00_Project_Overview.md` §8's
+"minimal startup time" requirement and with `docs/12_Packaging_
+Deployment.md` §6's automatic-startup expectation; `--onedir` still
+produces `relay-backend.exe` at a fixed sub-path, so `backend-manager.js`'s
+existing `path.join(process.resourcesPath, "backend", "relay-backend.exe")`
+needs no change beyond electron-builder actually copying that whole
+onedir output folder into `resources/backend/` (electron-builder's
+`extraResources` config, see below). SQLite needs no special handling —
+it's a pure-Python-accessible file dependency of SQLAlchemy, not a native
+binary PyInstaller has to hunt for. Runtime resources (none exist today —
+no static/template files) need no special `--add-data` handling.
+Errors/logs surface exactly as they do today: stdout/stderr piped through
+`backend-manager.js`'s existing `logger.backend(...)` plumbing, unchanged.
+**Trade-off:** PyInstaller's dependency-collection can silently miss a
+dynamically-imported module (a known PyInstaller class of bug) — the
+existing 340-test backend suite run against the actual built exe (not just
+against source) should be part of P38's own validation, not assumed to
+pass by extension. **Risk:** first PyInstaller build of this exact
+dependency set is unverified; budget time in P38 for exactly this kind of
+"missing hidden import" debugging cycle.
+
+**Electron packaging: `electron-builder`, NSIS target, per-user (non-admin)
+install.** Rationale: the most widely adopted Electron packager (matching
+the same "widely adopted" preference), with built-in `extraResources`
+support to copy PyInstaller's onedir output into `resources/backend/` at
+build time — directly satisfying `backend-manager.js`'s existing path
+assumption with no application-code change. NSIS per-user install (not
+per-machine) avoids requiring admin rights, keeps install path out of
+`Program Files` (simplifying the already-solved `RELAY_DATA_DIR` write-
+access problem further), and matches `docs/00_Project_Overview.md`'s
+"minimal user configuration" NFR. `electron-builder`'s `icon` config
+should point at the existing, P36-current `desktop/assets/icons/icon.ico`
+— no new asset needed. **Trade-off:** no code-signing certificate exists
+or is in scope for V1 (`docs/12_Packaging_Deployment.md` §12 explicitly
+defers code signing) — an unsigned installer will trigger a Windows
+SmartScreen warning on first run; this is an accepted V1 trade-off per
+existing docs, not a P37 finding to "fix."
+
+**Android release signing:** generate a dedicated release keystore
+outside of P37 (deferred to P40 per this milestone's explicit boundary),
+wire it into `android/android/app/build.gradle`'s `signingConfigs.release`
+via `gradle.properties`/environment-variable indirection (the standard RN
+pattern — a gitignored `keystore.properties` read by `build.gradle`,
+mirroring the existing "tracked template, gitignored real values" pattern
+`backend/.env.example`/`backend/.env` already establishes) — never commit
+the keystore or its password.
+
+## Proposed P38+ milestone sequence
+
+The originally-sketched four-milestone sequence holds; findings didn't
+reveal a need to split or merge any of them, only to specify what each
+must include:
+
+- **P38 — Backend Production Bundle.** Pin `requirements.txt`/
+  `requirements-dev.txt`. Add a PyInstaller spec (`--onedir`) with a small
+  `__main__`-style entry point that invokes `uvicorn.run(...)` (replacing
+  today's `python -m uvicorn ...` CLI invocation, since a bundled exe
+  needs its own entry point). Verify `RELAY_DATA_DIR`/`DATABASE_URL`/
+  `LOG_DIR` resolution is unaffected. Run the full backend test suite
+  against the *built* executable, not just against source.
+- **P39 — Windows Desktop Installer.** Add `electron-builder` +
+  `extraResources` wiring the P38 output into `resources/backend/`.
+  Resolve the `BACKEND_PORT`/`config.py` duplication (share one source or
+  make one derive from the other) while this file is already in scope.
+  Remove/resolve the unused `DEBUG` config field. Produce a first real
+  NSIS installer and validate install/first-launch/uninstall on a clean
+  Windows VM (not the dev machine).
+- **P40 — Android Release APK.** Fix the `usesCleartextTraffic` release
+  gap (decide: blanket `"true"` vs. a scoped `network_security_config.xml`
+  — see Security findings). Generate and wire a real release keystore
+  (never committed). Confirm `minifyEnabled`/ProGuard posture is still
+  intentional (currently off) or turn it on deliberately with real keep
+  rules if enabled. Produce and install a real signed release APK on a
+  clean device.
+- **P41 — Packaged End-to-End Release Validation.** The full matrix below,
+  executed against the real packaged Windows installer and the real
+  signed APK — not against dev builds.
+
+No fifth milestone is justified by this audit's findings — the risks
+found (dependency pinning, the `BACKEND_PORT` duplication, the unused
+`DEBUG` field, `New_Issues.txt`) are each small enough to fold into
+P38/P39 rather than warranting their own milestone, matching this
+project's own stated preference for small, focused milestones
+(`CLAUDE.md` "Project Rules" #3, #6).
+
+## Release validation plan
+
+A proposed matrix for P41 (not executed during P37 — no packaged artifact
+exists yet to validate against):
+
+**Windows:** clean install (on a machine that has never had Relay, Python,
+or Node installed) → first launch → backend startup (confirm `relay-
+backend.exe` under `resources/backend/` actually starts) → Windows
+Firewall first-run prompt appears and, once allowed, discovery/pairing
+work → database creation under the correct per-user `userData` path →
+upgrade over an existing install preserves `relay.db`/logs → tray →
+pairing → discovery → share file → share folder → Android→Desktop
+transfer → Desktop→Android transfer → cancellation → a deliberately
+induced failure (e.g. disk full, source file deleted mid-transfer) → app
+restart (confirm T7's crash-reconciliation still fires against the
+bundled exe) → uninstall (confirm `userData`/`relay.db` survive, per NSIS
+default) → reinstall.
+
+**Android:** clean release APK install (side-loaded, since no store
+listing exists) → first launch → runtime permission prompts (notifications,
+foreground service) → discovery → QR pairing → file transfer → folder
+transfer → notifications (tap-to-open) → foreground service survives
+backgrounding → app restart → **explicitly confirm no dev menu/Metro
+error overlay appears and no `__DEV__`-gated behavior is reachable** →
+confirm cleartext HTTP actually works post-P40-fix (this is the direct
+regression test for the blocker found in this audit).
+
+**Cross-platform:** a genuinely clean Windows machine + a genuinely clean
+Android install, same Wi-Fi and separately a phone-hotspot pairing,
+bidirectional transfer, a large file (multi-GB, exercising the streaming
+path under real conditions rather than a synthetic small file), Unicode
+filenames, long filenames, a zero-byte file, and the already-documented
+"source file deleted after share" behavior (P15) re-verified against the
+packaged build.
+
+## Automated checks performed during this audit
+
+Read-only only, as required by P37's boundary: file reads, `grep`/glob
+searches, `git ls-files`/`git check-ignore -v`/`git tag`/`git log` calls,
+and one direct read of a `node_modules`-vendored Kotlin source file
+(`@react-native/gradle-plugin`'s `AgpConfiguratorUtils.kt`) to trace the
+`usesCleartextTraffic` placeholder to its actual source. No build was
+run, no app was launched, no test suite was executed, no file was
+modified. Nothing was left running.
+
+## Documentation changes
+
+This entry (`docs/15_QA_NOTEBOOK.md`, Milestone P37). `CLAUDE.md` was
+updated with a new "Production Readiness Audit (P37)" convention note
+(the recommended bundling/packaging tools and the confirmed blockers are
+durable guidance for whoever starts P38) and its "Next Planned Milestone"
+section was refined from a single generic "Packaging & Deployment" note
+into the concrete P38–P41 sequence above. `README.md` was **not** changed
+— its "Status"/"Known Limitations"/"Milestones" sections already
+correctly describe packaging as not-yet-started with no installer/signed
+APK, which remains accurate; nothing in this audit's findings contradicts
+what `README.md` already says.
+
+## Limitations of this audit
+
+- No build was attempted — the PyInstaller/electron-builder
+  recommendations are based on fit-for-purpose analysis of the actual
+  repository (dependency shapes, existing code assumptions like the
+  `relay-backend.exe` path), not on a working prototype. P38 may still
+  surface tool-specific problems (e.g. a missing PyInstaller hidden
+  import) this audit cannot predict.
+- `backend/.env`'s actual contents were not inspected (sandbox
+  restriction this session) — inferred to be non-secret and structurally
+  consistent with `.env.example` based on the config schema, not directly
+  confirmed byte-for-byte.
+- No second physical Windows machine or second Android device was
+  available to test a "clean machine" scenario — the "no Python/Node/SDK
+  installed" claims about end-user prerequisites are derived from reading
+  the code's actual runtime dependencies, not from an empirical clean-VM
+  run.
+- Firewall behavior was reasoned from documented Windows behavior for a
+  newly-listening app, not observed live against a packaged executable
+  (none exists yet to observe).
+- This audit did not re-verify every one of P1–P36's prior findings from
+  scratch — it built on top of them as given, per this file's own stated
+  purpose of recording durable lessons rather than re-litigating settled
+  ones. If a prior milestone's finding was itself stale, that staleness
+  would not have been caught here.
+
+P37 ends here. P38 was not started.
+
+---
+
+# Milestone P38 — Backend Production Bundle
+
+**Scope:** produce and verify a self-contained Windows production backend
+bundle that runs without Python, pip, a virtualenv, or the Relay source
+repository present. Per P37's proposed sequence and this milestone's
+explicit boundary: no Windows installer (P39), no Android release signing
+(P40), no packaged end-to-end release validation (P41), no repository
+cleanup (post-P41). All work below stayed inside that boundary.
+
+## Baseline
+
+Confirmed via `git status`/`git diff` before any change: `CLAUDE.md` and
+`docs/15_QA_NOTEBOOK.md` already carried P37's documentation-only edits,
+uncommitted. Nothing else in the working tree was modified. `backend/app`
+had 340+ passing tests (`343 passed, 2 skipped` at both the start and end
+of this milestone — see Automated checks below), and `backend/.venv`
+already existed as the dev environment.
+
+## Investigation — re-verifying P37's load-bearing assumptions
+
+Re-read `docs/12_Packaging_Deployment.md`, this file's own P37 entry,
+`docs/11_File_Transfer.md`, `docs/13_Database_Design.md`, `docs/
+14_Testing_Plan.md`, `CLAUDE.md`, and `README.md`, then inspected the real
+repository rather than trusting the audit's prose. Everything P37 found
+still held, plus two things worth stating precisely because they shaped
+the implementation:
+
+- **`desktop/src/main/backend-manager.js`'s packaged-mode `resolveCommand()`
+  passes `args: ["--port", String(this.port)]` and *nothing else* — no
+  `--host`.** The dev-mode branch passes both `--host 0.0.0.0` and
+  `--port`. A packaged executable's own entry point therefore cannot rely
+  on an inbound `--host` argument; it must default the bind address itself
+  to match `Settings.HOST`'s existing `"0.0.0.0"` default, or a packaged
+  backend would silently bind to Uvicorn's own default (`127.0.0.1`) and
+  become unreachable from Android over the LAN. This directly shaped
+  `backend/run.py`'s argument defaults (see below).
+- **`backend/app/main.py` genuinely has no `__main__` block**, confirmed
+  by reading it directly — any bundling approach needs a real Python entry
+  point PyInstaller can build from, exactly as P37 said.
+- `RELAY_DATA_DIR` → `DATABASE_URL`/`LOG_DIR` resolution
+  (`backend/app/core/config.py`'s `_default_database_url`/
+  `_default_log_dir`, the T8 mechanism) was re-verified by reading the
+  code and confirmed correct — no changes were needed here (see
+  Data-directory verification below).
+- `backend/app/utils/filesystem.py` and the rest of `backend/app/` were
+  grepped for `__file__`-relative resource access, hardcoded cwd
+  assumptions, or other patterns that break once code runs from inside a
+  PyInstaller `_internal` bundle instead of a source checkout. None found
+  — the backend has no static/template files and no resource access
+  outside of user-supplied absolute paths and `Path.home()`.
+- `desktop/src/main/main.js` still hardcodes `BACKEND_PORT = 8000`, and
+  `backend/app/core/config.py` still carries the unused `DEBUG` field —
+  both already flagged by P37 as "fold into P38/P39 rather than a new
+  milestone." Neither was touched: this milestone did not happen to be
+  already modifying either file for a functional reason, so per Rule 3
+  ("never add features outside the current milestone") both are left for
+  whichever of P39/P40 next touches those exact files.
+
+## Dependency audit
+
+`requirements.txt` (`fastapi`, `uvicorn[standard]`, `sqlalchemy`,
+`pydantic`, `pydantic-settings`) and `requirements-dev.txt` (adds `ruff`,
+`pytest`, `httpx`) were both still fully unpinned, as P37 found. Cross-
+referencing `pip freeze` against `backend/.venv` (the working, extensively
+live-tested dev environment) against an `import`/`from` grep across
+`backend/app/` and `backend/tests/` surfaced one finding P37's read-only
+audit could not have caught:
+
+**`backend/.venv` contains seven packages neither `requirements.txt`/
+`requirements-dev.txt` declare, nor anything in `backend/app/` or
+`backend/tests/` imports: `lameenc`, `lxml`, `Pillow`, `python-docx`,
+`python-pptx`, `reportlab`, `xlsxwriter`.** These are orphaned installs —
+plausibly left over from generating real sample files of assorted types
+for some earlier manual test session — not Relay dependencies. They were
+**not** added to any requirements file and were **not** bundled (PyInstaller
+only collects what's reachable from `run.py`'s own import graph, so their
+presence in the source `.venv` was harmless either way — see PyInstaller
+architecture below). `backend/.venv` itself was left untouched, per this
+milestone's "do not fix unrelated technical debt" boundary — only the
+requirements files and the isolated build environment were changed.
+
+Split into the three categories the milestone asked for, then pinned to
+the exact versions already proven by 343 passing tests:
+
+1. **Production runtime** (`requirements.txt`): `fastapi==0.141.1`,
+   `uvicorn[standard]==0.52.1`, `sqlalchemy==2.0.51`, `pydantic==2.13.4`,
+   `pydantic-settings==2.14.2`.
+2. **Development/test** (`requirements-dev.txt`, unchanged set):
+   `ruff==0.16.1`, `pytest==9.1.1`, `httpx==0.28.1`.
+3. **Build-only** (new `requirements-build.txt`, `-r requirements.txt` plus
+   `pyinstaller==6.22.0`) — never installed on an end-user machine, not
+   needed for ordinary development or testing, and deliberately kept out
+   of `requirements-dev.txt` so a normal `pip install -r
+   requirements-dev.txt` dev setup never pulls in PyInstaller.
+
+No dependency was upgraded beyond what a fresh `pip install` of the
+existing unpinned top-level names already resolved to — this is a pin of
+the status quo, not a version bump. One resolved transitive version did
+move (`starlette` came back `1.6.0` in the clean build venv vs. `1.3.1` in
+the older dev `.venv` — `fastapi==0.141.1` allows a `starlette` range, not
+an exact version, and neither requirements file pinned `starlette`
+directly). The full test suite was run against the clean venv specifically
+to catch a regression from this drift (see Automated checks) — none was
+found.
+
+## PyInstaller decision & architecture
+
+Followed P37's recommendation as the brief required (`--onedir`, not
+`--onefile`) and reused its full rationale — dead code in
+`backend-manager.js` already fixes the shape of the output
+(`resources/backend/relay-backend.exe`), and `--onefile`'s per-launch
+re-extraction would conflict with `docs/00_Project_Overview.md` §8's
+minimal-startup-time requirement. Two design decisions were made during
+implementation that P37 (read-only, no build attempted) could not have
+settled in advance:
+
+- **A dedicated entry point, `backend/run.py`**, since `app/main.py` has no
+  `__main__` block. It builds an `argparse` parser defaulting `--host`/
+  `--port` from `Settings.HOST`/`Settings.PORT` (see the `--host` finding
+  above), then calls `uvicorn.run(app, host=..., port=...)` — passing the
+  already-imported `app` object directly rather than the `"app.main:app"`
+  import-string form Uvicorn's CLI uses, since object-passing needs no
+  runtime string-based re-import (irrelevant for reload/multi-worker,
+  neither of which this app uses, but the more robust default under
+  PyInstaller). `configure_logging()` still runs exactly once, at
+  `app.main` import time, unchanged from today's behavior.
+- **A minimal spec file, `backend/relay-backend.spec`**, rather than a bare
+  `pyinstaller run.py` command, for one concrete reason found during the
+  build (not hypothesized in advance): SQLAlchemy resolves its SQLite
+  dialect via a runtime string import
+  (`sqlalchemy.dialects.registry`), which PyInstaller's static bytecode
+  analysis cannot follow — confirmed by consulting
+  `pyinstaller-hooks-contrib` (which `pyinstaller` pulls in automatically)
+  and finding it ships hooks for `uvicorn`
+  (`collect_submodules('uvicorn')`, covering Uvicorn's own dynamic
+  loop/protocol/lifespan module resolution) and `pydantic`, but **not**
+  `sqlalchemy`. The spec adds one explicit hidden-import:
+  `collect_submodules("sqlalchemy.dialects.sqlite")`. `console=True` is
+  also explicit and load-bearing, not a default left alone: PyInstaller's
+  windowed/GUI subsystem mode leaves `sys.stdout`/`sys.stderr` as `None`,
+  which would break this app's own `logging.StreamHandler()` console
+  handler (`app/core/logging_config.py`) outright. No visible console
+  window actually appears in the real desktop app regardless, because
+  Electron always spawns this executable with `windowsHide: true`
+  (`backend-manager.js`, unchanged).
+
+Built from an **isolated, from-scratch virtual environment** (created
+outside the repository, in the session scratchpad, from the same Python
+3.13.5 interpreter the tracked `backend/.venv` uses), holding only
+`requirements.txt`'s five pinned production packages plus `pyinstaller` —
+never built from the contaminated `backend/.venv` described in the
+dependency audit above. This was the deliberate, stronger interpretation
+of "smallest safe production dependency definition": rather than relying
+on PyInstaller's import-graph analysis to correctly exclude the seven
+orphaned packages from `backend/.venv`, the build environment simply never
+had them installed at all.
+
+`sqlite3` needed no special handling (it's a Python stdlib module,
+statically linked into the interpreter PyInstaller bundles, not a separate
+dependency) — matching P37's prediction.
+
+## Files changed
+
+- `requirements.txt`, `requirements-dev.txt` — pinned to exact tested
+  versions (see Dependency audit).
+- `requirements-build.txt` (new) — build-only dependency set.
+- `backend/run.py` (new) — PyInstaller entry point.
+- `backend/relay-backend.spec` (new) — PyInstaller build configuration.
+
+Nothing under `backend/app/`, `desktop/`, or `android/` was modified.
+`backend-manager.js` needed no compatibility change — see Electron
+compatibility check below.
+
+## Build process
+
+```
+pyinstaller relay-backend.spec
+```
+run from the isolated build venv described above, with cwd
+`backend/`. Output: `backend/dist/relay-backend/` (the onedir bundle) and
+`backend/build/relay-backend/` (intermediate artifacts, PyInstaller's
+`warn-*.txt`/`xref-*.html`), both already covered by the repository's
+existing generic `build/`/`dist/` `.gitignore` entries — confirmed via
+`git check-ignore -v` after the build, not assumed; no `.gitignore` change
+was needed (see Build artifact hygiene below).
+
+Build warnings, all benign and expected: `Hidden import "tzdata" not
+found`, `"pysqlite2" not found`, `"MySQLdb" not found`, `"psycopg2" not
+found`. The last three are SQLAlchemy's own hook speculatively checking for
+optional third-party DB driver packages Relay's SQLite-only backend never
+imports. `tzdata` came from a transitive dependency's own optional
+`zoneinfo` support; confirmed via a repo-wide grep that no code under
+`backend/app/` uses `zoneinfo`/`pytz`/`astimezone` — inert.
+
+## Output structure
+
+```
+backend/dist/relay-backend/
+├── relay-backend.exe          <- desktop/src/main/backend-manager.js's
+│                                  exact expected filename
+└── _internal/                 <- Python interpreter, stdlib, and the
+                                   pinned dependency closure (~36 MB total)
+```
+
+This is the exact shape `backend-manager.js`'s packaged-mode
+`resolveCommand()` already assumes at `resources/backend/relay-backend.exe`
+— confirmed structurally compatible (see Electron compatibility check),
+not merely assumed by naming convention.
+
+## Self-containment verification (tested against the built executable)
+
+Copied the entire `dist/relay-backend/` output into an isolated directory
+**with a space in its path** (`.../isolated app dir with spaces/
+relay-backend/`), then launched `relay-backend.exe` directly with:
+
+- `PATH` scrubbed to `C:\Windows\system32;C:\Windows;C:\Windows\
+  System32\Wbem` only — no Python, no `backend/.venv`, no repository path
+  of any kind reachable.
+- `RELAY_DATA_DIR` pointed at a **freshly created, Unicode-named**
+  directory (`.../Rëlay ünïcödé/`) that did not exist before the run.
+- `cwd` set to the executable's own directory, matching
+  `backend-manager.js`'s `cwd: path.dirname(exe)`.
+
+Result: the process started, logged its normal startup sequence
+(`app.main`: "Relay backend starting up.", discovery broadcaster started),
+and `GET /api/v1/health` returned `200` within 3 seconds. `relay.db` and
+`logs/relay.log` were confirmed created, by directly inspecting the
+filesystem, under the new Unicode-named `RELAY_DATA_DIR` — not the
+executable's own directory. This is the strongest isolation this sandboxed
+session could construct (see Limitations) but genuinely proves the
+executable does not fall back to any Python/venv/repository path when none
+is reachable.
+
+## Functional API verification (tested against the same running executable)
+
+Exercised the real API with disposable data (a scratch-directory shared
+file, a scratch-directory shared folder containing a nested subfolder,
+and a scratch upload-source file) — never the tracked dev database, never
+the real `backend/relay.db`:
+
+- `GET /health` — `200`, correct `version`.
+- `GET`/`PATCH /settings` — read the default settings row, updated
+  `device_display_name`, confirmed the change round-tripped.
+- `GET /devices` — empty list before pairing.
+- `POST /files`, `GET /files` — shared a disposable file, listed it back
+  correctly (`file_size`, `mime_type` both correct).
+- `POST /folders`, `GET /folders` — shared a disposable folder (one nested
+  subfolder, two files), correct `file_count`/`total_size`.
+- Full pairing handshake — `POST /pairing/start` → `POST /pairing/request`
+  → `POST /pairing/approve` → `GET /pairing/result/{token}` — produced a
+  real `device_id` and bearer `session_token`.
+- `POST /transfers/requests` (`direction: send`) against the shared file,
+  using the session token — transfer auto-accepted, `status: in_progress`.
+- `GET /transfers/{id}/download` — streamed the file's actual bytes;
+  byte-for-byte diffed against the disposable source file and confirmed
+  identical; transfer's status afterward correctly `completed` with
+  `bytes_transferred` matching the file size.
+- `POST /transfers/requests` (`direction: receive`) then
+  `POST /transfers/{id}/upload` with a raw disposable-file body — streamed
+  upload accepted, written to `app_settings.download_directory`, content
+  byte-for-byte identical to the source, transfer `completed`.
+- **One real mistake made and corrected during this pass, documented here
+  rather than silently fixed:** the isolated instance's default
+  `download_directory` had not been repointed away from its real
+  first-run default (`Path.home() / "Downloads"`, `AppSettingsService`) —
+  the first upload test therefore briefly wrote a disposable test file
+  (`p38_upload_test.txt`) into the actual `C:\Users\Saad\Downloads`
+  directory on the machine running this session. It was deleted
+  immediately upon discovery and the test was repeated after
+  `PATCH /settings` redirected `download_directory` to a scratch path.
+  No repository file, dev database, or other real user data was affected
+  — confirmed by `git status` before and after this milestone (identical
+  set of changed files). Documented as a process lesson: **any future
+  live-instance testing of the packaged backend must explicitly repoint
+  `download_directory` before exercising the upload/receive path,** not
+  only the database location.
+
+## Filesystem / restart verification
+
+Force-terminated the running isolated instance (`taskkill /F` — see
+Problems discovered below for why this, not a graceful signal, is the
+realistic Windows scenario), then relaunched it against the **same,
+already-populated** `RELAY_DATA_DIR`. Confirmed: `relay.db` reopened
+without error; every previously-shared file/folder, the paired device, and
+all three completed transfers were intact and returned correctly via
+`GET /devices`, `GET /files`, `GET /transfers`; the startup log showed the
+same clean startup sequence with no errors; `_reconcile_after_unclean_
+shutdown()` (T7's crash-reconciliation, `app/main.py`) ran with nothing to
+reconcile (every prior transfer had already reached a terminal `completed`
+state) — confirming it executes without error against the packaged
+executable, though this pass did not construct a genuinely interrupted
+`in_progress` transfer to reconcile (see Limitations).
+
+## Windows path testing
+
+Covered by the tests above, not as a separate pass: the isolated
+executable's own install directory contained a space
+(`isolated app dir with spaces`), its data directory used non-ASCII
+Unicode characters (`Rëlay ünïcödé`), a shared folder name contained a
+space (`a folder with spaces`), and the real first-run default
+(`C:\Users\Saad\Downloads`, a normal user-profile path) was exercised
+(briefly and accidentally, see above). All handled correctly.
+
+## Logging & error handling findings
+
+- Confirmed live: startup logs (console, captured identically to how
+  `backend-manager.js`'s `proc.stdout.on('data', ...)` would capture them)
+  and the file handler both work correctly from the packaged executable —
+  `<RELAY_DATA_DIR>/logs/relay.log` was created and populated with the
+  same formatted lines as the console. `console=True` in the spec (see
+  above) is what makes this possible at all.
+- No secrets observed in any log line during this session's pairing/
+  transfer testing (device secrets/session tokens/pairing tokens appeared
+  only in HTTP response bodies, never in a log call) — consistent with
+  P37's own spot check.
+- Process exit code was not separately fault-injected in this milestone
+  (no deliberate startup failure was constructed — e.g. a locked/
+  unwritable `RELAY_DATA_DIR`); the executable's normal exit (via
+  `taskkill`) is covered under Filesystem/restart verification above. Left
+  as a P41 validation-matrix item, consistent with P37's own plan, rather
+  than added here as new scope.
+
+## Networking findings
+
+`Uvicorn running on http://0.0.0.0:8321` (test port) confirmed in the
+startup log — the packaged executable binds `0.0.0.0`, not
+loopback-only, exactly matching `run.py`'s `--host` default (see above)
+and today's dev-mode behavior. Reachable at `127.0.0.1` for the local
+health check and all functional testing in this session. Windows Firewall
+prompting/allow-rules remain out of scope for P38, per this milestone's
+explicit boundary (§13) and P37's own finding that this needs no code —
+only a real installed app running for the first time exercises it, which
+requires P39.
+
+**One pre-existing, unaffected-by-packaging inconsistency observed live,
+not a P38 regression:** the pairing QR payload's `port` field
+(`PairingService.build_qr_payload`) reflects `Settings.PORT` (default
+`8000`), not the actual `--port` value the process was launched with. This
+session ran the packaged executable on port `8321` for isolation from any
+other process, and the QR payload still reported `8000`. This exactly
+matches what P37 already flagged ("`Settings.HOST`/`PORT` are defined but
+not actually what determines the bind address" — `desktop/src/main/
+main.js` always passes literal `--port 8000`, so in the real packaged app
+these two values can never actually diverge). Confirmed still true, not
+fixed here — P37 correctly scoped this as a latent inconsistency, not a
+P38 blocker.
+
+## Electron compatibility check
+
+Did not configure `electron-builder` or produce a real installer (out of
+scope, P39). Instead, faithfully replicated `backend-manager.js`'s exact
+packaged-mode `resolveCommand()`/spawn/health-check logic in a standalone
+Node script (Electron's `app` module cannot run outside an actual Electron
+process, so the packaged-mode branch's *logic* was copied verbatim rather
+than executed through Electron itself) against a simulated
+`resources/backend/` layout populated with the real build output:
+
+```
+Resolved command: <sim>\resources\backend\relay-backend.exe --port 8000 (cwd=<sim>\resources\backend)
+RESULT: OK - packaged-mode spawn + health check succeeded
+```
+
+This confirms the exact spawn contract `backend-manager.js` already
+implements — command path, `args: ["--port", ...]` with no `--host`,
+`cwd: path.dirname(exe)`, `env.RELAY_DATA_DIR` — works unmodified against
+the real P38 bundle. **No change to `backend-manager.js` was needed or
+made.** What this check does *not* prove, and is explicitly left for P39:
+that `electron-builder`'s `extraResources` config actually copies the
+onedir folder correctly into a real packaged app's `resourcesPath`, or
+that the real Electron `app.isPackaged`/`app.getPath("userData")` values
+behave identically to this simulation's stand-ins (they are simple,
+well-documented Electron APIs, not reasonably expected to differ, but
+P38 did not exercise them through a real Electron process).
+
+## Problems discovered
+
+- The seven orphaned `backend/.venv` packages (dependency audit, above) —
+  not a packaging blocker, since they were never bundled, but worth
+  knowing about if `backend/.venv` is ever used as a build source instead
+  of the isolated venv this milestone established.
+- Windows has no true `SIGTERM` delivery to an arbitrary child process —
+  `taskkill` (used in this session's testing) and Node's own
+  `child_process.kill()` (`backend-manager.js`'s `stop()`) both reduce to
+  an immediate `TerminateProcess()` call in practice on this platform, so
+  Uvicorn's graceful-shutdown lifespan code path
+  (`discovery_service.stop()`, the "Relay backend shutting down." log
+  line) is not reliably reachable via an external kill signal on Windows.
+  This is **pre-existing behavior, not introduced by packaging** — T7's
+  crash-reconciliation logic (`_reconcile_after_unclean_shutdown`,
+  confirmed working correctly in this session's restart test above) exists
+  precisely because an unclean shutdown is already the expected case on
+  this platform. Documented here because this milestone's own restart
+  testing surfaced it concretely against the real packaged executable, not
+  because it's a new P38 finding.
+- The `download_directory` mistake under Functional API verification,
+  above — a testing-process lesson, not a code defect.
+
+## Deferred / out of scope (explicitly, per this milestone's boundary)
+
+- No `electron-builder`/NSIS configuration, no real installer, no
+  `extraResources` wiring (P39).
+- No Windows Firewall allow-rule verification against a real installed app
+  (needs P39's installer to exist first).
+- No Android release signing/`usesCleartextTraffic` fix (P40).
+- No genuinely interrupted (`in_progress` at kill time) transfer was
+  constructed to directly exercise T7's crash-reconciliation *repair*
+  logic against the packaged executable — this session's restart test
+  confirmed the reconciliation code path runs without error, but every
+  transfer had already reached a terminal state before the process was
+  killed. Worth constructing deliberately as part of P41's validation
+  matrix (which already plans an "induced failure" scenario).
+- `desktop/src/main/main.js`'s hardcoded `BACKEND_PORT` and
+  `backend/app/core/config.py`'s unused `DEBUG` field — both still open,
+  per P37, left for whichever of P39/P40 is already touching those files.
+- Repository/product cleanup remains explicitly deferred to the dedicated
+  post-P41 milestone, per this milestone's own instructions.
+
+## Cleanup performed
+
+The isolated build venv, the simulated `resources/`/`userData` directories,
+and all disposable test files/folders used in this milestone's testing
+live entirely under the session scratchpad directory, outside the
+repository — nothing there requires repository cleanup. The one stray
+write into the real `C:\Users\Saad\Downloads` (see Functional API
+verification above) was deleted immediately upon discovery and confirmed
+gone. `backend/relay.db` (the real dev database) and `backend/.venv` (the
+real dev environment) were never touched by any command in this milestone
+— every build, launch, and API call in this session's testing targeted
+either the isolated build venv or the isolated `RELAY_DATA_DIR`/scratch
+paths described above.
+
+## Automated checks performed
+
+- `python -m pytest` — `343 passed, 2 skipped` against `backend/.venv`
+  (the existing dev environment, unchanged) — baseline, confirms no
+  regression from any change made this milestone.
+- `python -m pytest` — `343 passed, 2 skipped`, identical result, run a
+  second time against the isolated clean build venv (production pins +
+  `pytest`/`httpx` added temporarily, never bundled) — specifically to
+  catch a behavioral regression from `starlette`'s transitive version
+  drift (`1.3.1` → `1.6.0`, see Dependency audit). None found.
+- `ruff check .` — all checks passed, including the new `backend/run.py`
+  (explicitly confirmed checked via `ruff check run.py -v`, not merely
+  assumed from the whole-directory run).
+- `pyinstaller relay-backend.spec` — build completed successfully; the
+  four benign hidden-import warnings are explained under Build process
+  above.
+- `git check-ignore -v backend/build backend/dist backend/dist/
+  relay-backend/relay-backend.exe` — confirmed already covered by the
+  existing `.gitignore`, no `.gitignore` change made.
+
+## Remaining limitations
+
+- No second, genuinely separate physical/virtual Windows machine was
+  available this session — "self-contained" was proven by scrubbing `PATH`
+  and using fresh, isolated, Unicode/space-containing directories on the
+  same machine, not by an actual clean-machine/clean-VM run. This is the
+  same limitation P37 already flagged for its own, weaker (read-only)
+  verification; P38's version is materially stronger (a real running,
+  tested executable) but still short of a true clean-VM test, which
+  remains P41's job.
+- Electron compatibility was verified by replicating `backend-manager.js`'s
+  packaged-mode logic in a standalone Node script against a simulated
+  `resources/` layout, not by running the real Electron app with a real
+  `electron-builder` package — because neither exists until P39.
+- No genuinely interrupted in-flight transfer was tested against the
+  packaged executable (see Deferred, above).
+- Startup failure (e.g., an unwritable `RELAY_DATA_DIR`, a port already in
+  use) was not deliberately fault-injected against the packaged
+  executable this session.
+- Windows Firewall behavior remains unverified against a real listening
+  packaged instance triggering the OS's first-run prompt — needs a real
+  installed app (P39) to observe.
+
+## Remaining P39 requirements
+
+Per P37's plan, unchanged by this milestone's findings: add
+`electron-builder` (NSIS, per-user install) to `desktop/package.json`;
+wire `backend/dist/relay-backend/` into `resources/backend/` via
+`extraResources`; produce and validate a real installer on a clean Windows
+VM (install → first launch → firewall prompt → uninstall → reinstall);
+resolve the `BACKEND_PORT`/`config.py` duplication and the unused `DEBUG`
+field while those files are already in scope, per P37's own recommendation
+(both still open, confirmed above).
+
+## Documentation changes
+
+This entry (`docs/15_QA_NOTEBOOK.md`, Milestone P38). `CLAUDE.md` updated
+with a new "Backend Production Bundle (P38)" convention note (the
+`run.py`/`relay-backend.spec` pattern, the three-way requirements split,
+and the confirmed no-change-needed status of `backend-manager.js`) and its
+"Next Planned Milestone" section updated to mark P38 complete and point at
+P39. `docs/12_Packaging_Deployment.md` §4 updated to state the PyInstaller
+decision as implemented rather than "to be selected." `README.md` was not
+changed — its packaging/build statements were not found to be materially
+inaccurate as a result of this milestone (no installer or signed APK
+exists yet, which is still what it says).
+
+P38 ends here. P39 was not started.

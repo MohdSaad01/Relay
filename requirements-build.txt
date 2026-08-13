@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Build-only: needed to produce the packaged Windows backend executable
+# (docs/12_Packaging_Deployment.md §4, Milestone P38). Never installed on an
+# end-user machine and not needed for ordinary development or testing.
+pyinstaller==6.22.0

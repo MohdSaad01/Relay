@@ -32,10 +32,18 @@ manually start it.
 
 # 4. Backend Packaging
 
-The exact tool (PyInstaller or an equivalent) will be selected during the
-packaging milestone after evaluating the options. Requirements: runs
-without a system-wide Python install, includes all required Python
-dependencies, starts automatically.
+**Decided and implemented (Milestone P38):** PyInstaller, `--onedir` mode.
+`backend/relay-backend.spec` builds `backend/run.py` (the production entry
+point — `backend/app/main.py` itself is a pure ASGI module with no
+`__main__` block) into `backend/dist/relay-backend/relay-backend.exe` plus
+a supporting `_internal/` directory. Verified self-contained: runs with no
+system-wide Python install, no pip, no virtualenv, and no Relay source
+checkout present (see `docs/15_QA_NOTEBOOK.md`'s P38 entry for the full
+verification). `desktop/src/main/backend-manager.js`'s packaged-mode
+branch already expects exactly this output at
+`resources/backend/relay-backend.exe` and needed no changes. Always build
+from a clean virtual environment holding only `requirements.txt` +
+`requirements-build.txt` — never the tracked development `.venv`.
 
 ---
 

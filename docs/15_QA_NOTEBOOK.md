@@ -5466,3 +5466,391 @@ History, received files, or normal Shared Files/Transfers usage. No
 backend, Android, or unrelated Desktop source was modified. UI-03, UI-04,
 and the P29.1 progress-bar bug remain deliberately untouched, per this
 milestone's explicit boundary — not started, not implied fixed.
+
+---
+
+# Milestone P33 — Desktop Transfer Progress & Feedback
+
+**Scope:** the single carried-forward P29.1 finding only — Transfers'
+progress bar rendering at a fixed full width regardless of actual
+progress. No other P31 finding (UI-03, UI-04) and no general Desktop
+visual cleanup, per this milestone's explicit boundary. No Android source
+was touched; no backend source was touched.
+
+## Original P29.1 requirement (source of truth going in)
+
+`docs/15_QA_NOTEBOOK.md`'s P29.1 entry (discovered as a byproduct of the
+Devices Rename fix, not fixed itself — out of that milestone's scope)
+found that `desktop/src/renderer/views/transfers.js`'s progress bar
+(`<div class="progress-bar"><div class="progress-fill"
+style="width:${progress}%"></div></div>`) is subject to the same CSP
+`style-src 'self'` block that broke P29's original Rename fix: the
+renderer's CSP silently drops every inline `style=""` attribute, so
+`.progress-fill` always falls back to its block-level default width
+(100% of its 100px `.progress-bar` parent) regardless of the `progress`
+value baked into the (never-applied) inline style. P29.1 proved this in
+isolation (a synthetic `width:50%` element read back as computed `100px`
+via `getComputedStyle`) but could not reproduce it against the *real*
+progress bar with real transfer data, and P31 could not either — every
+real test transfer on the LAN (even an 80 MB file) completed in 1–2
+seconds, too fast to observe an intermediate percentage. Both entries
+explicitly flagged this as **not re-provable live**, carried forward
+rather than closed.
+
+## Investigation-first: confirming current behavior before any change
+
+Read `transfers.js`, `app.css`'s `.progress-bar`/`.progress-fill` rules,
+`transferGrouping.js`, and the backend's progress-producing code
+(`TransferStreamService._generate_download`/`receive_upload`,
+`app/api/v1/transfers.py`) before writing any fix. Two things confirmed
+from source alone, before touching the live app:
+
+- The bug was still present verbatim — `git log` on `transfers.js` since
+  P29.1 shows no intervening change to this code; `style="width:${progress}%"`
+  was still exactly what P31 last saw.
+- `TransferStreamService` commits `bytes_transferred` to the database
+  roughly every 8 MiB (`_PROGRESS_UPDATE_INTERVAL_BYTES`), and a download's
+  `StreamingResponse` chunk-by-chunk `send()` genuinely blocks on the
+  client actually reading the socket (backpressure) — meaning a client
+  that deliberately reads slowly will make the server produce real,
+  time-spaced intermediate `bytes_transferred` values, without touching
+  any application code. This is what P31 lacked (it only tried real-world
+  LAN speed) and what made a genuine, non-simulated live reproduction
+  possible this time.
+
+## Reproduction method (live, real streaming, no source changes)
+
+Built a disposable Playwright `_electron` driver (same technique as
+P31/P32 — kept outside the tracked project, deleted at the end of this
+session) that launched the real Electron app (`desktop/node_modules/electron/dist/electron.exe`,
+no `--no-sandbox`/xvfb needed — this is a native Windows session with a
+real display), which in turn auto-spawned the real backend from
+`backend/.venv/Scripts/python.exe` exactly as `backend-manager.js` does
+in normal use (confirmed via `GET /api/v1/health` returning 200 before
+any test traffic).
+
+Against that real app + real backend + the real local `backend/relay.db`
+(which already held one genuinely-paired physical device, `RMX3997`, from
+earlier milestones — never touched by this session's cleanup):
+
+1. Paired a dedicated QA test device (`P33-QA-Device`) through the real
+   `/pairing/*` HTTP flow (start → request → approve → result) — not a
+   database insert.
+2. Created a 150 MB local file and shared it via the real `POST /files`
+   loopback call.
+3. Proposed a real `send` transfer via `POST /transfers/requests` with the
+   test device's real session token, exactly as the Android client would.
+4. Downloaded it via `GET /transfers/{id}/download` with that same bearer
+   token, **reading the response body deliberately slowly** (a
+   `ReadableStreamDefaultReader` loop paced to ~3 MB/s via `setTimeout`
+   between reads) — a genuine HTTP client of the real streaming route,
+   throttled only in how fast *it* reads, not by any change to the
+   server. This produced a real ~50-second transfer with real,
+   server-committed intermediate `bytes_transferred` values.
+5. Polled `GET /transfers/{id}` and screenshotted the live Transfers tab
+   every ~3 seconds throughout.
+
+This is **API-simulated pairing and transfer proposal** (no physical
+Android device was involved in initiating the transfer — see Physical-device
+verification below) **driving the real, unmodified backend streaming
+engine** — bytes genuinely moved over a real HTTP connection and progress
+genuinely came from the real database, not from a mock.
+
+## Reproduction result: bug confirmed live, with real data
+
+At a real, server-reported **27% (42.0 MB / 150.0 MB, status
+`in_progress`)**, `page.evaluate(() => getComputedStyle(...))` against the
+live `.progress-fill` element returned:
+
+```json
+{ "fillWidthAttr": "width:27%", "fillComputedWidth": "100px", "barComputedWidth": "100px" }
+```
+
+The inline `style` attribute's *text* correctly said `width:27%` (proving
+the JS-side percentage calculation was already correct), but the
+*rendered* computed width was `100px` — identical to the parent
+`.progress-bar`'s own full width — exactly the CSP-blocked-inline-style
+mechanism P29.1 diagnosed, now proven against the real progress bar with
+real, non-synthetic transfer data for the first time. Screenshots taken
+at 27% and at 100%/Completed are visually indistinguishable (same fully-blue
+100px bar in both), confirming this is not a subtle rendering artifact but
+a total, user-visible loss of progress feedback: **the bar never
+communicated any progress at all** during the entire ~50-second real
+transfer.
+
+## Root cause
+
+Identical to P29.1's diagnosis, now confirmed against the real feature
+rather than an isolated synthetic element: `desktop/src/renderer/index.html`'s
+CSP (`style-src 'self'`, no `unsafe-inline`) silently drops every inline
+`style=""` attribute — HTML-authored (`transfers.js`'s
+`style="width:${progress}%"`, injected via `innerHTML`) or JS-imperative
+alike. No other mechanism (polling cadence, backend progress granularity,
+grouping logic) was found to be at fault — the percentage math and the
+2-second poll were both already correct; only the *visual* width was
+broken.
+
+## Implementation decision
+
+**Replaced the width-styled `<div class="progress-bar"><div
+class="progress-fill" style="width:...">` pair with a native `<progress
+class="transfer-progress" value="${percent}" max="100">` element.** A
+native `<progress>` element's fill is drawn from its `value`/`max` DOM
+attributes/properties, which the renderer's `style-src` CSP has no
+authority over at all (it only governs the `style` attribute/`<style>`
+elements) — this sidesteps the whole class of bug P29.1/P29 hit, rather
+than working around it with the class-toggle technique those two
+milestones used (which doesn't scale to a continuously-variable
+percentage: it would need on the order of 100 discrete CSS classes to
+match this element's granularity). Styled via
+`::-webkit-progress-bar`/`::-webkit-progress-value` pseudo-elements in
+`app.css` (Chromium-only pseudo-elements are safe here since Electron's
+renderer is always Chromium) to match the exact prior visual language —
+100px × 8px, `--color-bg` track, `--color-primary` fill, fully rounded —
+so this is a rendering-mechanism fix, not a visual redesign.
+
+**Added a shared `progressPercent(bytesTransferred, totalBytes, status)`
+helper**, used by both `renderTransferRow` (single transfer) and
+`renderBatchRow` (folder/batch aggregate), replacing each function's own
+inline ternary:
+
+- Clamps to `[0, 100]` via `Math.min`/`Math.max` — defends against a
+  transient `bytes_transferred > file_size` or negative value ever
+  producing an out-of-range `value` attribute (P33's brief explicitly
+  asked for this; the prior ternary had no clamp, though no live case
+  producing an out-of-range value was actually observed).
+- **Fixes a real, if minor, pre-existing edge case**: a zero-byte file
+  previously always showed **0%** even once `status === "completed"`
+  (division-by-zero was already avoided, but the fallback was a bare
+  `0`, not status-aware). Now returns `100` for a `totalBytes === 0`
+  transfer once its status is `completed`, `0` otherwise (e.g. a
+  zero-byte transfer that's still nominally `in_progress` for the instant
+  before the backend finalizes it) — verified live below.
+
+No change was made to `renderTransferRow`/`renderBatchRow`'s status logic,
+`STATUS_LABELS`/`STATUS_BADGE_VARIANTS`, the Cancel button gating, or
+`transferGrouping.js` — the milestone's brief was the progress
+*presentation*, and none of that logic was implicated by the root cause.
+
+## Files modified
+
+- `desktop/src/renderer/views/transfers.js` — `progressPercent()` helper;
+  `progressBar()` helper emitting the native `<progress>` markup;
+  `renderTransferRow`/`renderBatchRow` updated to use both instead of the
+  inline-styled div pair.
+- `desktop/styles/app.css` — `.progress-bar`/`.progress-fill` div rules
+  replaced with `progress.transfer-progress` + its `::-webkit-progress-bar`/
+  `::-webkit-progress-value` pseudo-element rules.
+
+No backend, Android, dialog, navigation, pairing, Settings, or
+`TransferStreamManager` source was touched.
+
+## Automated verification
+
+`node --input-type=module --check < desktop/src/renderer/views/transfers.js`
+(the P30-established form, per this file's own Cross-Cutting Lessons entry
+on plain `node --check` under-validating ESM) — **clean, 0 errors.** No
+backend source changed, so `pytest`/`ruff` were not run, per this
+milestone's own instructions. No dedicated Desktop UI test suite exists,
+as stated up front — not claimed here.
+
+## Live Electron verification (real app, real backend, real streaming — not simulated)
+
+All of the following used the real Electron app + auto-spawned real
+backend + real `relay.db`, described above.
+
+- **Primary fix confirmation (SEND, 150 MB, ~50s real slow download):**
+  re-ran the identical reproduction scenario against the fixed code.
+  Screenshots at 11%, 27%, 64%, 91%, and 100%/Completed show the bar's
+  filled portion visibly and proportionally growing — the 11% and 64%
+  screenshots are clearly different bar lengths (previously always
+  identical). `page.evaluate` against the live `<progress>` element at
+  11% returned `{ value: 11, max: 100, valueAttr: "11" }` — the DOM
+  attribute genuinely drives the rendered fill now, unlike the inline
+  `style` attribute before.
+- **Receive direction (Android → Desktop upload, 40 MB, real slow HTTP
+  request body via a throttled `ReadableStream`):** identical code path
+  (`renderTransferRow` doesn't branch on `direction` for progress),
+  confirmed live rather than assumed — captured at 20% in-progress, then
+  100%/Completed. No asymmetry between Send and Receive.
+- **Folder/batch aggregate progress (Receive only — see "Grouped folder
+  progress: Send vs. Receive" below):** uploaded a 2-file batch (35 MB +
+  8 MB, shared `upload_batch_id`) slowly. The grouped row (`📁 p33-folder
+  (1/2)` while file A was still in flight) showed a real aggregate
+  percentage derived from summed `bytes_transferred`/`file_size` across
+  both children — screenshotted at 81% with a proportionally 81%-filled
+  bar, then 100%/Completed with `(2/2)`. `renderBatchRow`'s
+  `progressPercent()` call (using the same helper, same fix) confirmed
+  correct on the aggregate path, not just the single-transfer path.
+- **Zero-byte file (SEND):** shared and downloaded a genuine 0-byte file.
+  Result: `100% (0 B / 0 B)`, badge `Completed`, bar fully filled —
+  confirms the new status-aware zero-byte handling described above,
+  live, not just by code inspection.
+- **Cancelled:** started a real slow SEND, clicked the real Transfers
+  tab's **Cancel** button (not an API call) ~6 seconds in. Backend
+  confirmed `status: cancelled`, `bytes_transferred: 16777216` (the byte
+  count at the moment of cancellation). The row's bar stayed frozen at
+  that same **11%** afterward — badge changed to `Cancelled`, Cancel
+  button correctly disappeared (not offered for a terminal status) — the
+  bar does not misleadingly imply continued activity.
+- **Failed:** proposed a SEND, deleted the shared file's on-disk source
+  *after* proposing but *before* the download route was ever called (a
+  real filesystem condition, not a mocked error), then attempted the
+  download. The real backend's existing `resolve_download_source` check
+  (unmodified, pre-existing M12 behavior) correctly failed the request
+  (`400`) and finalized the transfer as `failed`, `failure_reason: "The
+  source file is no longer available."`. The row rendered with an empty
+  (`0%`, `0 B / 2.0 MB`) bar and the `Failed` badge plus its failure-reason
+  subtext — no misleading full/partial bar on a failed row.
+- **Regression sweep:** Devices, Pairing (idle state), Shared Files
+  (correctly showing the real received folder/file items from the
+  Receive-direction tests above, grouped per P21 §8), Settings (real
+  device name/download directory/Discoverable, untouched), and a full
+  7-row Transfers table (mixing Send/Receive/single/batch/completed/
+  cancelled/failed) all screenshotted with zero visual breakage: no
+  action-button wrapping, no row-height growth beyond what the extra
+  failure-reason subtext already caused pre-P33 (unchanged from
+  P32/P21's existing `.status-detail` styling), table width unaffected
+  by the markup change. Clear History button present and correctly
+  enabled once history existed.
+
+## Send/Receive verification
+
+Confirmed live, not assumed: **both directions render through the exact
+same `renderTransferRow`/`progressPercent`/`progressBar` code path** —
+`direction` only ever affects the Direction column's text, never the
+progress calculation or markup. SEND (150 MB) and RECEIVE (40 MB) were
+each independently observed moving through multiple real intermediate
+percentages with a visibly-scaling bar.
+
+## Grouped folder progress: Send vs. Receive (a real, pre-existing asymmetry — documented, not fixed)
+
+Tracing `backend/app/services/transfer_service.py`'s `request_transfer`/
+`_create_transfer` (line ~140) during investigation surfaced a fact not
+previously written down in this file: **a SEND (folder download)
+`Transfer` row's `upload_batch_id` is always `None`** — only a RECEIVE
+(folder upload) row ever gets a non-null `upload_batch_id` (`request.upload_batch_id
+if resolved_folder_relative_path is not None else None`, and that branch
+is reached only for `direction is RECEIVE`). Desktop's own
+`desktop/src/renderer/transferGrouping.js`'s `groupTransfersByBatch`
+groups **only** by `upload_batch_id`. The practical consequence: **Desktop
+currently has no grouped/aggregate progress row for a folder *download*
+(Send)** — each file in a downloaded shared folder renders as its own
+separate, ungrouped row on the Transfers tab. Grouped folder progress
+**is** implemented, and now correctly renders progress, for a folder
+*upload* (Receive) — verified live above.
+
+This is a source-level finding (confirmed by reading
+`transfer_service.py` and `transferGrouping.js`; not separately
+live-tested with a real multi-file folder *download*, since the code
+path that would need to exist to group it — a `shared_folder_id`-based
+grouping key — simply isn't there to test). Per this milestone's explicit
+instruction ("do not redesign folder transfer architecture... if grouped
+folder progress is not currently supported, document that fact"), this is
+recorded as a **deferred, pre-existing architecture gap**, not fixed here
+— fixing it would mean teaching `transferGrouping.js` a second grouping
+key (`shared_folder_id`) and is a scope decision beyond "fix the
+progress-bar rendering bug." Worth a dedicated future milestone if
+Desktop folder-download UX is revisited.
+
+## Physical-device verification
+
+**Not performed.** No physical Android device was used to initiate any
+transfer in this session — every transfer above was proposed and driven
+through the real backend HTTP API using a test session token obtained via
+the real pairing handshake, exactly as the Android app would call it, but
+without the Android app itself. This is accurately described as
+**live-Electron-verified with real backend streaming**, not
+**physical-device-verified** — per this milestone's explicit accuracy
+requirement, the distinction is stated plainly rather than blurred. The
+one genuinely-paired physical device on this machine (`RMX3997`) was left
+completely untouched throughout (not used, not removed, not renamed).
+
+## Problems discovered (beyond the reported issue)
+
+None beyond the pre-existing Send/Receive folder-grouping asymmetry
+documented above, which is adjacent to but distinct from the P29.1 bug
+this milestone targeted.
+
+## Deferred / Observed (not fixed in this milestone)
+
+- **UI-03** (folder emoji `📁` instead of the SVG icon language) and
+  **UI-04** (Clear History trigger color inconsistency) — untouched, per
+  this milestone's explicit "do not fix P34" instruction. Both were
+  visible in this session's own screenshots (the `📁` batch-row prefix)
+  without being touched.
+- **Grouped folder progress for Send (folder download)** — not
+  implemented on Desktop at all (see above); documented as a real gap,
+  not fixed, since fixing it is architecture work beyond this milestone's
+  "smallest correct fix" boundary.
+
+## Cleanup performed
+
+All test state was removed via the real app/API, matching P31/P32's
+precedent: the 5 test devices paired during this session (`P33-QA-Device`,
+`P33-Fix-Send`, `P33-Fix-Receive`, `P33-Fix-Batch`, `P33-Fix-Cancel`) were
+removed via `DELETE /devices/{id}`; the 3 shared test files were unshared
+via `DELETE /files/{id}`; the 8 real `Transfer` rows this session created
+(ids verified individually by device/file name before deletion, matching
+none of the pre-existing 1370+ historical rows) were removed via a direct
+`sqlite3 DELETE` against `relay.db` (no delete endpoint exists for
+`Transfer` rows by design — same accepted pattern as P29.1/P31's
+cleanup); the real files written into the local `Downloads` folder by the
+Receive-direction tests (`p33-upload-test.bin`, `p33-folder/`) were
+deleted; the 150 MB/40 MB/etc. local fixture files and the disposable
+Playwright driver scripts were deleted from the scratch/temp locations
+they were created in (never part of the tracked project). Final live
+screenshots confirm Devices, Shared Files, and Transfers are back to
+exactly their pre-session state (`RMX3997` only, 0 shared files, "No
+history").
+
+## Documentation changes
+
+This entry (`docs/15_QA_NOTEBOOK.md`, Milestone P33). `CLAUDE.md` was not
+updated — this fix extends the CSP-vs-inline-style lesson already recorded
+there under P29.1 (`### Desktop Rename Edit-State Lifecycle & the
+Renderer's CSP (P29.1)`) rather than establishing a new durable
+convention; that section already tells future Desktop work to avoid
+inline `style=`, and the native-`<progress>`-element technique used here
+is a specific instance of "use a mechanism the CSP doesn't govern," not a
+new rule. `README.md` was not touched — no user-facing capability
+changed, only a rendering-correctness fix. `.gitignore` unchanged — no new
+generated artifact.
+
+## Remaining limitations
+
+- The Send-direction folder-grouping gap documented above is real and
+  pre-existing, not introduced or worsened by this milestone, but also
+  not fixed by it.
+- Percentage granularity is whatever the backend commits (~8 MiB
+  intervals, `_PROGRESS_UPDATE_INTERVAL_BYTES`) sampled every 2 seconds
+  by the existing poll — unchanged by this milestone; a very large file
+  on a very fast link could still show visibly "jumpy" rather than
+  perfectly smooth increments. Not in scope (P33's brief was the
+  rendering bug, not polling/commit cadence).
+- `::-webkit-progress-bar`/`::-webkit-progress-value` are non-standard,
+  WebKit/Blink-only pseudo-elements. This is safe for this specific app
+  (Electron's renderer is always Chromium) but would not be portable if
+  Relay's renderer were ever hosted in a different engine — noted for
+  completeness, not a current risk.
+
+## Final verdict
+
+The P29.1 progress-bar bug **did still reproduce live**, now confirmed for
+the first time against the real streaming engine with real, time-spaced
+intermediate progress data (not just P29.1's isolated synthetic element,
+and unlike P31's attempt, which could not slow a transfer down enough to
+observe it) — `getComputedStyle` showed a real `27%`-labeled fill
+rendering at the container's full `100px` width. Root cause matched
+P29.1's original diagnosis exactly: the renderer's CSP silently drops
+inline `style=""`. Fixed by replacing the width-styled div pair with a
+native `<progress value="..." max="100">` element, which the CSP has no
+authority over at all. Verified live across Send and Receive, a single
+file and a grouped folder batch, multiple real intermediate percentages,
+a zero-byte file, a cancellation, and a genuine (not mocked) failure —
+all rendering correctly with no regression to Devices, Pairing, Shared
+Files, Settings, Clear History, or the Cancel action. No physical Android
+device was used (stated explicitly, not implied). A real, pre-existing,
+separate gap — Desktop folder *downloads* have no grouped progress row at
+all — was discovered and documented, not fixed, per this milestone's
+scope boundary. UI-03 and UI-04 remain untouched, as instructed.

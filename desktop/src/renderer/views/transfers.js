@@ -125,8 +125,29 @@ function statusBadge(status, failureReason) {
   return failureReason ? `${badge}<div class="status-detail">${escapeHtml(failureReason)}</div>` : badge;
 }
 
+// Percentage of bytesTransferred/totalBytes, clamped to [0, 100]. A
+// zero-byte transfer has no meaningful ratio (0/0) - it reads as 100% once
+// the transfer has actually reached completed, 0% otherwise, so a
+// zero-byte completed transfer still shows a full bar rather than an empty
+// one that looks stuck.
+function progressPercent(bytesTransferred, totalBytes, status) {
+  if (totalBytes > 0) {
+    return Math.min(100, Math.max(0, Math.round((bytesTransferred / totalBytes) * 100)));
+  }
+  return status === "completed" ? 100 : 0;
+}
+
+// A native <progress> element's fill is drawn from its value/max
+// attributes, not from CSS - unlike a width-styled div, it is unaffected
+// by the renderer's style-src CSP (see docs/15_QA_NOTEBOOK.md's P29.1/P33
+// entries: any inline style="" attribute is silently dropped, which is why
+// this replaced the old .progress-bar/.progress-fill div pair).
+function progressBar(percent) {
+  return `<progress class="transfer-progress" value="${percent}" max="100"></progress>`;
+}
+
 function renderTransferRow(transfer) {
-  const progress = transfer.file_size > 0 ? Math.round((transfer.bytes_transferred / transfer.file_size) * 100) : 0;
+  const progress = progressPercent(transfer.bytes_transferred, transfer.file_size, transfer.status);
   const canCancel = CANCELLABLE_STATUSES.has(transfer.status);
   return `
       <tr data-transfer-id="${transfer.id}">
@@ -134,7 +155,7 @@ function renderTransferRow(transfer) {
         <td>${escapeHtml(transfer.direction)}</td>
         <td class="cell-truncate" title="${escapeHtml(transfer.file_name)}">${escapeHtml(transfer.file_name)}</td>
         <td>
-          <div class="progress-bar"><div class="progress-fill" style="width:${progress}%"></div></div>
+          ${progressBar(progress)}
           ${progress}% (${formatBytes(transfer.bytes_transferred)} / ${formatBytes(transfer.file_size)})
         </td>
         <td>${statusBadge(transfer.status, transfer.failure_reason)}</td>
@@ -147,12 +168,12 @@ function renderBatchRow(children) {
   const completedCount = children.filter((t) => t.status === "completed").length;
   const totalBytes = children.reduce((sum, t) => sum + t.file_size, 0);
   const transferredBytes = children.reduce((sum, t) => sum + t.bytes_transferred, 0);
-  const progress = totalBytes > 0 ? Math.round((transferredBytes / totalBytes) * 100) : 0;
   const status = children.some((t) => t.status === "failed")
     ? "failed"
     : children.some((t) => t.status === "in_progress")
       ? "in_progress"
       : "completed";
+  const progress = progressPercent(transferredBytes, totalBytes, status);
 
   return `
       <tr>
@@ -160,7 +181,7 @@ function renderBatchRow(children) {
         <td>${escapeHtml(children[0].direction)}</td>
         <td class="cell-truncate" title="${escapeHtml(folderName)}">&#128193; ${escapeHtml(folderName)} (${completedCount}/${children.length})</td>
         <td>
-          <div class="progress-bar"><div class="progress-fill" style="width:${progress}%"></div></div>
+          ${progressBar(progress)}
           ${progress}% (${formatBytes(transferredBytes)} / ${formatBytes(totalBytes)})
         </td>
         <td>${statusBadge(status)}</td>

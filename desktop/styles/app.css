@@ -699,20 +699,33 @@ button.text-button:hover {
   border-color: transparent;
 }
 
-.progress-bar {
-  display: inline-block;
+/* A native <progress> element draws its fill from its value/max attributes,
+   not from an inline style="width:...", so it is unaffected by the
+   renderer's style-src CSP (docs/15_QA_NOTEBOOK.md's P29.1/P33 entries -
+   an inline style attribute is silently dropped, which is what made the
+   previous width-styled-div implementation always render full width
+   regardless of actual progress). Chromium-only pseudo-elements are safe
+   here since Electron's renderer is always Chromium. */
+progress.transfer-progress {
+  appearance: none;
+  -webkit-appearance: none;
   width: 100px;
   height: 8px;
-  border-radius: 999px;
-  background: var(--color-bg);
   vertical-align: middle;
   margin-right: var(--space-2);
+  border: none;
+  border-radius: 999px;
   overflow: hidden;
 }
 
-.progress-fill {
-  height: 100%;
+progress.transfer-progress::-webkit-progress-bar {
+  background: var(--color-bg);
+  border-radius: 999px;
+}
+
+progress.transfer-progress::-webkit-progress-value {
   background: var(--color-primary);
+  border-radius: 999px;
 }
 
 form label {

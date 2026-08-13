@@ -46,6 +46,7 @@ import { TransferStreamManager } from '../../streaming/TransferStreamManager';
 import { ensureEmptyFolderStaged } from '../../streaming/blobUtil';
 import { FileActionMenu, FileActionMenuAction } from '../../components/FileActionMenu';
 import { AppDialog, useAppDialog } from '../../components/AppDialog';
+import { FolderIcon } from '../../components/icons';
 
 const POLL_INTERVAL_MS = 2000;
 // Deliberately longer than the transfer-progress poll above: the shared-file
@@ -1066,6 +1067,7 @@ export function FilesScreen() {
   const menuVisible = menuFile != null || menuFolder != null;
 
   let menuTitle = '';
+  let menuTitleIcon: React.ReactNode;
   let menuSubtitle: string | undefined;
   let menuActions: FileActionMenuAction[] = [];
 
@@ -1104,7 +1106,8 @@ export function FilesScreen() {
       localRootByFolderId[menuFolder.id] ? folderExistence[localRootByFolderId[menuFolder.id]] : undefined,
     );
     const canOpen = folderState.status.kind === 'completed';
-    menuTitle = `\u{1F4C1} ${menuFolder.folder_name}`;
+    menuTitle = menuFolder.folder_name;
+    menuTitleIcon = <FolderIcon color="#666" size={18} />;
     menuSubtitle = folderMetaLine(menuFolder);
     menuActions = canOpen
       ? [
@@ -1179,7 +1182,14 @@ export function FilesScreen() {
         }
         contentContainerStyle={items.length === 0 ? styles.emptyList : undefined}
       />
-      <FileActionMenu visible={menuVisible} title={menuTitle} subtitle={menuSubtitle} actions={menuActions} onClose={closeMenu} />
+      <FileActionMenu
+        visible={menuVisible}
+        title={menuTitle}
+        icon={menuTitleIcon}
+        subtitle={menuSubtitle}
+        actions={menuActions}
+        onClose={closeMenu}
+      />
       <AppDialog {...dialog.props} />
     </View>
   );
@@ -1358,9 +1368,12 @@ function FolderRow({
       accessibilityLabel={`${folder.folder_name} folder. Double tap and hold for more options.`}
     >
       <View style={styles.rowInfo}>
-        <Text style={styles.name} numberOfLines={1}>
-          {'\u{1F4C1}'} {folder.folder_name}
-        </Text>
+        <View style={styles.nameRow}>
+          <FolderIcon color="#666" size={16} />
+          <Text style={styles.name} numberOfLines={1}>
+            {folder.folder_name}
+          </Text>
+        </View>
         <Text style={styles.meta}>{folderMetaLine(folder)}</Text>
         {errorMessage && <Text style={styles.rowError}>{errorMessage}</Text>}
       </View>
@@ -1418,7 +1431,13 @@ const styles = StyleSheet.create({
     flex: 1,
     marginRight: 12,
   },
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
   name: {
+    flexShrink: 1,
     fontSize: 16,
     fontWeight: '600',
   },

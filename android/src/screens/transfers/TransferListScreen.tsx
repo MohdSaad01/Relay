@@ -23,6 +23,7 @@ import {
 } from '../../transfers/historyReset';
 import { UploadConfirmDetails, UploadConfirmSheet } from '../../components/UploadConfirmSheet';
 import { AppDialog, useAppDialog } from '../../components/AppDialog';
+import { FolderIcon } from '../../components/icons';
 
 /** A file picked via the native document picker, once its size/name are known to be readable. */
 interface PickedUploadFile {
@@ -444,9 +445,12 @@ function FolderTransferRow({ group }: { group: FolderTransferGroup }) {
   return (
     <View style={styles.row}>
       <View style={styles.rowInfo}>
-        <Text style={styles.name} numberOfLines={1}>
-          {'\u{1F4C1}'} {group.folderName}
-        </Text>
+        <View style={styles.nameRow}>
+          <FolderIcon color="#666" size={16} />
+          <Text style={styles.name} numberOfLines={1}>
+            {group.folderName}
+          </Text>
+        </View>
         <Text style={styles.meta}>
           {directionLabel(group.direction)} · Folder ({itemLabel})
         </Text>
@@ -515,7 +519,13 @@ const styles = StyleSheet.create({
     flex: 1,
     marginRight: 12,
   },
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
   name: {
+    flexShrink: 1,
     fontSize: 16,
     fontWeight: '600',
   },

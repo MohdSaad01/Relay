@@ -318,7 +318,7 @@ const styles = StyleSheet.create({
   },
   warning: {
     marginTop: 12,
-    color: '#b91c1c',
+    color: '#dc2626',
     fontSize: 13,
   },
   button: {

@@ -6213,3 +6213,371 @@ discrepancy recorded rather than silently overridden. All test
 fixtures, paired-device state, and driver scripts were cleaned up; the
 one exception (an unlocatable disposable file on the physical device) is
 documented above. P34 ends here — P35 was not started.
+
+# Milestone P35 — Android Visual Polish & Consistency
+
+**Scope:** a fresh audit of the current Android app's visual consistency —
+icons, typography, spacing, dialogs, empty states, loading/error states,
+navigation — starting from P34's live finding that Android's own
+Files-row folder icon is still the raw `📁` emoji, plus a general
+cross-screen sweep per the brief. Fix only genuine, reproduced issues;
+leave everything already correct untouched.
+
+## Baseline (investigated before any change)
+
+Read this file's P23, P24, P26, P28, P30, P31, and P34 entries, plus
+CLAUDE.md's corresponding convention sections, before touching source.
+
+Source inspected: `android/src/components/icons.tsx` (confirmed a
+hand-drawn `FolderIcon` already exists, used today only by the bottom-tab
+Files icon, `android/src/navigation/MainTabs.tsx`),
+`android/src/screens/files/FilesScreen.tsx`,
+`android/src/screens/transfers/TransferListScreen.tsx`,
+`android/src/components/FileActionMenu.tsx`,
+`android/src/components/UploadConfirmSheet.tsx`,
+`android/src/components/AppDialog.tsx`,
+`android/src/screens/settings/SettingsScreen.tsx`,
+`android/src/screens/discovery/DiscoveryScreen.tsx`. Grepped the whole of
+`android/src` for emoji/pictograph code points (`\u{1F...}`, `\u{26xx}`
+ranges and literal glyphs) to find every raw-emoji-as-icon instance, not
+just the one P34 already flagged.
+
+Physical device: `RMX3997` (`69DADENFONAIOZS4`) was connected via USB/ADB
+for the whole session (`adb devices` confirmed) and already paired from a
+prior session (`GET /devices` showed `device_name: "RMX3997"`, paired
+`2026-08-12` — not re-paired or disturbed). The PC was connected to the
+phone's own hotspot (`ap0`, SSID `samsung`, phone `10.93.152.58`, PC
+`10.93.152.233`, confirmed via `adb shell ip addr` / `netsh wlan show
+interfaces`), matching this project's documented physical-testing setup.
+Started the real backend directly (`uvicorn app.main:app --host 0.0.0.0
+--port 8000`, not through Electron — same as prior live-verification
+sessions) and Metro (`npm start` in `android/`) plus `adb reverse
+tcp:8081 tcp:8081`, then force-stopped and relaunched the installed debug
+build so it picked up the current bundle. Both processes (and the Metro
+`adb reverse` binding) were torn down at the end of this session.
+
+## P34 finding investigation
+
+Reproduced live and confirmed by source. Three call sites carried the
+identical raw `📁` (`\u{1F4C1}`) literal, not `FolderIcon`:
+
+1. `FilesScreen.tsx`'s `FolderRow` (the Files-tab folder row name) —
+   the exact instance P34 flagged.
+2. `FilesScreen.tsx`'s long-press menu title construction for a folder
+   (`` `\u{1F4C1} ${menuFolder.folder_name}` ``) — a second, previously
+   undocumented instance in the same screen, found during this milestone's
+   own grep sweep, not by P34.
+3. `TransferListScreen.tsx`'s `FolderTransferRow` (the Transfers-tab
+   folder-batch row, P21.1) — a third, previously undocumented instance.
+
+All three are the same underlying defect: a raw emoji standing in for the
+app's own hand-drawn `FolderIcon` (`components/icons.tsx`, P23), which
+already exists and is already used correctly elsewhere (the bottom-tab
+Files icon). No new icon was created — all three were pointed at the
+existing `FolderIcon`.
+
+Grepped for any other emoji/pictograph code point used as a UI icon
+anywhere in `android/src`. The only other hits were
+`streaming/downloadNotification.ts`'s `✓ <name> downloaded successfully`
+strings — plain text inside an Android system notification body, not a
+custom-rendered UI icon, and not something `components/icons.tsx`'s
+convention was ever meant to replace (a system notification can't embed
+an SVG). Left unchanged; not the same category of issue.
+
+## Root cause
+
+Same root cause at all three call sites: the folder-name `Text` was built
+by string-concatenating a literal emoji in front of the name, instead of
+routing through `components/icons.tsx`'s existing `FolderIcon` the way
+`MainTabs.tsx` already does. This is the same class of one-off markup
+P19–P27 eliminated on Desktop and P34 already fixed for Desktop's Shared
+Files folder row — Android simply never got the equivalent pass.
+
+## Implementation
+
+- `android/src/components/FileActionMenu.tsx`: added an optional `icon?:
+  React.ReactNode` prop, rendered in a new `titleRow` (`flexDirection:
+  'row', alignItems: 'center', gap: 6`) ahead of the existing title
+  `Text`. The component stays generic per its own doc comment — it renders
+  whatever icon element it's handed and still knows nothing about
+  files/folders itself; the caller decides when one applies, exactly like
+  it already decides title/subtitle/actions. `title`'s `Text` gained
+  `flexShrink: 1` so `numberOfLines={2}` truncation still engages inside
+  the new row (previously the sole child of the sheet, sized by its
+  parent's full width). No existing caller broke: `icon` is optional and
+  every other menu invocation (a file's title) simply doesn't pass one.
+- `android/src/screens/files/FilesScreen.tsx`: imported `FolderIcon`.
+  `FolderRow`'s name `Text` is now wrapped in a `nameRow` (`flexDirection:
+  'row', alignItems: 'center', gap: 6`) with a `<FolderIcon color="#666"
+  size={16} />` ahead of it; the emoji literal is gone. `name`'s style
+  gained `flexShrink: 1` for the same truncation reason as above (harmless
+  for `FileRow`'s unrelated, non-row use of the same style — it's a
+  direct child of a column-flex container there, where `flexShrink` has no
+  effect). The folder long-press menu now sets `menuTitle =
+  menuFolder.folder_name` (no embedded emoji) and a new `menuTitleIcon =
+  <FolderIcon color="#666" size={18} />`, passed to `<FileActionMenu
+  icon={menuTitleIcon} ...>`; the file-menu branch leaves `menuTitleIcon`
+  `undefined`, so a file's sheet is visually unchanged.
+- `android/src/screens/transfers/TransferListScreen.tsx`: imported
+  `FolderIcon`; `FolderTransferRow`'s name `Text` gets the identical
+  `nameRow`/`FolderIcon` treatment as `FilesScreen.tsx`'s `FolderRow`, same
+  `#666` tint, same `16`px size, same `flexShrink: 1` addition to `name`.
+- `android/src/screens/settings/SettingsScreen.tsx`: a second, unrelated
+  finding from this milestone's own error/loading-state audit (§13 of the
+  brief) — `DeviceNameCard`'s "cannot be empty"/save-failure `warning`
+  text used `#b91c1c`, a different red than the single `#dc2626` token
+  used everywhere else in the app for error/destructive text
+  (`FilesScreen.tsx`'s `rowError`, `TransferListScreen.tsx`'s error text,
+  `FileActionMenu.tsx`'s destructive action label, `AppDialog.tsx`'s
+  destructive button — the last of these documents `#dc2626` by name in
+  its own top-of-file comment as the app's one destructive-text color).
+  Changed `warning`'s `color` to `#dc2626` to match. No other property
+  changed.
+
+`#666` (the icon tint) matches both screens' own existing `meta` text
+color, already the established "muted secondary content" tone in both
+files — not a new color.
+
+The `#2563eb` (most buttons) vs. `#2d6cdf` (`MainTabs.tsx`/
+`DiscoveryScreen.tsx` icon tints, explicitly commented as matching
+Desktop's `--color-primary`) near-duplicate blue was investigated and left
+alone: both call sites document their own reasoning already, this
+predates P35, and unifying two nearly-identical brand blues app-wide is a
+design-token-level change outside a "fix genuine issues" visual-polish
+pass — noted under Deferred below rather than silently reconciled.
+
+## Files modified
+
+- `android/src/components/FileActionMenu.tsx`
+- `android/src/screens/files/FilesScreen.tsx`
+- `android/src/screens/transfers/TransferListScreen.tsx`
+- `android/src/screens/settings/SettingsScreen.tsx`
+
+No backend, Desktop, or other Android file was modified.
+
+## Already-correct items (investigated, left unchanged)
+
+- **Empty states** (Files, Transfers, Discovery): structurally consistent
+  within their own needs — Files/Transfers use a single muted (`#666`)
+  line since their empty condition is self-explanatory; Discovery uses a
+  bold title plus a muted explanatory paragraph because it has real
+  networking prerequisites to explain ("same Wi-Fi network or mobile
+  hotspot"). Per the brief's own "do not force identical wording... goal
+  is consistent structure, not identical copy" instruction, this asymmetry
+  is content-justified, not a defect — not changed. None of the three uses
+  an icon; this is internally consistent (Android has no established
+  icon-in-empty-state convention the way Desktop's P27 `emptyState()`
+  does), so no icon was added — doing so would be introducing a new
+  Android convention the brief did not ask for, not fixing one.
+- **Metadata line format** (P22): re-verified live — `report.txt` showed
+  `16 B` (no MIME type), `Vacation Photos` showed `Folder · 2 items · 26
+  B` — both exactly as `metadataFormat.ts`'s documented contract requires.
+  No regression.
+- **Dialogs** (P30): grepped the whole of `android/src` for `Alert.alert(`
+  — zero live call sites remain (only doc-comment references inside
+  `AppDialog.tsx` explaining what it replaces). No P30 violation was
+  introduced since that milestone. `UploadConfirmSheet`/`FileActionMenu`
+  correctly remain separate bottom-sheet primitives, not migrated to
+  `AppDialog` — confirmed against the brief's own explicit "do not replace
+  ... merely for visual uniformity" instruction.
+- **Bottom navigation** (P23): icons, active/inactive tints
+  (`#2d6cdf`/`#8a8f98`), and labels unchanged and correct — re-verified
+  live via screenshots at every tab switch during this session's testing.
+- **Settings screen structure** (P23): still exactly DEVICE + STORAGE,
+  same card pattern, no internal/administrative setting exposed. Correct,
+  unchanged.
+- **Discovery/pairing flow** (P24): not re-exercised end-to-end this
+  session (already-paired device, and re-pairing was unnecessary for a
+  visual-only pass) — reviewed by source only; no code in this area was
+  touched, so no regression risk was introduced.
+- **Folder-upload identity, folder naming, folder reconciliation, queue
+  FIFO behavior** (P16/P17/P21.1/P26): none of this milestone's edits
+  touch state derivation, identity, or the transfer/queue architecture —
+  only `Text`/`View` presentation inside already-rendered rows and one
+  color token. Live-verified (see below) that a real folder download
+  still completes correctly and shows `Completed`/`Open`, confirming no
+  regression, but the fix itself has no code path that could plausibly
+  affect these invariants.
+
+## Automated verification
+
+Run from `android/` after all four files above were changed:
+
+- `npx tsc --noEmit` — clean, zero errors.
+- `npx eslint .` — **0 errors, 4 warnings**, and the 4 warnings are
+  byte-identical in content to the pre-change baseline (re-ran `eslint .`
+  against a `git stash` of this milestone's diff to confirm: same 4
+  warnings — two pre-existing `react/no-unstable-nested-components` in
+  `FilesScreen.tsx`/`TransferListScreen.tsx`, two pre-existing `no-void` in
+  `TransferStreamManager.ts`, none of which this milestone's diff touches
+  or introduces; only their line numbers shifted by the new `import`
+  lines).
+- `npx jest` — **42 test suites, 365 tests, all passed**, 0 failures, 0
+  skipped.
+
+## Physical-device verification (RMX3997)
+
+All live via the real installed debug build, not simulated or read from
+source:
+
+1. Shared one real test file (`report.txt`, 16 B) and one real test
+   folder (`Vacation Photos`, 2 files, 26 B) directly against the running
+   backend (`POST /files`/`POST /folders`, disposable fixtures under a
+   gitignored scratch path, deleted at session end).
+2. **Files tab**: folder row now renders the `FolderIcon` SVG (same glyph
+   as the bottom-tab Files icon) directly before "Vacation Photos",
+   correctly sized and vertically centered next to the bold name text;
+   `report.txt`'s row correctly has no leading icon (P22's file-name-
+   conveys-type convention, unchanged). Metadata lines read `Folder · 2
+   items · 26 B` and `16 B` respectively.
+3. **Long-press menu** on the folder row: the action-sheet title now shows
+   the same `FolderIcon` inline with "Vacation Photos" (no more emoji),
+   subtitle unchanged (`Folder · 2 items · 26 B`), Remove/Details actions
+   unchanged.
+4. Tapped Download on the folder → `Downloading…` → `Open` (green,
+   completed) — folder download completed correctly end-to-end,
+   confirming no regression in the download/status pipeline this
+   milestone's edits sit next to.
+5. **Transfers tab**: the folder's batch row (P21.1 grouping) shows the
+   same `FolderIcon` inline with "Vacation Photos", `Completed` status
+   badge, `Download · Folder (2 items)` subtitle — matching the Files-tab
+   presentation exactly, both now sourced from the same fixed component
+   shape.
+6. **Settings tab**: opened "Edit Name", cleared the field, tapped Save →
+   "Device name cannot be empty." rendered in the corrected `#dc2626` red
+   (screenshotted, visually matches `FilesScreen.tsx`'s own error-text
+   red). Cancelled the edit — device name reverted to "RMX3997" with no
+   backend call made, confirming the cancel path was not disturbed by the
+   color-only change.
+7. **Clear History dialog** (`AppDialog`, P30): opened from the Transfers
+   tab — title, explanatory body ("Completed, failed, and cancelled
+   transfers... Downloaded files are not deleted, and active or queued
+   transfers are not affected."), red "Clear History" confirm button, and
+   neutral "Cancel" all rendered exactly per the established P30/P34
+   convention. Cancelled without confirming — no history was actually
+   cleared by this verification pass.
+
+## Regression verification
+
+- P16 (file identity), P17 (folder identity): not exercised by re-pairing
+  or id-reuse scenarios this session (out of scope for a visual-only
+  pass, and doing so would have required disturbing the paired device
+  state) — verified instead that no touched line reads or writes
+  `fileIdentity.ts`/`folderIdentity.ts`/`shared_at` at all; the diff is
+  confined to `Text`/`View` JSX and one color literal.
+  Folder-download-to-completion in step 4 above is a live, non-simulated
+  check that the identity/status pipeline underneath the changed row still
+  functions correctly end-to-end.
+- P22 (file actions/metadata): re-verified live above — metadata format
+  unchanged, Remove/Details/Open actions on both a file and a folder still
+  present and correctly labeled from the long-press menu.
+- P23 (Settings): re-verified live — DEVICE/STORAGE sections, Edit
+  Name/Save/Cancel flow, all unchanged except the corrected warning color.
+- P28 (Clear History semantics): re-verified live — the confirm dialog's
+  wording, the fact that cancelling performs no mutation, and physical
+  files/active transfers being explicitly called out as unaffected are
+  all unchanged.
+- P30 (dialogs): re-verified live (`AppDialog` rendering, step 7 above)
+  and by a whole-tree grep (zero `Alert.alert()` call sites).
+- P33 (Desktop native `<progress>`): not applicable — this milestone
+  touched no Desktop file.
+
+## Problems discovered
+
+- Two previously-undocumented instances of the same raw-folder-emoji
+  defect P34 flagged for Desktop, both on Android: `FilesScreen.tsx`'s
+  long-press menu title, and `TransferListScreen.tsx`'s folder-batch row.
+  Both fixed in this milestone (see Implementation above) rather than
+  deferred, since they are the identical root cause as the primary
+  P34-carried-forward finding and the fix (reuse `FolderIcon`) was already
+  being made at the first call site.
+- `SettingsScreen.tsx`'s error/warning text used a second, undocumented
+  red (`#b91c1c`) instead of the app's one established `#dc2626`
+  destructive-text token. Fixed.
+- The `#2563eb`/`#2d6cdf` near-duplicate blue (see Implementation above) —
+  documented, not fixed; both values are individually intentional and
+  commented at their call sites, and reconciling them is a design-token
+  question, not a "genuine issue" in the sense this milestone's brief
+  scoped.
+
+## Deferred issues
+
+- Unifying `#2563eb`/`#2d6cdf` into a single primary-blue token (see
+  above) — a design-system-level change, not a visual-polish bug fix;
+  left for a future milestone if one is ever opened for Android design
+  tokens specifically.
+- Full live re-exercise of Discovery/QR pairing and a fresh pairing
+  end-to-end (P24) — reviewed by source only this session, since the
+  device was already paired and disturbing that state wasn't necessary to
+  validate a presentation-only change; no code in that path was touched.
+- Everything already deferred as of P31/P33/P34 (Send-direction folder
+  grouping gap, progress percentage granularity, session-token-lifetime
+  Settings scope, WebSocket/real-time push, packaging, Desktop
+  `renderBatchRow`'s own folder emoji — Desktop-only, out of this
+  Android-scoped milestone) remains deferred and was not revisited.
+
+## Documentation changes
+
+This entry (`docs/15_QA_NOTEBOOK.md`, Milestone P35). `CLAUDE.md` was not
+updated, for the same reasoning P34 already recorded for its own,
+same-shaped fix: `FileActionMenu`'s new optional `icon` prop and the
+`#dc2626` color-token correction are both small, single-purpose
+corrections that bring existing call sites in line with conventions
+CLAUDE.md already documents (P23's icon-reuse convention, the app's one
+destructive-text color already named in `AppDialog.tsx`'s own comment) —
+not new conventions themselves. If a future milestone finds a third
+distinct pattern needing `FileActionMenu`'s `icon` prop, or a fourth
+color-token deviation, that is the right trigger to promote either into a
+proper CLAUDE.md section. `README.md` was not touched — no user-facing
+capability changed. `.gitignore` was not touched — no new generated
+artifact (the seeded test fixtures were scratch/gitignored paths, deleted
+at session end).
+
+## Remaining limitations
+
+- The physical device's downloaded copy of the test `Vacation Photos`
+  folder (created by this session's own live verification) could not be
+  removed via `adb shell rm -rf` under `/storage/emulated/0/Download/Relay`
+  — the command reported success (exit 0) but the folder and its two
+  files were still listed by a subsequent `adb shell find`, consistent
+  with P34's own documented `adb shell` scoped-storage limitation for this
+  device. Unsharing the source from the backend (`DELETE
+  /files/{id}`/`DELETE /folders/{id}`) removed it from the app's own
+  Shared Files list (re-verified live: the row disappears entirely, since
+  it's sourced from `GET /folders`, not download history), so the
+  orphaned local copy is inert and matches the pre-existing
+  `Download/Relay/p28-android-test.txt` fixture already left on this
+  device by an earlier, unrelated session — not created by this
+  milestone to begin with, and likewise left untouched.
+- Backend and Metro were started directly for this session (`uvicorn`
+  bound to `0.0.0.0:8000`, `react-native start`) rather than through the
+  Electron desktop app, matching every prior physical-verification
+  session's own documented setup — not a deviation specific to P35.
+
+## Final verdict
+
+P34's carried-forward finding — Android's Files-row folder icon still
+using the raw `📁` emoji — is confirmed and fixed, along with two
+previously-undocumented instances of the identical defect (the folder
+long-press menu title, and the Transfers-tab folder-batch row), all now
+rendering the app's existing `FolderIcon` SVG (`components/icons.tsx`,
+P23) instead. A second, independently-discovered inconsistency
+(`SettingsScreen.tsx`'s error text using a non-standard red) was also
+fixed to match the app's single established `#dc2626` destructive-text
+token. All four changes were verified live on the physical `RMX3997`
+device against a real backend and real seeded data — not source-reviewed
+only — including a full folder download to completion, the long-press
+menu, the Transfers-tab batch row, a triggered Settings validation error,
+and the Clear History confirmation dialog. `tsc`, `eslint`, and `jest`
+all pass with zero new errors or warnings (`eslint`'s 4 warnings are
+pre-existing and unrelated, confirmed via `git stash` diff). No backend,
+protocol, transfer-queue, identity, history, dialog, or Desktop code was
+touched. Every other area audited per the brief (empty states, metadata
+format, navigation, Settings structure, dialog usage, near-duplicate blue
+tokens) was found already correct or is documented above as
+content-justified/deferred rather than changed without cause. All test
+fixtures, backend/Metro processes, and the `adb reverse` binding were
+cleaned up at session end; the one exception (an unremovable disposable
+folder on the physical device, harmless and orphaned from the app's own
+listing) is documented above. Paired-device state was not disturbed.
+P35 ends here — P36 was not started.

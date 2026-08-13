@@ -36,12 +36,20 @@ export interface FileActionMenuAction {
 interface FileActionMenuProps {
   visible: boolean;
   title: string;
+  /**
+   * P35: an optional leading glyph for the title row (e.g. a folder's
+   * FolderIcon from components/icons.tsx). This component stays generic —
+   * it renders whatever icon element it's given rather than knowing
+   * anything about files/folders itself; the caller decides when one
+   * applies, same as it already decides title/subtitle/actions.
+   */
+  icon?: React.ReactNode;
   subtitle?: string;
   actions: FileActionMenuAction[];
   onClose: () => void;
 }
 
-export function FileActionMenu({ visible, title, subtitle, actions, onClose }: FileActionMenuProps) {
+export function FileActionMenu({ visible, title, icon, subtitle, actions, onClose }: FileActionMenuProps) {
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose} statusBarTranslucent>
       {/* Tapping the backdrop dismisses; the sheet itself is wrapped in its
@@ -51,9 +59,12 @@ export function FileActionMenu({ visible, title, subtitle, actions, onClose }: F
           two without any extra event-propagation bookkeeping). */}
       <Pressable style={styles.backdrop} onPress={onClose} accessibilityLabel="Dismiss menu">
         <Pressable style={styles.sheet} onPress={() => undefined}>
-          <Text style={styles.title} numberOfLines={2}>
-            {title}
-          </Text>
+          <View style={styles.titleRow}>
+            {icon}
+            <Text style={styles.title} numberOfLines={2}>
+              {title}
+            </Text>
+          </View>
           {subtitle ? (
             <Text style={styles.subtitle} numberOfLines={1}>
               {subtitle}
@@ -91,7 +102,13 @@ const styles = StyleSheet.create({
     paddingBottom: 24,
     paddingHorizontal: 20,
   },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
   title: {
+    flexShrink: 1,
     fontSize: 16,
     fontWeight: '600',
   },

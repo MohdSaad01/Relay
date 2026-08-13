@@ -5116,3 +5116,353 @@ removed and why.
 **Remaining limitations:** none identified. This was confirmed to be
 stale instrumentation with an already-correct underlying error-handling
 path, not a deeper defect — no further work is indicated here.
+
+---
+
+# Milestone P32 — Desktop Table Hardening (UI-01 + UI-02)
+
+**Scope:** the two P1 findings from the P31 audit only — UI-01 (long
+filename breaks the Shared Files/Transfers table layout) and UI-02
+(Refresh on a Shared File with an externally-deleted source blanks the
+whole view with a raw backend error). No other P31 finding (UI-03, UI-04,
+the carried-forward Transfers progress-bar bug) was touched, per this
+milestone's explicit boundary.
+
+## Baseline reproduction
+
+Both bugs were reproduced live against the real Electron app before any
+source was changed, using a temporary Playwright `_electron` driver script
+(same technique as P31 — kept outside the tracked project, deleted at the
+end of this session; a candidate for `/run-skill-generator` in a future
+session, same note P31 left). Shared-file fixtures were created directly
+via the backend's own loopback API (`POST /files`/`POST /folders`), since
+Electron's native file picker can't be driven by Playwright.
+
+- **UI-01:** shared a 180-character, space-free filename alongside a
+  normal file. Live `getBoundingClientRect()`: table width **1753px**
+  against a **1084px** window, the offending row's Actions `<td>` at
+  ~115px forcing all 4 row-action buttons onto 4 separate lines
+  (`actionButtonTops`: `[232, 293, 334.5, 376]`), row height 206.5px —
+  identical to P31's own numbers, confirming the defect was still present
+  and unchanged going into this milestone.
+- **UI-02:** shared a normal file, deleted its source file from disk
+  externally, clicked that row's **Refresh** button. The entire
+  `#view-container` (header, "Add Files…"/"Add Folder…", every other row)
+  was replaced by a single red card reading exactly `File does not exist:
+  C:\Thomas\Encipher\Python\Relay\scratch_test_files\p32\will-be-
+  deleted.txt` — full absolute path exposed, matching P31's finding
+  exactly.
+
+Screenshots and raw `getBoundingClientRect()`/`getComputedStyle()` JSON
+for both baseline states were captured before any fix and compared
+against the corresponding after-fix captures below.
+
+## UI-01 root cause
+
+Confirmed via live DOM/CSS introspection: `desktop/styles/app.css`'s
+`table`/`td` rules had no `table-layout`, `max-width`, or
+`text-overflow` — the browser's default auto-layout table algorithm sizes
+every column to its widest cell's *intrinsic* content width, and an
+unbreakable string (no spaces, so no wrap opportunity) has unbounded
+intrinsic width. Because all `<td>`s in one column share a single width
+across every `<tr>`, one pathological Name/File cell dragged the entire
+table (and therefore every row's Actions column) wider, not just its own
+row. Both `desktop/src/renderer/views/files.js` (Shared Files) and
+`desktop/src/renderer/views/transfers.js` (Transfers) render a plain
+`<table>` with no view-specific CSS override, so both share the exact
+same defect via `app.css`'s global rules — confirmed by DOM inspection,
+not assumed.
+
+## UI-02 root cause
+
+Two independent problems, both in `desktop/src/renderer/views/files.js`'s
+Refresh handler for `wireSharedRowActions`:
+
+1. **The click handler already had a `try`/`catch`** — this was not an
+   uncaught exception reaching the renderer, as P31's language ("unhandled
+   error") suggested from the outside. The `catch` block called
+   `renderError(container, err)` (`desktop/src/renderer/dom.js`), which by
+   design replaces the *entire* view container's `innerHTML` with a
+   single error card — correct for a whole-view load failure (its other
+   callers), wrong for a single row's action failing.
+2. **The error message itself embeds an absolute filesystem path.**
+   `backend/app/services/shared_file_service.py`'s
+   `_validate_shareable_path` raises
+   `ValidationError(f"File does not exist: {path}")` (mapped to HTTP 400
+   by `backend/app/api/exception_handlers.py`'s `handle_validation_error`,
+   which passes the exception's `str()` straight through as the API
+   response's `message`). This message is appropriate when the *user*
+   supplied the path moments earlier (sharing via the native picker), but
+   inappropriate verbatim on a **Refresh** of an already-shared item,
+   where the path is backend-internal detail, not something the UI should
+   echo raw.
+
+Android's equivalent condition (`TransferStreamService`'s download/upload
+path) already raises a *different*, path-free message — `"The shared file
+is no longer available."` / `"The source file is no longer available."` —
+which is why Android's existing inline Retry UX never had this leak.
+`refresh_metadata`/`refresh_folder` go through the older,
+picker-oriented `_validate_shareable_path` message instead.
+
+## Implementation decisions
+
+**UI-01 — CSS-only, structural fix, no JS filename truncation:**
+
+- `table { table-layout: fixed; }` (`desktop/styles/app.css`) — column
+  widths now come from each table's own `<colgroup>` instead of content,
+  so one pathological cell can no longer affect any column's width.
+- A `<colgroup>` was added to both `files.js`'s and `transfers.js`'s table
+  markup. Every column except the one genuine free-text column per table
+  (Shared Files' Name, Transfers' File) gets an explicit width via new
+  utility classes (`.col-w-90`/`.col-w-100`/`.col-w-150`/`.col-w-160`/
+  `.col-w-260`/`.col-w-410`, named by pixel value since the two tables'
+  columns don't share a semantic grouping). The unset column takes 100% of
+  the table's remaining width — this is what stays "flexible" and
+  truncates.
+- `.cell-truncate` (`overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;`) is applied to the Name cell (Shared Files: file
+  rows, folder rows, received-file rows, received-folder rows) and to the
+  Device + File cells (Transfers: both plain rows and grouped batch rows)
+  — Transfers' Device column got the same defensive treatment even though
+  P31's repro was filename-specific, since a device's display name is
+  also unbounded free text (P23) and the identical column-blowout
+  mechanism applies to any free-text column, not just filenames (this
+  file's own Cross-Cutting Lessons section already says as much).
+  Direction/Status/Progress/Size/Type/Source/Date are short, bounded-
+  vocabulary content and were left untruncated.
+- Each truncated cell also gets a `title="<full value>"` attribute — a
+  plain HTML attribute, not a new feature — so the complete name is still
+  available on hover. Desktop has no Details dialog to link out to
+  (unlike Android's `FileActionMenu`/Details alert), and "Show in Folder"
+  (already an existing action on every shared row) already reveals the
+  full name in Explorer regardless.
+- **Actions column width was derived from real measurements, not
+  guessed:** a live DOM query on the unfixed table showed the 4
+  Shared-Files row-action buttons ("Show in Folder"/"Refresh"/"Unshare"/
+  "Delete") need ~366px of content width plus 32px of cell padding; an
+  initial 370px column caused a 2-line wrap (measured `rowActionsWidth:
+  337.5` vs. `~366` needed), corrected to 410px, re-measured to confirm
+  all 4 buttons render on one line (`actionButtonTops` all equal).
+  Transfers' Actions column (a single optional "Cancel" button) reused
+  the existing `.col-w-100`.
+- The underlying `file_name`/`folder_name`/`device_name` values are never
+  modified — only their on-screen representation. Verified via `title`
+  attribute and `scrollWidth` (full content) vs. `getBoundingClientRect()`
+  width (visible, truncated) staying different after the fix.
+
+**UI-02 — scoped per-row error, generic message only for the
+path-bearing case, renderer-only fix:**
+
+- `files.js`'s Refresh handler was extracted into `refreshRow()`, which no
+  longer calls `renderError(container, ...)` on failure. Instead
+  `showRowError(row, message, onRetry)` inserts one sibling `<tr
+  class="row-error">` (`colspan` = the row's own column count) directly
+  under the failed row — the header, "Add Files…"/"Add Folder…", every
+  other row, and the rest of the app all stay untouched, mirroring
+  Android's existing inline-message-plus-Retry pattern for the same
+  backend condition. A "Retry" button re-runs `refreshRow()` for that same
+  row; clicking it repeatedly (source still missing) re-shows the same
+  scoped message without duplicating rows or affecting siblings, and
+  succeeding (source restored) clears the error row and re-renders the
+  list normally.
+- `describeRefreshError(err)` maps any **400** response (this endpoint's
+  only possible `ValidationError` case — missing source, symlink, or no
+  longer a regular file) to a fixed, generic message: *"This item's
+  source could not be found. It may have been moved, renamed, or
+  deleted."* — never touching `err.message`, so the backend's
+  path-bearing text can never reach the DOM regardless of its exact
+  wording. Any **other** status (network unreachable → `status: 0` from
+  `api/client.js`'s own `ApiError`; a genuine `500`) keeps its own
+  `err.message` verbatim — a real outage is not silently reworded into
+  "source missing," satisfying the milestone's explicit requirement to
+  distinguish the two.
+- **No backend change was made.** The chosen fix maps the existing 400 at
+  the renderer boundary rather than changing
+  `_validate_shareable_path`'s message, per this milestone's preference
+  for a renderer-side fix over touching shared backend validation code
+  used by both the share flow (where echoing the user's own just-picked
+  path back is fine) and the refresh flow (where it isn't). This is
+  recorded as a **documented, smallest-necessary-change** decision, not
+  an oversight — see Deferred below.
+- `Unshare`/`Delete` on the same row were left unchanged: `Unshare` only
+  deletes the DB row (no filesystem check, can't hit this failure mode)
+  and `Delete`'s `shell:deleteItem` IPC handler already treats an
+  already-missing target as a no-op success (P29), so neither can
+  reproduce UI-02's condition — scoping the fix to `Refresh` alone matches
+  the actual failure surface, not just the literal repro steps.
+
+## Files modified
+
+- `desktop/styles/app.css` — `table-layout: fixed`; new `.col-w-*` width
+  utilities; `.cell-truncate`; new `tr.row-error`/`.row-error-message`/
+  `.row-error-actions` rules.
+- `desktop/src/renderer/views/files.js` — `<colgroup>` + `.cell-truncate`/
+  `title` on all four row-rendering functions; `wireSharedRowActions`'s
+  Refresh handler replaced with `refreshRow()`; new
+  `describeRefreshError()`/`showRowError()`/`clearRowError()` helpers.
+- `desktop/src/renderer/views/transfers.js` — `<colgroup>` +
+  `.cell-truncate`/`title` on Device/File cells in both
+  `renderTransferRow()` and `renderBatchRow()`.
+
+No backend, Android, dialog, navigation, pairing, Settings, or
+`TransferStreamManager` source was touched.
+
+## Automated tests
+
+`node --input-type=module --check < <file>` (the P30-established form
+that actually parses past a leading ESM `import`, per this file's own
+Cross-Cutting Lessons entry — plain `node --check` was confirmed
+insufficient) — both modified `.js` files: **clean, 0 errors.** No backend
+source changed, so `pytest`/`ruff` were not run (per this milestone's own
+instructions). No dedicated Desktop UI test suite exists, as stated
+up front — not claimed here.
+
+## Desktop live verification
+
+All against the real Electron app (`npm start`'s equivalent launch via
+Playwright `_electron`), the real spawned backend child process, and the
+real local `backend/relay.db` (which already held a real paired device,
+`RMX3997`, and 1370 pre-existing real transfer rows from earlier sessions
+on this machine).
+
+- **UI-01, after fix:** table width **988px** exactly filling the
+  1084px-window content area (was 1753px) for all three fixture rows
+  (normal / 180-char long / stale). Long-filename row: `nameCellWidth:
+  137px`, `nameScrollWidth: 1333px` (full text preserved, only the
+  *display* truncates), `textOverflow: "ellipsis"`, `title` attribute
+  present with the full 184-character name. Row-action buttons: all 4 on
+  one line (`actionLines: 1`, was 4), row height **67px** (was 206.5px).
+  A shared **folder** with an equally long (167-character) name was also
+  tested live (not just a file) — identical result: truncated with
+  ellipsis, `title` present, single-line actions, table still 988px.
+  Screenshots: `10-after-fix-shared-files.png`, `30-folder-row.png`.
+- **UI-01, Transfers, real populated data:** the app's own pre-existing
+  local `relay.db` already contained a genuine 184-character-filename
+  historical transfer row (id 1366) plus 89 other real rows, hidden by a
+  pre-existing local `historyClearedAt` "Clear History" `localStorage`
+  marker from an earlier, unrelated session on this machine (predates
+  this milestone entirely — confirmed by comparing the marker's timestamp
+  against the newest real transfer's `completed_at`). The marker was
+  temporarily read, cleared, the Transfers view inspected, then the
+  **exact original value was restored** afterward via `localStorage`, so
+  local dev/test state was left exactly as found. With real data visible:
+  table width **973px** (bounded), 90 rows, the long-filename row's File
+  cell at 202px with ellipsis + `title`, row height 50px (single line).
+  Unicode filenames already present in this real data (`文件.txt`,
+  `résumé 简体字 emoji😀 f...`) rendered correctly alongside the fix.
+  Screenshot: `20-transfers-populated-after-fix.png`.
+- **UI-02, after fix:** clicking Refresh on the row whose source was still
+  missing produced exactly one new `tr.row-error` directly under that
+  row, reading *"This item's source could not be found. It may have been
+  moved, renamed, or deleted."* with a Retry button — page header, "Add
+  Files…"/"Add Folder…", and both other rows (`normal-report.pdf`, the
+  long filename) stayed fully present and unaffected
+  (`pageHeaderVisible: true`, `addFilesVisible: true`, `totalRows: 4` = 3
+  data rows + 1 error row). No absolute path appeared anywhere in the DOM
+  (confirmed by asserting the exact fixed message string). Clicking Retry
+  again (source still missing) reproduced the identical single scoped
+  error, not a duplicate. The source file was then recreated on disk and
+  Retry clicked a third time: the error row was removed, the list
+  re-rendered normally, and both other rows were confirmed still present
+  and unchanged (`errorRowCount: 0`, `otherRowsIntact` lists all 3
+  original file names). Screenshots: `11-after-fix-ui02-scoped-error.png`,
+  `12-after-fix-refresh-recovered.png`.
+- **Console/page errors:** a `page.on("console"/"pageerror")` listener ran
+  for the full verification session. Zero JS exceptions. The only
+  `console error`-level entries were Chromium's own network-panel logging
+  of the two deliberately-triggered `400` responses (`"Failed to load
+  resource: the server responded with a status of 400 (Bad Request)"`) —
+  expected noise from testing the error path itself, not an application
+  exception.
+- **Regression sweep:** Devices (paired-device card, Rename/Remove
+  buttons), Pairing (idle state), Settings (device name/download
+  directory/Discoverable), and both Clear History buttons (correctly
+  `disabled` given no received-Shared-Files items / no history newer than
+  the pre-existing local marker in this run) all confirmed rendering with
+  zero console errors after navigating through them post-fix. Screenshots:
+  `31-nav-Devices.png`, `31-nav-Pairing.png`, `31-nav-Transfers.png`,
+  `31-nav-Settings.png`.
+
+## Android comparison
+
+Not re-verified against the physical RMX3997 device in this session — no
+Android source was touched (per this milestone's explicit instruction),
+and Android's own missing-source Retry UX and long-filename ellipsis
+truncation were both already confirmed live and correct in P31 (re-quoted
+above as the reference behavior this milestone's Desktop fix now matches).
+Re-running the Metro/`adb reverse` setup solely to re-confirm unchanged
+Android behavior was judged not worth the setup cost for this milestone;
+nothing in this session's diff can affect Android regardless.
+
+## Problems discovered during implementation
+
+- The Actions column's first-attempt width (370px, a rough estimate) was
+  **too narrow by ~30px** and caused a 2-line button wrap instead of the
+  intended 1 line — caught immediately by measuring real button widths
+  live rather than trusting the estimate, and corrected to 410px (see
+  Implementation decisions above). Left here as a reminder that any
+  future column-width tuning in this table should measure real rendered
+  button widths, not estimate from font size alone.
+
+## Deferred / Observed (not fixed in this milestone)
+
+- **UI-03** (folder emoji `📁` instead of the SVG icon language) and
+  **UI-04** (Clear History trigger color inconsistency) — untouched, per
+  P31's own P34 recommendation and this milestone's explicit "no P33/P34
+  work" instruction. The `📁` emoji is still present in both
+  `renderFolderRow`/`renderReceivedFolderRow` (`files.js`) — it now sits
+  inside the same `.cell-truncate` cell as the folder name and truncates
+  together with it, which is a side effect of the UI-01 fix, not a UI-03
+  fix.
+- **The Transfers progress-bar always-full-width bug (P29.1)** — still
+  present, still untouched. `transfers.js`'s `style="width:${progress}%"`
+  is unrelated to this milestone's scope (P33 is its own tracked
+  milestone) and was not modified.
+- **The path-bearing `ValidationError` message in
+  `shared_file_service.py`/`shared_folder_service.py`'s
+  `_validate_shareable_path`** is still raised as-is; the fix in this
+  milestone maps it at the Desktop renderer boundary rather than changing
+  the shared backend validation message itself (see Implementation
+  decisions above for why). This message is still returned verbatim by
+  the API to any caller — today only Desktop's own Refresh action
+  triggers it in practice, and it's now handled correctly there, but a
+  future caller of `POST /files/{id}/refresh`/`POST /folders/{id}/refresh`
+  that isn't Desktop's current renderer would inherit the same raw-path
+  message unless it applies an equivalent client-side mapping. Worth
+  revisiting if that endpoint ever gains a second caller.
+
+## Documentation changes
+
+This entry (`docs/15_QA_NOTEBOOK.md`, Milestone P32). No `README.md`
+change — no user-facing product behavior description in that file became
+inaccurate. `CLAUDE.md` was not updated with a new durable convention;
+P32's two fixes extend patterns already documented there (P21's
+`.row-actions`, P28/P30's dialog/history conventions) rather than
+establishing a new one, so no addition was judged necessary.
+`.gitignore` unchanged — no new generated artifact.
+
+## Remaining limitations
+
+- The Actions column widths (410px for Shared Files' 4-button row, 100px
+  for Transfers' single-button row) are tuned to this app's *current*
+  button labels at the *current* default 1100×720 window size. Renaming a
+  row action to a longer label, or adding a 5th action, would need the
+  same real-measurement process repeated — these are not derived
+  algorithmically from button content.
+- At very narrow window widths (well below the 1100px default), the
+  now-`table-layout: fixed` columns no longer shrink the Name/File column
+  gracefully below its available remaining width — `.row-actions`' own
+  `flex-wrap: wrap` still catches an Actions column overflow at a narrow
+  width by wrapping to 2 lines, which was not explicitly re-verified at a
+  resized (non-default) window in this session.
+
+## Final verdict
+
+Both P1 findings from P31 (UI-01, UI-02) are fixed and verified live
+against the real Electron app, the real backend, and real (both fixture
+and pre-existing historical) data, including folder rows and Unicode
+content. No regression was found in Devices, Pairing, Settings, Clear
+History, received files, or normal Shared Files/Transfers usage. No
+backend, Android, or unrelated Desktop source was modified. UI-03, UI-04,
+and the P29.1 progress-bar bug remain deliberately untouched, per this
+milestone's explicit boundary — not started, not implied fixed.

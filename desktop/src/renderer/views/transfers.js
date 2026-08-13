@@ -105,6 +105,14 @@ function renderTransfersTable(transfers) {
 
   return `
     <table>
+      <colgroup>
+        <col class="col-w-150" />
+        <col class="col-w-100" />
+        <col />
+        <col class="col-w-260" />
+        <col class="col-w-160" />
+        <col class="col-w-100" />
+      </colgroup>
       <thead><tr><th>Device</th><th>Direction</th><th>File</th><th>Progress</th><th>Status</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
@@ -122,9 +130,9 @@ function renderTransferRow(transfer) {
   const canCancel = CANCELLABLE_STATUSES.has(transfer.status);
   return `
       <tr data-transfer-id="${transfer.id}">
-        <td>${escapeHtml(transfer.device_name)}</td>
+        <td class="cell-truncate" title="${escapeHtml(transfer.device_name)}">${escapeHtml(transfer.device_name)}</td>
         <td>${escapeHtml(transfer.direction)}</td>
-        <td>${escapeHtml(transfer.file_name)}</td>
+        <td class="cell-truncate" title="${escapeHtml(transfer.file_name)}">${escapeHtml(transfer.file_name)}</td>
         <td>
           <div class="progress-bar"><div class="progress-fill" style="width:${progress}%"></div></div>
           ${progress}% (${formatBytes(transfer.bytes_transferred)} / ${formatBytes(transfer.file_size)})
@@ -148,9 +156,9 @@ function renderBatchRow(children) {
 
   return `
       <tr>
-        <td>${escapeHtml(children[0].device_name)}</td>
+        <td class="cell-truncate" title="${escapeHtml(children[0].device_name)}">${escapeHtml(children[0].device_name)}</td>
         <td>${escapeHtml(children[0].direction)}</td>
-        <td>&#128193; ${escapeHtml(folderName)} (${completedCount}/${children.length})</td>
+        <td class="cell-truncate" title="${escapeHtml(folderName)}">&#128193; ${escapeHtml(folderName)} (${completedCount}/${children.length})</td>
         <td>
           <div class="progress-bar"><div class="progress-fill" style="width:${progress}%"></div></div>
           ${progress}% (${formatBytes(transferredBytes)} / ${formatBytes(totalBytes)})

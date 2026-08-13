@@ -75,6 +75,14 @@ function render(container, files, folders, transfers, downloadDirectory) {
           message: "Add a file or folder to make it available for your paired devices to download.",
         })
       : `<table>
+      <colgroup>
+        <col />
+        <col class="col-w-90" />
+        <col class="col-w-100" />
+        <col class="col-w-90" />
+        <col class="col-w-160" />
+        <col class="col-w-410" />
+      </colgroup>
       <thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Source</th><th>Date</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`);
@@ -144,7 +152,7 @@ function renderRow(item) {
 function renderFileRow(file) {
   return `
     <tr data-id="${file.id}" data-path="${escapeHtml(file.file_path)}" data-kind="file">
-      <td>${escapeHtml(file.file_name)}</td>
+      <td class="cell-truncate" title="${escapeHtml(file.file_name)}">${escapeHtml(file.file_name)}</td>
       <td>${formatBytes(file.file_size)}</td>
       <td>${formatFileType(file.file_name)}</td>
       <td><span class="badge">Shared</span></td>
@@ -163,7 +171,7 @@ function renderFileRow(file) {
 function renderFolderRow(folder) {
   return `
     <tr data-id="${folder.id}" data-path="${escapeHtml(folder.folder_path)}" data-kind="folder">
-      <td>&#128193; ${escapeHtml(folder.folder_name)}</td>
+      <td class="cell-truncate" title="${escapeHtml(folder.folder_name)}">&#128193; ${escapeHtml(folder.folder_name)}</td>
       <td>${formatBytes(folder.total_size)}</td>
       <td>${formatFolderType(folder.file_count)}</td>
       <td><span class="badge">Shared</span></td>
@@ -182,7 +190,7 @@ function renderFolderRow(folder) {
 function renderReceivedFileRow(item) {
   return `
     <tr data-received-key="${escapeHtml(item.key)}" data-received-kind="file">
-      <td>${escapeHtml(item.name)}</td>
+      <td class="cell-truncate" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</td>
       <td>${formatBytes(item.size)}</td>
       <td>${formatFileType(item.name)}</td>
       <td><span class="badge">Received</span></td>
@@ -200,7 +208,7 @@ function renderReceivedFileRow(item) {
 function renderReceivedFolderRow(item) {
   return `
     <tr data-received-key="${escapeHtml(item.key)}" data-received-kind="folder">
-      <td>&#128193; ${escapeHtml(item.name)}</td>
+      <td class="cell-truncate" title="${escapeHtml(item.name)}">&#128193; ${escapeHtml(item.name)}</td>
       <td>${formatBytes(item.size)}</td>
       <td>${formatFolderType(item.fileCount)}</td>
       <td><span class="badge">Received</span></td>
@@ -231,14 +239,7 @@ function wireSharedRowActions(container) {
       window.relay.showInFolder(filePath);
     });
 
-    row.querySelector(".refresh").addEventListener("click", async () => {
-      try {
-        await api.post(`/${resource}/${id}/refresh`);
-        await refresh(container);
-      } catch (err) {
-        renderError(container, err);
-      }
-    });
+    row.querySelector(".refresh").addEventListener("click", () => refreshRow(container, row, resource, id));
 
     row.querySelector(".unshare").addEventListener("click", async () => {
       const confirmed = await confirmDialog({
@@ -272,6 +273,54 @@ function wireSharedRowActions(container) {
       }
     });
   });
+}
+
+/**
+ * Refresh a single Shared Files row without disturbing the rest of the
+ * list (P32 UI-02). `refresh_metadata`/`refresh_folder` reject a source
+ * that no longer exists (or is no longer a plain file/folder) with a 400
+ * whose message embeds the source's absolute filesystem path - a
+ * backend-internal detail never meant for display - so that case renders a
+ * generic, scoped message instead of the raw error text. Any other
+ * failure (network unreachable, an actual server error) keeps its own
+ * message, since those are genuinely different problems and must not be
+ * silently reworded into "source missing." Mirrors Android's equivalent
+ * missing-source inline message + Retry for the same backend condition.
+ */
+async function refreshRow(container, row, resource, id) {
+  clearRowError(row);
+  try {
+    await api.post(`/${resource}/${id}/refresh`);
+    await refresh(container);
+  } catch (err) {
+    showRowError(row, describeRefreshError(err), () => refreshRow(container, row, resource, id));
+  }
+}
+
+function describeRefreshError(err) {
+  if (err.status === 400) {
+    return "This item's source could not be found. It may have been moved, renamed, or deleted.";
+  }
+  return err.message || String(err);
+}
+
+function showRowError(row, message, onRetry) {
+  clearRowError(row);
+  const tr = document.createElement("tr");
+  tr.className = "row-error";
+  const td = document.createElement("td");
+  td.colSpan = row.children.length;
+  td.innerHTML = `
+    <p class="row-error-message">${escapeHtml(message)}</p>
+    <div class="row-error-actions"><button type="button" class="text-button retry">Retry</button></div>`;
+  tr.appendChild(td);
+  row.after(tr);
+  tr.querySelector(".retry").addEventListener("click", onRetry);
+}
+
+function clearRowError(row) {
+  const next = row.nextElementSibling;
+  if (next && next.classList.contains("row-error")) next.remove();
 }
 
 function wireReceivedRowActions(container, items, downloadDirectory) {

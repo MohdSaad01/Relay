@@ -279,7 +279,18 @@ form.device-card-rename {
   display: none;
 }
 
+/* table-layout: fixed (P32 UI-01) so a single unbreakable long value (e.g.
+   a space-free filename) can never stretch its column - and therefore
+   every sibling row's column, since a <td>'s width is shared down the
+   whole column - past the table's own width. Column widths come from each
+   view's <colgroup> (see files.js/transfers.js); any column left without
+   an explicit width (Shared Files' Name, Transfers' File) takes all
+   remaining space and truncates via .cell-truncate instead of growing
+   unbounded. Confirmed live in P31/P32: without this, a 180-character
+   filename forced the table to 1763px against a 1084px window and
+   stacked every row's action buttons across 4 lines. */
 table {
+  table-layout: fixed;
   border-collapse: collapse;
   width: 100%;
   background: var(--color-surface);
@@ -293,6 +304,47 @@ td {
   text-align: left;
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--color-border);
+}
+
+/* Fixed column-width utilities for a <colgroup>'s <col> elements (P32
+   UI-01) - named by pixel value since each table's columns need different
+   widths and there's no shared semantic grouping across them. A column
+   left without one of these takes the table's remaining width. */
+.col-w-90 {
+  width: 90px;
+}
+
+.col-w-100 {
+  width: 100px;
+}
+
+.col-w-150 {
+  width: 150px;
+}
+
+.col-w-160 {
+  width: 160px;
+}
+
+.col-w-260 {
+  width: 260px;
+}
+
+.col-w-410 {
+  width: 410px;
+}
+
+/* Truncates one cell's displayed text with an ellipsis instead of letting
+   it stretch its column (P32 UI-01) - the underlying data is never
+   modified, only the on-screen representation; a `title` attribute on the
+   element carries the full value for a hover tooltip, since Desktop has no
+   separate Details view to link out to for the complete name. Mirrors
+   Android's already-correct single-line ellipsis truncation for the same
+   content. */
+.cell-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 thead th {
@@ -428,6 +480,27 @@ button.danger:hover {
   margin-top: var(--space-1);
   font-size: 12px;
   color: var(--color-text-muted);
+}
+
+/* Per-row error state (P32 UI-02): a per-item action that fails (e.g.
+   Shared Files' Refresh on a row whose source no longer exists) renders a
+   scoped message directly under that one row instead of replacing the
+   whole view - every other row, the page header, and the Add Files/Add
+   Folder actions stay intact. Mirrors Android's equivalent inline
+   missing-source message + Retry pattern for the same underlying backend
+   failure. */
+tr.row-error td {
+  background: var(--color-danger-bg);
+}
+
+.row-error-message {
+  margin: 0 0 var(--space-2);
+  color: var(--color-danger);
+}
+
+.row-error-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .pairing-card {

@@ -64,7 +64,7 @@ function render(container, files, folders, transfers, downloadDirectory) {
   const actions = `
     <button id="add-files">Add Files...</button>
     <button id="add-folders">Add Folder...</button>
-    <button id="clear-history" class="text-button"${receivedItems.length > 0 ? "" : " disabled"}>Clear History</button>`;
+    <button id="clear-history" class="text-button danger"${receivedItems.length > 0 ? "" : " disabled"}>Clear History</button>`;
 
   container.innerHTML =
     pageHeader({ title: "Shared Files", subtitle: "Files and folders available to your paired devices.", actions }) +
@@ -171,7 +171,7 @@ function renderFileRow(file) {
 function renderFolderRow(folder) {
   return `
     <tr data-id="${folder.id}" data-path="${escapeHtml(folder.folder_path)}" data-kind="folder">
-      <td class="cell-truncate" title="${escapeHtml(folder.folder_name)}">&#128193; ${escapeHtml(folder.folder_name)}</td>
+      <td class="cell-truncate" title="${escapeHtml(folder.folder_name)}"><span class="cell-icon">${folderIcon}</span>${escapeHtml(folder.folder_name)}</td>
       <td>${formatBytes(folder.total_size)}</td>
       <td>${formatFolderType(folder.file_count)}</td>
       <td><span class="badge">Shared</span></td>
@@ -208,7 +208,7 @@ function renderReceivedFileRow(item) {
 function renderReceivedFolderRow(item) {
   return `
     <tr data-received-key="${escapeHtml(item.key)}" data-received-kind="folder">
-      <td class="cell-truncate" title="${escapeHtml(item.name)}">&#128193; ${escapeHtml(item.name)}</td>
+      <td class="cell-truncate" title="${escapeHtml(item.name)}"><span class="cell-icon">${folderIcon}</span>${escapeHtml(item.name)}</td>
       <td>${formatBytes(item.size)}</td>
       <td>${formatFolderType(item.fileCount)}</td>
       <td><span class="badge">Received</span></td>

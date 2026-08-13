@@ -596,6 +596,23 @@ tr.row-error td {
   height: 18px;
 }
 
+/* Small inline icon preceding a table cell's text (P34 UI-03) - e.g. a
+   folder row's Name cell - distinct from icon-badge's tinted circle, sized
+   to sit inline with a text line instead of leading a centered card. */
+.cell-icon {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  vertical-align: -2px;
+  margin-right: var(--space-1);
+  color: var(--color-text-muted);
+}
+
+.cell-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
 /* Two-column layout for the "waiting to scan" step: the QR itself next to
    a short "how to pair" list, so the step uses the available width
    instead of one small card floating in a mostly-blank page. Stacks to a
@@ -697,6 +714,19 @@ button.text-button {
 button.text-button:hover {
   background: var(--color-bg);
   border-color: transparent;
+}
+
+/* Destructive text-button variant (P34 UI-04): a borderless trigger like
+   Clear History that should read as destructive at rest, matching
+   Android's equivalent label - unlike button.danger, it stays borderless/
+   unfilled until hovered, since it's a nav-adjacent link-style action, not
+   a primary action button. */
+button.text-button.danger {
+  color: var(--color-danger);
+}
+
+button.text-button.danger:hover {
+  background: var(--color-danger-bg);
 }
 
 /* A native <progress> element draws its fill from its value/max attributes,

@@ -48,7 +48,7 @@ function render(container, transfers) {
   const visibleTransfers = applyHistoryReset(transfers, clearedAt);
   const hasHistoryToClear = visibleTransfers.some(isHistoricalTransfer);
 
-  const actions = `<button id="clear-history" class="text-button"${hasHistoryToClear ? "" : " disabled"}>Clear History</button>`;
+  const actions = `<button id="clear-history" class="text-button danger"${hasHistoryToClear ? "" : " disabled"}>Clear History</button>`;
 
   // P28: a single ordinary empty state regardless of *why* the list is
   // empty (never had transfers vs. history cleared vs. nothing currently

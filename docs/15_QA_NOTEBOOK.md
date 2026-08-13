@@ -5854,3 +5854,362 @@ device was used (stated explicitly, not implied). A real, pre-existing,
 separate gap — Desktop folder *downloads* have no grouped progress row at
 all — was discovered and documented, not fixed, per this milestone's
 scope boundary. UI-03 and UI-04 remain untouched, as instructed.
+
+---
+
+# Milestone P34 — Cross-Platform Visual Consistency
+
+**Scope:** the two P2/P3 findings carried forward from the P31 audit only —
+UI-03 (Desktop Shared Files folder rows use a raw `📁` emoji instead of the
+app's SVG icon language) and UI-04 (Desktop's "Clear History" trigger is
+visually neutral while Android's is red at rest). No other Desktop/Android
+screen was touched; P33's Transfers progress-bar fix was re-verified, not
+reimplemented.
+
+## Baseline (investigated before any change)
+
+Read this file's own P31/P32/P33 entries first, then inspected source:
+`desktop/src/renderer/views/files.js` (`renderFolderRow`/
+`renderReceivedFolderRow` both literally concatenated `&#128193;` — the
+`📁` emoji — before the folder name text; no icon markup at all),
+`desktop/src/renderer/icons.js` (already exports a hand-drawn `folderIcon`
+SVG, doc-commented as "same glyph as Android's FolderIcon", already used
+by `emptyState()`'s icon badges per P27 — but never used in a table row),
+`desktop/src/renderer/dom.js`'s `iconBadge()` (a 56px/36px tinted circle —
+too large for an inline table-cell icon, so not directly reusable as-is),
+and `desktop/styles/app.css` (`button.text-button` — borderless, no color
+override — and the existing `--color-danger`/`--color-danger-bg` tokens
+already used by `button.danger`/`.badge-danger`/`.icon-badge-danger`).
+
+Launched the real Electron app (`desktop/`) via a disposable Playwright
+`_electron` driver (`desktop/_p34_driver.mjs`/`_p34_server.mjs`, deleted at
+the end of this session — same one-shot-script technique P31/P32/P33 used,
+kept outside the tracked project). Seeded one real shared file
+(`report.pdf.txt`) and one real shared folder (`Vacation Photos`, 2 files)
+via direct `POST /files`/`POST /folders` calls against the real backend
+(`scratch_test_files/p34/`, gitignored, deleted at the end of this
+session). Live screenshots confirmed the emoji folder glyph
+(`01-shared-files-baseline.png`) and the neutral "Clear History" label
+(same screenshot; `02-transfers-baseline.png` for Transfers, where it was
+disabled/grey since there was no history yet).
+
+The one already-paired physical Android device (`RMX3997`, confirmed
+still paired from a prior session — not re-paired or disturbed) was
+available and used for live verification: `adb devices` showed it
+connected, Metro (`npm start` in `android/`) plus `adb reverse tcp:8081
+tcp:8081` were started (same one-time debug-build requirement P31 already
+documented), and the installed debug build was relaunched. Both were torn
+down at the end of this session (Metro process killed, `adb reverse
+--remove`).
+
+## UI-03 investigation
+
+Confirmed live in Desktop's Shared Files: the folder row rendered
+`📁 Vacation Ph…` as literal cell text, exactly as the P31 finding
+described, with `title="Vacation Photos"` on the truncating `<td>` (P32's
+`cell-truncate` still applied correctly underneath).
+
+**New finding, not in the P31 audit:** the P31 UI-03 entry's own suggested
+alternative — "omit a leading glyph entirely... Android's own row omits a
+leading folder glyph in the Files list and reads fine" — turned out to be
+factually wrong on live re-inspection. Android's real Files-tab folder row
+(`android/src/screens/files/FilesScreen.tsx` line 1362) renders
+`{'\u{1F4C1}'} {folder.folder_name}` — the *identical* raw `📁` emoji
+literal, not the SVG `FolderIcon` from `android/src/components/icons.tsx`
+(which Android *does* use correctly elsewhere — e.g. its own bottom-tab
+Files icon). This was confirmed both by reading the source and live on the
+physical RMX3997 (`android-03-files.png`/`android-04-after-download-tap.png`
+both show the same yellow folder emoji glyph next to "Vacation Photos").
+So Android is not actually a clean reference implementation for this
+glyph — it has the same underlying defect Desktop had, just never flagged
+because P31's audit only exercised Desktop's Shared Files view for this
+finding. Per this milestone's "document, don't fix" rule for discovered
+out-of-scope issues (§13 of the brief): **not fixed here** — P34's
+instructions scope UI-03 to "Desktop Shared Files folder rows" specifically
+and explicitly forbid a broader Android visual pass. Recorded here so a
+future milestone doesn't have to re-derive it, and so nobody assumes
+Desktop's new SVG icon now visually matches Android's *literal* row
+rendering — it matches Android's own *established SVG icon language*
+(`FolderIcon`, used in its nav tab) instead, which is what CLAUDE.md's
+P23/P27 icon-reuse convention was actually about.
+
+## UI-03 root cause
+
+`renderFolderRow`/`renderReceivedFolderRow` in
+`desktop/src/renderer/views/files.js` built their Name cell with a raw
+HTML entity (`&#128193;`) instead of routing through the app's existing
+`icons.js`/`dom.js` icon system — the same kind of one-off markup P19–P27
+were written specifically to eliminate elsewhere in the app. `folderIcon`
+already existed and was already correctly reused by the empty state on
+this exact same view; it simply wasn't reused in the row itself.
+
+## UI-03 implementation
+
+- `desktop/src/renderer/styles` → `desktop/styles/app.css`: added
+  `.cell-icon` (14×14px, `vertical-align: -2px`, `color:
+  var(--color-text-muted)`), a new small inline-icon variant distinct from
+  `iconBadge()`'s circular badge — sized to sit inline with a text line in
+  a table cell instead of leading a centered card, since `icon-badge-sm`
+  (36px/18px, P27) was still too large and circular for this context.
+- `desktop/src/renderer/views/files.js`: imported the existing
+  `folderIcon` from `icons.js` (already imported in this file for the
+  empty state) and replaced `&#128193; ${escapeHtml(name)}` with
+  `<span class="cell-icon">${folderIcon}</span>${escapeHtml(name)}` in both
+  `renderFolderRow` and `renderReceivedFolderRow`. No behavior change —
+  `cell-truncate`, `title`, row actions, and data attributes are untouched.
+
+**Deliberately not touched:** `desktop/src/renderer/views/transfers.js`'s
+`renderBatchRow` (a folder-batch row in the Transfers list, P21.1) has the
+identical `&#128193;` emoji at line 182. This is the same defect but a
+different screen/finding than what P31 flagged as UI-03 (which named only
+Shared Files) and P34's brief scopes UI-03 to "Desktop Shared Files folder
+rows" specifically — "Do not modify unrelated Desktop... screens." Left
+untouched and documented here per §13's discovered-issue rule; a
+reasonable candidate for a future milestone to fold in alongside a
+same-glyph Android fix.
+
+## UI-04 investigation
+
+Confirmed live: Desktop's "Clear History" (`files.js` and `transfers.js`,
+both `class="text-button"`, no `danger`) rendered in the same muted
+gray/black text as any other neutral action, both enabled
+(`02-transfers-baseline.png` after seeding one real transfer) and disabled
+(`01-shared-files-baseline.png`, no history yet). Android's equivalent
+(`FilesScreen.tsx`/`TransferListScreen.tsx`) rendered red at rest before
+any tap, confirmed live on RMX3997 (`android-04-after-download-tap.png` —
+Shared Files' "Clear History" turned red the instant a real completed
+transfer existed; `android-06-transfers.png` — Transfers tab, same red
+label). Both platforms' confirm dialogs were already well-matched: Android
+showed "Clear transfer history?" / "Completed, failed, and cancelled
+transfers will be removed from this list. Downloaded files are not
+deleted, and active or queued transfers are not affected." with a red
+"Clear History" confirm button (`android-07-clear-history-dialog.png`);
+Desktop's `confirmDialog()` (P30) showed "Clear completed, failed, and
+cancelled transfers from this list?" / "Active transfers stay visible, and
+nothing is deleted from your files." with the same red confirm button
+(`06-transfers-clear-dialog-baseline.png`) — already covering the same
+three required points (history-only, files not deleted, active transfers
+unaffected), so left unchanged per the brief's "if wording is already
+correct, leave it" instruction.
+
+**Note on a conflict between two source documents:** this file's own P31
+UI-04 entry recommended the *opposite* direction — "Desktop's
+neutral-until-confirmed reads slightly better, since CLAUDE.md's own P30
+section explicitly reserves red for the confirm button... apply it on both
+platforms" (i.e. make Android neutral, not Desktop red). P34's own brief
+(§5) explicitly instructs the reverse: "Android already presents Clear
+History as a destructive action. The Desktop version should use the same
+semantic treatment... use the existing destructive/red design token."
+Per CLAUDE.md's own conflict-resolution rule ("follow the most specific
+document and report the inconsistency instead of making assumptions"), the
+current, more specific P34 brief was followed — Desktop was made red to
+match Android — and this discrepancy is reported here rather than silently
+picked one way. P30's "confirm button, not the trigger, carries red" rule
+was written before this milestone existed and is treated as superseded for
+this one specific trigger by P34's explicit instruction, not overturned in
+general — any other Desktop confirmation trigger (Unpair, Delete, Unshare)
+is unaffected and still neutral until its own dialog opens.
+
+## UI-04 root cause
+
+`button.text-button` (`app.css`) intentionally has no color rule of its
+own (`border-color: transparent; background: none`) — it inherits the
+base `button` rule's `color: var(--color-text)`. There was no
+`text-button`+`danger` combination rule, so simply adding a `danger` class
+to the existing markup did nothing until one was added.
+
+## UI-04 implementation
+
+- `desktop/styles/app.css`: added `button.text-button.danger { color:
+  var(--color-danger); }` and `button.text-button.danger:hover {
+  background: var(--color-danger-bg); }` immediately after the existing
+  `button.text-button`/`:hover` rules — reuses the existing `--color-danger`/
+  `--color-danger-bg` tokens verbatim (no new color), and deliberately
+  stays borderless/unfilled (unlike `button.danger`, the filled-pill
+  variant used for actual destructive action buttons like Delete) since
+  Clear History is a link-style header action, matching Android's own
+  label-only red text. No custom `:disabled` override was added — the
+  existing base `button:disabled { opacity: 0.5 }` rule already applies
+  uniformly across the button system, so a disabled red Clear History
+  correctly fades to a lighter red rather than switching to gray (verified
+  live, see below), consistent with how every other button variant already
+  handles its own disabled state.
+- `desktop/src/renderer/views/files.js` and
+  `desktop/src/renderer/views/transfers.js`: changed
+  `class="text-button"` to `class="text-button danger"` on the one
+  `#clear-history` button in each file. No other markup, no JS logic, and
+  no confirmation-dialog code changed in either file.
+
+## Files modified
+
+- `desktop/styles/app.css`
+- `desktop/src/renderer/views/files.js`
+- `desktop/src/renderer/views/transfers.js`
+
+No backend, Android, or other Desktop file was modified.
+
+## Automated test results
+
+`node --input-type=module --check` (P30's documented ESM-safe form, not
+plain `node --check`) against both modified `.js` files: both `OK`.
+`app.css` has no automated checker in this project (none exists for any
+milestone) — verified live instead, per this milestone's own instructions.
+No Android source was modified, so `tsc`/`eslint`/`jest` were not run
+(per the brief's own "if Android source is not modified... not
+mandatory" instruction). No backend file was touched.
+
+## Desktop live verification
+
+All via the real Electron app (not just source review), using the
+Playwright driver described above:
+
+1. Shared Files with a real shared file and folder — folder row now shows
+   the small `folderIcon` SVG (muted gray, correctly sized inline, doesn't
+   disturb `cell-truncate`) instead of the emoji
+   (`09-shared-files-after-fix.png`, diffed visually against
+   `01-shared-files-baseline.png`).
+2. Shared Files' "Clear History", disabled state (no history yet): renders
+   as faded red (`opacity: 0.5` over `--color-danger`), not gray —
+   confirmed correct per the "reuse the existing disabled convention"
+   decision above.
+3. Transfers with one real completed transfer (downloaded live from
+   RMX3997, not synthesized): "Clear History" renders solid red at rest,
+   enabled (`10-transfers-after-fix.png`).
+4. Clicked "Clear History" → confirm dialog opens, wording and red confirm
+   button unchanged from baseline (`11-transfers-confirm-dialog-after-fix.png`
+   vs. `06-transfers-clear-dialog-baseline.png` — pixel-equivalent).
+5. Confirmed the dialog (clicked `.dialog-confirm` specifically, after an
+   earlier misclick on the page's own `#clear-history` trigger — caught
+   because the dialog was still open in the next screenshot — briefly
+   stacked a second dialog instance; recovered with Escape, no code
+   defect, a driver-script mistake) → history cleared, Transfers now shows
+   the unchanged "No history" empty state with the P27 `transferIcon`
+   badge (`14-transfers-final.png`), and "Clear History" itself returned to
+   its disabled/faded-red state.
+6. Shared Files re-checked after the Transfers-tab Clear History: the
+   currently-shared `report.pdf.txt`/`Vacation Photos` are still listed,
+   unaffected (`15-shared-files-final.png`) — confirms Clear History still
+   only touches transfer-history-derived rows, never currently-shared
+   source items, matching P21/P28's documented policy (unchanged code
+   path, not touched by this milestone).
+
+## Android physical-device verification (RMX3997)
+
+Performed live, not simulated: launched the real debug build (Metro +
+`adb reverse`, per P31's documented requirement), downloaded the real
+seeded `report.pdf.txt` from Desktop, confirmed the resulting completed
+transfer in both the Files tab (Download → Open) and Transfers tab.
+Screenshotted (not modified) as the reference for UI-04's Android-side
+baseline: red "Clear History" label at rest on both tabs
+(`android-04-after-download-tap.png`, `android-06-transfers.png`), and the
+confirm dialog (`android-07-clear-history-dialog.png`). This is also what
+surfaced the UI-03 Android-emoji discrepancy documented above. Cancelled
+the dialog on Android (did not confirm) — no Android state was changed by
+this milestone.
+
+## P33 regression verification
+
+Re-checked, not reimplemented: the real completed transfer's progress row
+rendered a native `<progress class="transfer-progress" value="100"
+max="100">` at a genuine full-width fill with the correct "100% (15 B / 15
+B)" label and a green "Completed" badge, both before
+(`05-transfers-with-history.png`) and after
+(`10-transfers-after-fix.png`) this milestone's CSS/JS changes — visually
+identical except for the now-red Clear History label, confirming no
+regression. Failed/Cancelled badge rendering and long-filename truncation
+were not independently re-exercised live this session (the one real test
+transfer used a short filename and completed successfully) — but neither
+`statusBadge()`, `progressBar()`, `progressPercent()`, nor any
+`cell-truncate`/`col-w-*` CSS rule was touched by this milestone's diff,
+so there is no plausible mechanism for a regression in either; noted as a
+source-level (not live) confirmation for those two specific states.
+
+## Problems discovered
+
+- Android's Files-tab folder row uses the identical raw `📁` emoji as
+  Desktop's did (see UI-03 investigation above) — pre-existing,
+  out-of-scope for this Desktop-only milestone, not fixed.
+- `desktop/src/renderer/views/transfers.js`'s `renderBatchRow` folder-batch
+  row has the same emoji, also pre-existing and out-of-scope for a
+  Shared-Files-scoped UI-03 fix, not fixed.
+- A discrepancy between this file's own P31 UI-04 recommendation and
+  P34's brief (see "Note on a conflict" above) — resolved in favor of the
+  more specific, current instruction; documented rather than silently
+  decided.
+
+## Deferred issues
+
+- Both "Problems discovered" emoji instances above (Android Files row,
+  Desktop Transfers batch row) are explicitly deferred, not fixed, per
+  this milestone's scope boundary.
+- Everything already deferred as of P31/P33 (Send-direction folder
+  grouping gap, progress percentage granularity, session-token-lifetime
+  Settings scope, WebSocket/real-time push, packaging) remains deferred
+  and was not revisited.
+
+## Documentation changes
+
+This entry (`docs/15_QA_NOTEBOOK.md`, Milestone P34). `CLAUDE.md` was not
+updated — the guidance below explains why in enough detail that a
+future milestone doesn't need to re-litigate it: P34 established two
+narrow, genuinely new conventions (reuse `.cell-icon`+an existing icons.js
+SVG for any future inline-row icon; a `text-button` gets a `.danger`
+modifier for a destructive-but-neutral-until-relevant trigger like Clear
+History), but the brief's own instruction was to update CLAUDE.md "only if
+P34 establishes a durable convention," and both of these are small enough,
+single-call-site-driven CSS/markup additions that they read more clearly
+inline in this QA notebook entry (with full before/after evidence) than as
+a terse CLAUDE.md bullet a future session would have to trust without the
+same context. If a *third* call site for either pattern appears in a
+future milestone, that is the right trigger to promote both into a proper
+CLAUDE.md convention section. `README.md` was not touched — no user-facing
+capability changed. `.gitignore` was not touched — no new generated
+artifact (the driver scripts and test fixtures were scratch/gitignored
+paths, deleted at session end, matching P31–P33's own precedent).
+
+## Remaining limitations
+
+- The Android device's downloaded copy of the test `report.pdf.txt`
+  could not be located and removed via `adb shell find` under
+  `/storage/emulated/0` (checked `Download/Relay`, `Download/RelayTest`,
+  `Documents`; the app-private external-files directory is permission-
+  denied to an unprivileged `adb shell` session). The file is a 15-byte
+  disposable text fixture ("report content") with no sensitive content;
+  this is recorded rather than silently left unmentioned, matching P31's
+  own precedent of documenting a minor unremovable test-cleanup leftover
+  rather than omitting it.
+- The pre-existing `Download/Relay/p28-android-test.txt` file on the
+  physical device (from an earlier, unrelated session) was left
+  untouched — not created by this milestone, not this session's to delete.
+- UI-03/UI-04's Android-side counterparts (the Files-row emoji, and
+  P31's own now-superseded red-trigger recommendation) were investigated
+  and documented but intentionally not modified, per this milestone's
+  explicit Desktop-only scope for UI-03 and the brief's explicit
+  Desktop-matches-Android direction for UI-04.
+
+## Final verdict
+
+Both UI-03 and UI-04 are fixed and verified live against the real
+Electron app, using real backend-seeded data and one real completed
+transfer from the physical RMX3997 device — not source-reviewed only.
+UI-03: Desktop Shared Files' folder rows now render the existing
+`folderIcon` SVG (already used elsewhere in the app, P19/P20/P25/P27's
+icon language) via a new small `.cell-icon` inline-icon CSS class, instead
+of a raw emoji character. UI-04: Desktop's Clear History trigger (both
+Shared Files and Transfers) now renders in the existing `--color-danger`
+red at rest, matching Android's established convention, via a new
+`button.text-button.danger` CSS rule reusing existing color tokens — no
+new color, no new dialog, no new button component. Clear History's
+underlying behavior (marker-based history filtering, confirm dialog
+wording, currently-shared items surviving a clear, active/queued
+transfers unaffected) is byte-for-byte unchanged; P33's native
+`<progress>` fix continues to render correctly with no regression. Two
+new, pre-existing, out-of-scope defects were discovered and documented
+(not fixed): Android's own Files-row folder emoji, and Desktop Transfers'
+batch-row folder emoji. A genuine conflict between this file's own P31
+recommendation and P34's brief for UI-04's direction was identified and
+resolved in favor of the more specific current instruction, with the
+discrepancy recorded rather than silently overridden. All test
+fixtures, paired-device state, and driver scripts were cleaned up; the
+one exception (an unlocatable disposable file on the physical device) is
+documented above. P34 ends here — P35 was not started.

@@ -4436,6 +4436,387 @@ introduced.
 
 ---
 
+## P31 — Product UI/UX Audit & Finishing Backlog
+
+**Scope:** audit-only milestone. No application source, CSS, TypeScript,
+backend, database, dependency, or configuration file was changed. Goal:
+determine the actual current product state after P1–P30 by exercising the
+real Desktop app and the real Android app on the physical test device, and
+produce a prioritized, evidence-based finishing backlog. Per the
+milestone's own instructions, this entry is the primary deliverable.
+
+### Environments
+
+- **Desktop:** the real Electron app (`desktop/`), launched via a
+  temporary Playwright `_electron` driver script (kept outside the tracked
+  project, in the session scratch directory, deleted afterward — no
+  project skill for this existed yet; this is a candidate for
+  `/run-skill-generator` in a future session). Backend ran as the app's
+  own spawned child process against the real `backend/relay.db`, unmodified
+  except for P31's own temporary test shares (added via direct backend API
+  calls to `POST /files`/`POST /folders`, and fully unshared again via
+  `DELETE /files/{id}`/`DELETE /folders/{id}` at the end — see Cleanup).
+- **Android:** the real RMX3997 physical device over ADB, running the
+  already-installed **debug** build of `com.relay.mobile`. This build
+  requires a live Metro connection (see Verification Limitations) — Metro
+  was started and `adb reverse tcp:8081 tcp:8081` set up specifically to
+  get past the dev-mode "Unable to load script" screen before any real
+  testing was possible, then torn down again at the end.
+- One already-paired real device (RMX3997 ↔ this desktop) was reused for
+  every cross-platform journey; per the P24 precedent, its Unpair was
+  opened and inspected but deliberately never confirmed, to avoid
+  disrupting the only physical pairing available for testing.
+
+### Methodology
+
+Both apps were driven live, not inferred from source alone. Desktop states
+were captured via Playwright screenshots plus live DOM/CSS introspection
+(`getBoundingClientRect`, `getComputedStyle`) to confirm layout claims with
+real numbers, not just visual impression. Android states were captured via
+`adb exec-out screencap`. Five throwaway test fixtures were created and
+shared to populate realistic states for the real-world-edge-case checks in
+the milestone brief: a normal small file, a **zero-byte file**, a filename
+with **mixed Unicode + emoji** (`résumé 简体字 emoji😀 file.txt`), a
+**180-character unbroken filename** with no spaces, and a 3-file **nested
+folder** (`Vacation Photos/Subfolder/…`, including a Unicode filename
+inside the folder). An **80 MB file** was added later specifically to
+observe in-progress transfer states. All fixtures and their resulting
+shares/downloads were removed at the end (see Cleanup).
+
+### Findings
+
+#### P1 — High
+
+**UI-01 — Desktop Shared Files/Transfers: a single unbreakable long
+filename breaks the entire table's layout, not just its own row.**
+- *Current behavior:* the 180-character no-space test filename forced its
+  `<td>` to grow unbounded (`white-space: normal`, `word-break: normal`,
+  `overflow-wrap: normal` — confirmed via `getComputedStyle`), which in
+  turn forced the whole `<table>` to 1763px wide against a 1084px-wide
+  window (confirmed via `getBoundingClientRect`). Because table columns
+  share width across all rows, this starved the Actions column for
+  **every row in the list**, not just the offending one: the Actions
+  `<td>` shrank to ~115px, forcing all four row-action buttons
+  (`Show in Folder`/`Refresh`/`Unshare`/`Delete`) to stack into 4 separate
+  lines instead of one, ballooning every row to ~206px tall. The visible
+  result: a table showing only a `NAME` header and filenames, with a
+  horizontal scrollbar, a vertical scrollbar, and huge dead vertical space
+  in every row — reproduced identically in both the Shared Files view and
+  the Transfers view, since both use the same global `table`/`td` rules in
+  `desktop/styles/app.css`.
+- *Why it's a problem:* this isn't a cosmetic nit confined to one
+  pathological row — it degrades the entire list's usability the moment
+  any one item has a long, space-free name (a plausible real name: an
+  auto-generated export, a concatenated timestamp filename, a downloaded
+  report). A first-time user would reasonably conclude the app is broken.
+- *Contrast (this is what makes it P1 and not merely "long names are
+  ugly"):* Android's own Shared Files list handles the **identical**
+  filename cleanly — single line, ellipsis-truncated
+  (`aaaa…aaaa….txt`), no effect on sibling rows. The backend data isn't
+  the problem; Desktop's table CSS has no `max-width`/`text-overflow`
+  handling on the Name column while Android's row component does.
+- *Desired behavior:* cap the Name column's width and truncate with
+  `text-overflow: ellipsis` (matching Android's already-correct
+  behavior), so no single row's content can affect any other row's
+  height/column widths.
+- *Evidence:* `desktop/styles/app.css` lines 282–309 (`table`, `th`/`td`
+  rules — no `max-width`/`text-overflow` anywhere); live
+  `getBoundingClientRect()`/`getComputedStyle()` calls against the running
+  app (table `{width: 1763.5, height: 1076.5}` vs. window
+  `{innerWidth: 1084}`; actions `<td>` `{width: 114.8}`; row-action button
+  `top` offsets `[272.5, 333.5, 375, 416.5]` — four distinct rows, i.e.
+  genuinely stacked, not a screenshot artifact).
+- *Dependencies:* none — a CSS-only fix to `desktop/styles/app.css`'s
+  `td`/`th` rules (or a Name-column-specific class).
+- *Suggested milestone:* **P32 — Desktop Files & Transfers Table
+  Hardening**.
+
+**UI-02 — Desktop Shared Files: Refresh on a file whose source was
+externally deleted wipes the entire view with a raw backend error string.**
+- *Current behavior:* deleting a shared file's underlying disk file (this
+  is deliberately *not* auto-detected on refresh, per the already-correct,
+  documented policy in this file's P25/P29 entries and
+  `SharedFileService.refresh_metadata`) and then clicking that row's
+  **Refresh** button throws an unhandled error in the renderer. The
+  **entire** `#view-container` — page header, "Add Files…"/"Add Folder…"
+  buttons, and every other row in the list — is replaced by a single
+  unstyled red card reading `File does not exist:
+  C:/Thomas/Encipher/Python/Relay/scratch_test_files/p31/normal-report.pdf.txt`,
+  exposing the full absolute local filesystem path. The rest of the app
+  (nav, other tabs) still works, and navigating away and back to Shared
+  Files fully recovers the correct list (the stale entry stays, by
+  design) — so this is a renderer-level unhandled-error-state bug, not
+  data loss, but it is jarring and looks like the whole feature crashed.
+- *Why it's a problem:* (1) it destroys the user's context — every other
+  shared file/folder becomes invisible until they navigate away and back;
+  (2) it surfaces a raw backend exception string with an internal
+  filesystem path, which is exactly the kind of unnecessarily-exposed
+  technical detail the milestone brief calls out; (3) it contradicts the
+  app's own established error-handling elsewhere (e.g. the Devices/
+  Pairing/Settings views all render scoped, human-readable errors without
+  losing the rest of the page).
+- *Contrast:* Android's equivalent flow — tapping Download on the exact
+  same stale entry — shows a small scoped inline message directly under
+  that one row ("The source file is no longer available.") with a
+  **Retry** button, and every other row is completely unaffected. This
+  proves the backend already reports the failure in a form a client can
+  present gracefully (a per-item error, not a page-level exception);
+  Desktop's Refresh handler just doesn't catch/scope it the way its
+  Android counterpart (or Desktop's own other views) do.
+- *Desired behavior:* an individual row's Refresh failure should surface
+  as a scoped, per-row error (or a dismissible toast) without discarding
+  the rest of the list or exposing a raw path — mirroring Android's
+  already-correct pattern for the same case.
+- *Evidence:* live screenshots (`15-missing-source-refresh.png`, before/
+  after: full populated list → single red error card covering the whole
+  view → full list restored on re-navigation); confirmed reproducible
+  once via `.refresh` button click on the row with the deleted source.
+- *Functional defect note:* this is also a genuine functional defect, not
+  purely presentational — an unhandled exception should not be able to
+  blank a whole view.
+- *Dependencies:* none.
+- *Suggested milestone:* **P32 — Desktop Files & Transfers Table
+  Hardening** (grouped with UI-01 since both are Shared Files/Transfers
+  list robustness issues).
+
+#### P2 — Medium
+
+**UI-03 — Desktop Shared Files: folder rows use a plain emoji glyph
+("📁") instead of the app's own SVG icon language.**
+- *Current behavior:* every shared folder's Name cell renders as literal
+  text `📁 Vacation Photos` — a Unicode emoji character concatenated with
+  the folder name — while the file row directly above it
+  (`résumé 简体字 emoji😀 file.txt`) has no leading icon at all.
+- *Why it's a problem:* CLAUDE.md documents a deliberate, hand-drawn SVG
+  icon system (`desktop/src/renderer/icons.js`, P19/P20/P25/P27) used
+  consistently everywhere else in the app specifically so icon rendering
+  doesn't depend on the OS's emoji font. A raw emoji character breaks that
+  system in exactly one place, renders inconsistently across OS/font
+  versions, and is asymmetric (folders get a glyph, files don't) even
+  though the existing `Type` column (`Folder (N items)` vs. `.ext`)
+  already communicates the same distinction.
+- *Desired behavior:* use the existing `folderIcon` SVG (already defined
+  in `icons.js` and already used for empty states, per P27) inline in the
+  Name cell instead of the emoji character, or omit a leading glyph
+  entirely and rely on the Type column (Android's own row omits a leading
+  folder glyph in the Files list and reads fine).
+- *Evidence:* live DOM: `<td>📁 Vacation Photos</td>` (no icon markup,
+  emoji is literal cell text), contrasted with every other icon usage in
+  the app going through `iconBadge()`/inline `<svg>`.
+- *Dependencies:* none.
+- *Suggested milestone:* **P34 — Cross-Platform Visual Consistency**.
+
+#### P3 — Polish
+
+**UI-04 — Cross-platform: "Clear History" trigger color is inconsistent
+between platforms even though the resulting dialogs match.**
+- *Current behavior:* Desktop's "Clear History" link (Shared Files and
+  Transfers) renders in the neutral `.text-button` color at rest, per
+  P30's convention that the trigger stays neutral and only the confirm
+  dialog's button is destructive-red. Android's equivalent "Clear
+  History" label renders in red **before** the dialog even opens. Both
+  platforms' resulting confirmation dialogs are otherwise well-matched
+  (matching title, explanatory body text about what is/isn't affected,
+  red destructive confirm button) — this is only the resting trigger-label
+  color.
+- *Why it's a problem:* minor, but it's the one place the two platforms
+  visibly disagree on how "about to be able to do something destructive"
+  should be signaled before any confirmation step, which the milestone
+  brief specifically asks to check for (destructive-action language/color
+  consistency).
+- *Desired behavior:* pick one convention (Desktop's neutral-until-
+  confirmed reads slightly better, since CLAUDE.md's own P30 section
+  explicitly reserves red for the confirm button) and apply it on both
+  platforms.
+- *Evidence:* `06-devices-rename-open.png`-era Desktop screenshots showing
+  a neutral "Clear History" label vs. Android screenshot
+  `android-07-downloads-triggered.png` showing the same label in red.
+- *Suggested milestone:* **P34 — Cross-Platform Visual Consistency**.
+
+**Carried forward, not new — still open.** Desktop's Transfers progress
+bar (`transfers.js`, `style="width:${progress}%"`) still always renders
+at full width regardless of actual transfer progress, per this file's own
+P29.1 entry (the CSP blocks inline `style` application; the fix is a CSS
+class/variable toggle, not attempted here since it's out of this
+audit-only milestone's scope). Not re-verified against a genuine partial
+percentage in P31 (see Verification Limitations — every real test
+transfer completed too fast on LAN to catch a partial state), but nothing
+in `transfers.js` has changed since P29.1 confirmed it live, so it is
+carried forward as **Deferred**, not re-opened as new, and not marked
+Existing/Correct.
+
+### Existing / Correct (re-verified live, not simply assumed from prior docs)
+
+- Desktop Devices card: paired-device display, inline Rename
+  (open/save/cancel), and the "Unpair this device?" confirmation dialog
+  (wording, Cancel/Unpair styling, survives the Rename form being
+  cancelled underneath it) — all match P23/P29/P29.1/P30 exactly.
+- Desktop Pairing: idle "Ready to pair a device" card and the active QR
+  two-column layout (QR card + numbered "How to pair" card), Cancel
+  returns cleanly to idle — matches P20.
+- Desktop Shared Files/Transfers "Clear History" confirmation dialog
+  copy — clearly states what is and isn't affected ("Active transfers
+  stay visible, and nothing is deleted from your files.") — a genuinely
+  good example of the milestone brief's "does the destructive action
+  communicate its consequences" question being already answered well.
+- Desktop Settings — Device display name / Download directory / Browse /
+  Discoverable toggle only; no leaked `session_token_lifetime_minutes`
+  control — matches P25.
+- Android Files screen: empty/populated states, long-press action menu
+  (Open/Share/Delete/Details for a completed row), the Details dialog
+  (Size/Shared/Status only, no raw MIME type), and the missing-source
+  Download → inline error + Retry flow — all match P22 and are well
+  executed; the missing-source handling in particular is a strong
+  positive contrast against Desktop's UI-02 above.
+- Android Settings screen — Device/Storage sections only, matches P23
+  exactly.
+- Android "Open" (ACTION_VIEW chooser) and folder "Open" (opens the
+  system file manager at the real downloaded folder) both work correctly
+  against real downloaded content.
+- Journey C (folder download): the 3-file nested `Vacation Photos/
+  Subfolder/…` structure, including a Unicode filename inside the
+  subfolder, was recreated byte-for-byte and structurally intact in the
+  Android system file manager — re-confirms P26's "folder identity is
+  already fully preserved" finding was not a regression.
+- Journey D (Android upload → Desktop receive): the uploaded file
+  correctly appears in Desktop's Shared Files with a "Received" badge and
+  the reduced action set (Open/Show in Folder/Delete — no Refresh/
+  Unshare, since it has no `SharedFile` row) — matches P21 §8's
+  derive-from-`GET /transfers` logic exactly.
+- Unicode + emoji filenames (`résumé 简体字 emoji😀 file.txt`) render
+  correctly end-to-end on both platforms (share, list, download, upload,
+  Details).
+- A zero-byte file shares, downloads, and opens without any special-case
+  failure on either platform.
+- Android's Upload confirmation bottom sheet (P26) — correct wording
+  ("Upload this file"), Cancel discards with no backend call.
+- The `bigfile-80mb.bin` real end-to-end download over the real LAN
+  completed correctly (80.0 MB / 80.0 MB, byte-identical), confirming
+  the streaming engine still works correctly against a non-trivial
+  payload — not just the small fixtures.
+
+### Deferred
+
+- Desktop Transfers progress-bar-always-full-width bug (P29.1) — see
+  above; still open, out of this audit-only milestone's scope to fix.
+- Session-token-lifetime / device-name-only-Settings-scope question
+  raised in M9 ("Not Yet Implemented" in `CLAUDE.md`) — unchanged,
+  re-confirmed still deliberately out of scope.
+
+### Functional defects discovered
+
+- UI-02 above (Desktop Shared Files Refresh-on-missing-source) is a
+  genuine functional defect (unhandled exception reaching the renderer
+  and blanking a whole view), reported under UI-02 rather than as a
+  separate item since the fix is the same either way.
+
+### Verification / tooling limitations
+
+- **The installed Android build is a debug build requiring a live Metro
+  connection.** Launching it cold showed React Native's "Unable to load
+  script" dev-mode error screen — not a product defect. Getting past it
+  required starting `npm start` (Metro) in `android/` and running
+  `adb reverse tcp:8081 tcp:8081` before the app would load at all. Future
+  sessions testing this build should expect the same step; a **signed
+  release APK** would not have this dependency (this is exactly the gap
+  tracked under Packaging & Deployment, not a new finding).
+- **Electron's native OS dialogs (`dialog.showOpenDialog` for "Add
+  Files…"/"Add Folder…"/Settings' "Browse…") cannot be driven by
+  Playwright** — they're a separate native top-level window, not part of
+  the page. Per this file's own P30 entry, these are correctly native and
+  out of scope for a custom-dialog audit; P31 exercised the resulting
+  *states* (a populated Shared Files list) via direct backend API calls
+  instead of the picker UI itself.
+- **Could not capture a genuine partial-percentage in-progress state on
+  either platform.** Even an 80 MB file completed in roughly 1–2 seconds
+  over the real LAN — faster than screenshot polling could reliably catch
+  a partial percentage on either platform's Transfers view. The Desktop
+  progress-bar finding above is carried forward from the already-live-
+  verified P29.1 entry rather than re-demonstrated fresh.
+- **No notification was observed for any test transfer**, but every test
+  transfer also completed near-instantly; this is inconclusive rather
+  than a finding that notifications don't work, since a genuinely
+  long-running transfer (needed to exercise the foreground-service/
+  notification path per `docs/11_File_Transfer.md`) could not be
+  constructed against this fast a LAN without a much larger file than was
+  practical for this audit.
+- **Android's Discovery/QR-pairing screen was not re-triggered live.**
+  Doing so would require actually unpairing the one physical test device.
+  Per the same reasoning already established in this file's P24 entry,
+  this was left unexercised live for P31 rather than risk disrupting the
+  only available paired device; Desktop's own Pairing flow (QR generation,
+  idle/active states) *was* fully exercised live, and nothing in the
+  Android pairing code path has changed since P24's own thorough live
+  verification.
+- **Device locale affects `toLocaleString()` date formatting differently
+  on each test machine** (this Windows desktop vs. the RMX3997) —
+  initially looked like a cross-platform inconsistency (Desktop:
+  `8/13/2026, 7:01:31 PM`; Android Details dialog:
+  `13/08/2026, 13:31:38`) but both call sites use the same unlocalized
+  `.toLocaleString()` (`android/src/screens/files/FilesScreen.tsx` lines
+  581/855; equivalent on Desktop) — the divergence is each OS's own
+  locale setting, not inconsistent code, so this was **not** logged as a
+  finding after checking the source. Recorded here so a future audit
+  doesn't need to re-derive this.
+
+### Cleanup performed
+
+All P31 test fixtures were removed: the 5 (later 6, including the 80 MB
+file) shared test files/folder were unshared via `DELETE /files/{id}`/
+`DELETE /folders/{id}` against the real backend; local fixture files under
+`scratch_test_files/p31/` (gitignored, not part of the shipped app) were
+deleted; the one file received on Desktop during the upload journey was
+deleted from the real `Downloads` folder; downloaded test content was
+removed from the Android device's `Download/Relay/` folder; the Metro
+process and its `adb reverse` mapping were torn down. One empty,
+gitignored directory (`scratch_test_files/p31/`) could not be removed due
+to a transient Windows file-lock (`Device or resource busy`) after every
+known process holding it was already closed — it is empty and harmless,
+but worth a manual `rmdir` next time that directory is touched.
+
+### Recommended milestone breakdown
+
+- **P32 — Desktop Files & Transfers Table Hardening** — UI-01 (long-
+  filename table blowout) and UI-02 (Refresh-on-missing-source view
+  crash). Both are concrete, reproducible, evidence-backed defects in the
+  same two views; grouping them avoids touching `app.css`'s shared table
+  rules and `files.js`'s error handling twice.
+- **P33 — Desktop Transfers Progress Bar Fix** — the carried-forward
+  P29.1 finding (class-toggle fix, already scoped in that entry).
+  Kept separate from P32 since it's a different file (`transfers.js`) and
+  a different, already-understood root cause (CSP + inline style), not
+  discovered fresh by this audit.
+- **P34 — Cross-Platform Visual Consistency** — UI-03 (folder emoji vs.
+  SVG icon language) and UI-04 (Clear History trigger color). Both are
+  small, source-level, no-risk changes.
+- **No P35/P36 justified by this audit's actual findings** — the
+  milestone brief's example names (Android Files/Transfers polish, final
+  interaction/feedback polish, packaging readiness) are not backed by
+  concrete findings from this pass; Android's own Files/Transfers/Settings
+  screens were confirmed correct live and packaging remains tracked
+  separately under `docs/12_Packaging_Deployment.md`. Do not manufacture
+  additional milestones beyond P32–P34 from this audit.
+
+### Final assessment
+
+Relay's core flows — pairing, sharing, downloading, uploading, folder
+transfers, history, device management — all work correctly end-to-end on
+both platforms, including under real-world edge cases (Unicode/emoji
+names, a zero-byte file, a large file, a nested folder, an externally
+deleted source). The product does **not** feel unfinished in its primary
+journeys. What would feel rough to a new user today is narrow and
+concrete: Desktop's Shared Files/Transfers tables visibly break under a
+plausible long filename (UI-01), and the same view can blank itself with a
+raw error under a plausible edge case (UI-02) — both are realistic enough
+to hit in normal use, not contrived. Everything else found (UI-03, UI-04,
+the carried-forward progress-bar bug) is genuine polish, not functionality.
+No P0 blocker was found on either platform.
+
+**No application source code was modified during this milestone.** The
+only tracked change is this documentation entry.
+
+---
+
 # Cross-Cutting Lessons
 
 A few gotchas worth remembering independent of any single milestone above:
@@ -4570,3 +4951,40 @@ A few gotchas worth remembering independent of any single milestone above:
   for any future Desktop renderer `node --check` — confirmed this form
   correctly catches the same deliberately-broken file plain `--check`
   missed.
+- **The installed Android build on the physical test device is a debug
+  build and requires a live Metro connection to load at all** — cold-
+  launching it shows React Native's "Unable to load script" dev-mode error
+  screen, which is expected dev-tooling behavior, not a product defect.
+  Confirmed in P31: `cd android && npm start` (Metro) plus
+  `adb reverse tcp:8081 tcp:8081` gets a fresh launch/reload past this. A
+  signed release APK (tracked under `docs/12_Packaging_Deployment.md`)
+  would not have this dependency.
+- **A single table row with an unbreakable long value (a long filename,
+  no spaces) can blow out an entire HTML `<table>`'s column widths, not
+  just that row** — because sibling `<td>`s in the same column share one
+  width across every `<tr>`, one pathological cell forces every other
+  column (here, the Actions column, whose buttons then wrap onto multiple
+  lines) to shrink for every row in the table, not only the offending one.
+  Confirmed live in P31 (`docs/15_QA_NOTEBOOK.md`'s P31 entry, finding
+  UI-01) via `getBoundingClientRect()`: the whole table grew to 1763px
+  against a 1084px window, and a normal row's Actions cell shrank to
+  ~115px, stacking its 4 buttons across 4 separate lines. Any future
+  table-based list (Desktop's `app.css` `table`/`td` rules are shared
+  across every view that uses one) needs an explicit `max-width` +
+  `text-overflow: ellipsis` on any free-text column, or one bad value
+  degrades the whole list, not just its own row.
+- **A per-row/per-item action that can legitimately fail (e.g. Refresh on
+  an entry whose source was externally deleted) must catch and scope its
+  own error — an uncaught exception in a per-item action handler can blank
+  an entire list view**, not just report a failure for that one item.
+  Confirmed live in P31 (finding UI-02): Desktop's Shared Files Refresh
+  button, when the target file no longer exists, replaces the *entire*
+  `#view-container` (header, buttons, every other row) with a raw
+  unstyled backend error string exposing an absolute filesystem path,
+  recoverable only by navigating away and back. Android's equivalent flow
+  (missing-source Download) shows the same underlying backend failure as
+  a small scoped inline message with a Retry action, leaving the rest of
+  the list untouched — proof the backend already reports the failure in a
+  form a client can present gracefully; any future per-row action handler
+  on either platform should follow Android's pattern here, not Desktop's
+  current one.

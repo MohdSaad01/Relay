@@ -46,7 +46,6 @@ class Settings(BaseSettings):
 
     HOST: str = "0.0.0.0"
     PORT: int = 8000
-    DEBUG: bool = True
 
     DATABASE_URL: str = Field(default_factory=_default_database_url)
 

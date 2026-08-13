@@ -1,16 +1,55 @@
 {
   "name": "relay-desktop",
+  "productName": "Relay",
   "version": "0.1.0",
   "private": true,
   "description": "Relay desktop application: Electron shell hosting the FastAPI backend and the desktop UI.",
   "main": "src/main/main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win --x64"
   },
   "devDependencies": {
-    "electron": "^43.2.0"
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
   },
   "dependencies": {
     "qrcode": "^1.5.4"
+  },
+  "build": {
+    "appId": "com.relay.desktop",
+    "productName": "Relay",
+    "files": [
+      "src/**/*",
+      "styles/**/*",
+      "assets/icons/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend/dist/relay-backend",
+        "to": "backend"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icons/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "artifactName": "Relay-Setup-${version}.${ext}"
+    }
   }
 }

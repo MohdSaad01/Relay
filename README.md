@@ -14,10 +14,13 @@ This repository contains Version 1 of Relay.
 
 Version 1 is **feature-complete**: the backend API, the Electron desktop
 app, and the React Native Android app all implement the full pairing →
-discovery → share → transfer → stream flow described in `docs/`. What
-remains before a real release is **packaging and distribution**
-(`docs/12_Packaging_Deployment.md`) — there is no installer or signed APK
-build yet — plus the enhancements listed under
+discovery → share → transfer → stream flow described in `docs/`. The
+Windows desktop app now has a real installer
+(`docs/12_Packaging_Deployment.md`) — `cd desktop && npm run dist`
+produces `desktop/dist/Relay-Setup-<version>.exe`, a per-user NSIS
+installer bundling the packaged FastAPI backend. What remains before a
+real release is a **signed Android APK** — the Android app still runs
+from source only — plus the enhancements listed under
 [Known Limitations](#known-limitations) below.
 
 ## Features
@@ -174,6 +177,12 @@ The desktop app launches the backend automatically (`src/main/backend-manager.js
 — there is no separate step to start it. Closing the desktop app shuts the
 backend down with it.
 
+**Building the Windows installer:** build the backend bundle first
+(`pyinstaller relay-backend.spec` from `backend/`, in a clean virtualenv
+holding only `requirements-build.txt` — never `backend/.venv`), then
+`npm run dist` from `desktop/` to produce
+`desktop/dist/Relay-Setup-<version>.exe`. See `docs/12_Packaging_Deployment.md`.
+
 ### Android (React Native)
 
 ```bash
@@ -254,7 +263,8 @@ here before release._
 | M14 | Electron desktop application | Done |
 | — | Android client (React Native) | Done |
 | P38 | Backend production bundle (PyInstaller) | Done |
-| — | Packaging & distribution (installer, signed APK) | Not started |
+| P39 | Windows desktop installer (electron-builder/NSIS) | Done |
+| — | Android release APK (signed) | Not started |
 
 See `CLAUDE.md` for the detailed, per-milestone implementation notes.
 
@@ -268,8 +278,10 @@ Deliberately out of scope for Version 1 (`docs/11_File_Transfer.md` §16,
 * No bandwidth limiting.
 * No WebSockets/real-time push — transfer progress is polled
   (`GET /transfers/{id}`).
-* No packaged installer for the desktop app and no signed release APK for
-  Android — both currently run from source only.
+* No signed release APK for Android — it currently runs from source only.
+  The desktop app has a real installer (P39) but it is unsigned, so
+  Windows will show an "unrecognized publisher" warning on first run;
+  code signing is out of scope for Version 1.
 * Whether the always-unauthenticated routes (`/settings`, `/pairing`,
   `/discovery`, and most of `/devices`) should also require a
   paired-device session was raised during M9 and left open; in practice

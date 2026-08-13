@@ -751,41 +751,117 @@ verification (a disposable upload test briefly landed in the real
 scratch path — caught and cleaned up immediately), is in
 `docs/15_QA_NOTEBOOK.md`'s P38 entry.
 
+### Windows Desktop Installer (P39)
+
+**Relay now has a real installer.** `desktop/package.json` gained
+`electron-builder` (`^26.15.3`) plus an inline `"build"` config — NSIS,
+per-user (`perMachine: false`, no admin rights, installs to
+`%LOCALAPPDATA%\Programs\Relay`), Windows x64 only. `npm run dist` from
+`desktop/` produces `desktop/dist/Relay-Setup-<version>.exe`. P38's
+`backend/dist/relay-backend/` is wired in via `extraResources` (outside
+`app.asar`, since `relay-backend.exe` must be directly `spawn()`able) to
+land at `resources/backend/relay-backend.exe` — the exact path
+`backend-manager.js` already expected; **that file needed zero changes**,
+matching P38's own prediction. **The backend bundle must be rebuilt
+(`pyinstaller relay-backend.spec`, clean venv) before every `npm run
+dist`** — electron-builder does not rebuild it automatically and will
+silently package a stale one otherwise.
+
+**Root-level `"productName": "Relay"` in `desktop/package.json` (not just
+inside `"build"`) is required, not redundant** — Electron's own
+`app.getName()` (which drives `app.getPath("userData")`) reads
+`productName` before falling back to `name` ("relay-desktop"). Without it,
+user data would live at `%APPDATA%\relay-desktop` instead of
+`%APPDATA%\Relay`, inconsistent with the installed app's own branding.
+
+**Both P37-flagged items P38 deliberately left open are now resolved.**
+The unused `DEBUG` field was removed from `backend/app/core/config.py`
+(confirmed unread anywhere first). The `BACKEND_PORT`/`config.py`
+duplication was a real latent bug, not cosmetic: `PairingService`/
+`DiscoveryService` read `settings.PORT` to tell Android which port to
+connect to, but that value came from `config.py`'s own default — never
+from whatever `--port` Electron actually passed — because `app.main` (and
+its module-level `get_settings()` call) was imported before `run.py`'s
+`argparse` ran. **`backend/run.py` now re-exports `--port` into
+`os.environ["PORT"]` and calls `get_settings.cache_clear()` before
+importing `app.main`**, so `Settings.PORT` always reflects the port this
+process was actually told to bind to — verified live (`--port 8123`
+standalone → `POST /pairing/start` correctly returned `"port":8123`).
+`desktop/src/main/main.js`'s `BACKEND_PORT` constant is the deliberate
+single source of truth going forward; any future backend entry point that
+reads `Settings.PORT` for anything port-sensitive must preserve this
+env-var-before-import ordering rather than reintroducing the drift.
+
+**NSIS's own defaults already satisfy this project's data-preservation
+requirements — nothing custom was added for it.** A silent-install upgrade
+(`Relay-Setup-<version>.exe /S`) leaves `%APPDATA%\Relay` (`relay.db`,
+settings, logs) completely untouched — verified live with a real paired
+device, a shared file, and a changed setting all surviving a version bump.
+Uninstall (`Uninstall Relay.exe /S`) removes only the install directory,
+both shortcuts, and the registry entry — `%APPDATA%\Relay` and any
+Relay-shared source file elsewhere on disk are left alone by NSIS's
+default behavior. This does mean a reinstall after an uninstall silently
+resurrects the old database; if a future milestone wants uninstall to
+actually offer data removal, that needs deliberate NSIS scripting
+(`deleteAppDataOnUninstall` or a custom macro), not present today.
+
+**The installer is deliberately unsigned** (`Get-AuthenticodeSignature` →
+`NotSigned`) — code signing remains out of scope for V1
+(`docs/12_Packaging_Deployment.md` §12); a real end user will see an
+"unrecognized publisher" warning on first run. **Windows Firewall
+behavior on first backend launch is unconfirmed, not negative** — no
+firewall rule existed before or after repeated real launches in this
+environment, but no interactive "allow this app" prompt was observed
+either; this needs verification on an ordinary end-user machine, tracked
+as a concrete P41 checklist item rather than assumed either way. Full
+verification detail (what was tested against the real installed app vs.
+only the artifact vs. only source, and the leftover-dev-backend-on-port-8000
+hazard hit and worked around mid-milestone) is in
+`docs/15_QA_NOTEBOOK.md`'s P39 entry.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)
 * WebSockets / real-time push (transfer progress is currently polled via `GET /transfers/{id}`)
-* Packaging & distribution (`docs/12_Packaging_Deployment.md`): the backend now has a verified PyInstaller `--onedir` production bundle (P38), but there is still no `electron-builder` installer and no signed release APK — the desktop app and Android app both still run from source
+* Packaging & distribution (`docs/12_Packaging_Deployment.md`): the backend has a verified PyInstaller `--onedir` production bundle (P38) and the desktop app now has a real, verified NSIS installer (P39) — but there is still no signed release APK, and the desktop installer itself is unsigned (code signing is out of scope for V1); the Android app still runs from source
 * Whether `Devices`/`Settings`/`Pairing`/`Discovery` should also require a paired-device session was raised during M9 and left open — revisit if Android is ever expected to call those routes directly
 
 ## Next Planned Milestone
 
 **Packaging & Deployment** (`docs/12_Packaging_Deployment.md`) — the last
 major piece before Version 1 is distributable. P37 (an audit-only
-milestone) broke this into a concrete four-milestone sequence; **P38 is
-now complete** (see "Backend Production Bundle (P38)" above and
-`docs/15_QA_NOTEBOOK.md`'s P38 entry for full detail):
+milestone) broke this into a concrete four-milestone sequence; **P38 and
+P39 are now complete** (see "Backend Production Bundle (P38)" /
+"Windows Desktop Installer (P39)" above and `docs/15_QA_NOTEBOOK.md`'s P38
+and P39 entries for full detail):
 
 * ~~**P38 — Backend Production Bundle.**~~ **Done.** Pinned backend
   dependencies (three-way split: production/dev-test/build-only); added
   `backend/run.py` + `backend/relay-backend.spec`; built and verified a
   self-contained `relay-backend.exe` against a real, isolated, no-Python
   environment; confirmed `backend-manager.js` needs no changes.
-* **P39 — Windows Desktop Installer.** Add `electron-builder` (NSIS,
-  per-user install, per P37's recommendation); wire P38's `backend/dist/
-  relay-backend/` output into `resources/backend/` via `extraResources`;
-  produce and validate a real installer on a clean VM. While already
-  touching `desktop/package.json`/`main.js`, also resolve the
-  `BACKEND_PORT`/`config.py` duplication and remove/wire up the unused
-  `DEBUG` config field (both flagged by P37, still open after P38).
+* ~~**P39 — Windows Desktop Installer.**~~ **Done.** Added
+  `electron-builder` (NSIS, per-user install); wired P38's
+  `backend/dist/relay-backend/` output into `resources/backend/` via
+  `extraResources`; built and verified a real installer live on this
+  machine (install, first launch, single-instance, close-to-tray, crash
+  recovery, backend-missing failure UX, upgrade with data preservation,
+  uninstall). Resolved the `BACKEND_PORT`/`config.py` duplication (a real
+  latent bug, not cosmetic) and removed the unused `DEBUG` config field.
+  Left open: code signing (out of scope for V1), a live Firewall-prompt
+  check (inconclusive in this environment, deferred to P41), and real
+  Android-device verification against this specific packaged build
+  (deferred to P41).
 * **P40 — Android Release APK.** Fix the `usesCleartextTraffic`
   release-build blocker and the debug-keystore release-signing gap (both
   confirmed by P37, detailed above); produce a real signed APK.
 * **P41 — Packaged End-to-End Release Validation.** The full
   Windows/Android/cross-platform matrix in `docs/15_QA_NOTEBOOK.md`'s P37
-  entry, run against the real packaged artifacts from P38–P40.
+  entry, run against the real packaged artifacts from P38–P40 — including
+  the Windows Firewall prompt and real Android-device checks P39 left
+  open.
 
-Do not begin P39 automatically — each of these remains its own
+Do not begin P40 automatically — each of these remains its own
 milestone, reviewed before the next starts, per this file's Git Workflow
 rules.
 

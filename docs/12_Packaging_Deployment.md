@@ -23,10 +23,41 @@ application.
 
 # 3. Desktop Packaging
 
-The Windows desktop application will be distributed as a packaged Electron
-application, with the FastAPI backend bundled inside it. The backend
-starts automatically when the desktop application launches — users never
-manually start it.
+**Decided and implemented (Milestone P39):** `electron-builder` (^26.15.3),
+NSIS target, per-user install (`perMachine: false` — installs to
+`%LOCALAPPDATA%\Programs\Relay`, no administrator rights required).
+Configuration lives inline in `desktop/package.json`'s `"build"` field (no
+separate `electron-builder.yml`). `npm run dist` (`electron-builder --win
+--x64`) from `desktop/` produces `desktop/dist/Relay-Setup-<version>.exe`;
+`npm run pack` (`--dir`, no installer) is available for faster iteration.
+Windows x64 only, matching the project's supported dev/runtime environment
+— no ia32/arm64 builds.
+
+P38's backend bundle (`backend/dist/relay-backend/`) is wired in via
+`extraResources` (`../backend/dist/relay-backend` → `backend`), landing at
+`resources/backend/relay-backend.exe` inside the packaged app — the exact
+path `desktop/src/main/backend-manager.js`'s packaged-mode branch already
+expected, so it required no changes. This directory is placed outside
+`app.asar` (`relay-backend.exe` must be directly `spawn()`able, and
+asar-packed binaries aren't). The backend bundle must be rebuilt
+(`pyinstaller relay-backend.spec` from `backend/`, clean venv) **before**
+running `npm run dist` — electron-builder does not build it automatically.
+
+The Windows application identity: `appId: "com.relay.desktop"`,
+`productName: "Relay"` (set at both `package.json`'s root and inside
+`build`, so Electron's own `app.getName()` — which drives
+`app.getPath("userData")` — also resolves to "Relay", not the npm package
+name "relay-desktop"). The installer, executable (`Relay.exe`), Desktop
+and Start Menu shortcuts, and uninstall registry entry all consistently
+identify the app as "Relay". The installer icon and `Relay.exe`'s embedded
+icon are both `desktop/assets/icons/icon.ico` (P36 geometry) — no separate
+installer-specific asset.
+
+The backend starts automatically when the desktop application launches —
+users never manually start it. See `docs/15_QA_NOTEBOOK.md`'s P39 entry
+for full build/verification detail, including what was and wasn't
+independently confirmed (no code signing, inconclusive firewall-prompt
+behavior, no cross-machine build reproduction).
 
 ---
 
@@ -127,8 +158,15 @@ separated.
 
 Relay stores user data (SQLite database, application configuration, logs,
 pairing information) inside the user's local application data directory —
-application binaries stay separate from user-generated data. The exact
-directory structure will be finalized during the Packaging milestone.
+application binaries stay separate from user-generated data. **Finalized
+(Milestone P39):** application binaries install to
+`%LOCALAPPDATA%\Programs\Relay` (per-user, no admin rights); user data
+(`relay.db`, `logs/`) lives at `%APPDATA%\Relay`, Electron's own
+`app.getPath("userData")` for the "Relay" product name. Verified live: an
+NSIS upgrade-install over an existing install leaves `%APPDATA%\Relay`
+untouched, and uninstalling removes only the binaries/shortcuts/registry
+entry, never `%APPDATA%\Relay` — a reinstall after an uninstall silently
+resurrects the prior database (paired devices, shared files, settings).
 
 A related decision has already been made ahead of full packaging
 (`docs/15_QA_NOTEBOOK.md` T8): a `RELAY_DATA_DIR` environment variable

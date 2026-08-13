@@ -7912,3 +7912,273 @@ inaccurate as a result of this milestone (no installer or signed APK
 exists yet, which is still what it says).
 
 P38 ends here. P39 was not started.
+
+---
+
+# Milestone P39 — Windows Desktop Installer
+
+Turned the Electron desktop app plus P38's verified backend bundle into a
+real, installable Windows application: `electron-builder` (NSIS, per-user)
+now produces `desktop/dist/Relay-Setup-<version>.exe`, built and installed
+live on this machine (not just source-inspected), including a real
+upgrade-over-existing-install and a real uninstall.
+
+## Investigation
+
+Re-verified rather than assumed: `desktop/package.json` had no build
+tooling at all (only `electron`/`qrcode`); `backend-manager.js`'s packaged
+branch (`resourcesPath/backend/relay-backend.exe`, `RELAY_DATA_DIR` from
+`app.getPath("userData")`) matched P38's actual output path exactly — no
+change needed there. `desktop/assets/icons/icon.ico` (P36 geometry, 7
+embedded sizes) was already correct and unused by any build config.
+Confirmed Node v24.18.1/npm 11.16.0, Electron 43.2.0, host arch x64 —
+matches the project's own supported dev/runtime environment, so V1 targets
+Windows x64 only (no ia32/arm64), per the milestone's "simplest
+architecture" guidance. `.gitignore`'s existing generic `dist/`/`build/`
+patterns already cover both `backend/dist` and a new `desktop/dist` —
+no `.gitignore` change was needed.
+
+## electron-builder configuration
+
+Added `electron-builder` (`^26.15.3`) as a `desktop/` devDependency and an
+inline `"build"` block in `package.json` (no separate `electron-builder.yml`
+— smallest config that does the job, per the milestone's own preference).
+Key choices:
+
+- **`appId: "com.relay.desktop"`** — a locally-scoped reverse-DNS-style
+  identifier; no real domain is claimed or needed for a per-user NSIS build.
+- **Root-level `"productName": "Relay"`** (in addition to `build.productName`)
+  — Electron's `app.getName()` reads `productName` before falling back to
+  `name` ("relay-desktop"), so without this, `app.getPath("userData")` would
+  resolve to `%APPDATA%\relay-desktop` instead of `%APPDATA%\Relay`. This
+  applies to dev mode too (same Electron app, only `app.isPackaged` differs)
+  — a one-time rename of the local dev userData folder, not a behavior
+  change; nothing in the codebase hardcoded the old folder name.
+- **`files`**: explicit `src/**/*`, `styles/**/*`, `assets/icons/**/*`,
+  `package.json` — deliberately not the default `**/*`, so nothing
+  repo-root-adjacent leaks in by accident.
+- **`extraResources`**: `../backend/dist/relay-backend` → `backend`,
+  landing at `resources/backend/relay-backend.exe` inside the packaged
+  app — exactly `backend-manager.js`'s existing expectation, placed
+  outside `app.asar` (required — `relay-backend.exe` must be `spawn()`able,
+  and asar-packed binaries aren't directly executable).
+- **`win.icon` / `win.target`**: `assets/icons/icon.ico`, NSIS x64 only.
+- **`nsis`**: `oneClick: false`, `perMachine: false` (per-user, no admin
+  rights required — installs to `%LOCALAPPDATA%\Programs\Relay`, matching
+  P37's recommendation), `allowToChangeInstallationDirectory: true`,
+  both Desktop and Start Menu shortcuts, `artifactName:
+  "Relay-Setup-${version}.${ext}"`.
+
+`npm run dist` (`electron-builder --win --x64`) is the one build command;
+`npm run pack` (`--dir`, no installer) was added for faster iteration.
+
+## P37-flagged fixes made while already touching these files
+
+Per `CLAUDE.md`'s P39 bullet, both items P37 found and P38 deliberately
+left open were resolved here:
+
+- **Dead `DEBUG` config field**: removed from `backend/app/core/config.py`
+  (`Settings`) — confirmed zero references anywhere in `app/` or `tests/`
+  before deleting; nothing to "wire up" since nothing ever read it.
+- **`BACKEND_PORT`/`config.py` duplication — a real latent bug, not just
+  cosmetic**: `PairingService.build_qr_payload` and
+  `DiscoveryService`'s broadcast both read `settings.PORT` to tell Android
+  which port to connect to, but `Settings.PORT`'s value came from
+  `app/core/config.py`'s own default/env, **not** from whatever `--port`
+  Electron actually passed to `run.py`. Since `app.main` (and therefore
+  `Settings`, via its module-level `get_settings()` call) was imported
+  *before* `run.py`'s `argparse` even ran, a future change to
+  `desktop/src/main/main.js`'s `BACKEND_PORT` without a matching change to
+  `config.py`'s `PORT` default would have made the desktop advertise the
+  wrong port to Android over pairing/discovery while actually listening on
+  a different one. Fixed in `backend/run.py`: after parsing `--port`,
+  re-export it into `os.environ["PORT"]`, call the already-`lru_cache`d
+  `get_settings.cache_clear()`, and only *then* import `app.main` (moved
+  from a top-level import into `main()`, after the env override) — so
+  `Settings.PORT` always reflects the port this process was actually told
+  to bind to. Verified live: ran the rebuilt `relay-backend.exe --port
+  8123` standalone and confirmed `POST /pairing/start` returned
+  `"port":8123`, not the `Settings` default of `8000`. `main.js`'s
+  `BACKEND_PORT` constant is now documented as the deliberate single
+  source of truth (Electron decides the port; the backend adopts whatever
+  it's told), not two values that must be kept in sync by hand.
+  343 backend tests still pass; `ruff check` still clean.
+
+Both changes required rebuilding the P38 backend bundle (see below) since
+`run.py` changed after P38's original build.
+
+## Backend bundle rebuild
+
+Built from a **fresh** `.build-venv` (not `backend/.venv`, which — per
+P38's own warning — carries unrelated dev packages), containing exactly
+`requirements-build.txt`'s closure (fastapi, uvicorn, sqlalchemy, pydantic,
+pydantic-settings, pyinstaller + their transitive deps — verified via `pip
+list`, nothing extra). `pyinstaller relay-backend.spec` from `backend/`
+reproduced the same ~36 MB `--onedir` bundle at
+`backend/dist/relay-backend/relay-backend.exe`. Smoke-tested standalone
+(isolated `RELAY_DATA_DIR`, non-default `--port 8123`) before it was ever
+wired into the installer — confirmed the PORT fix above, confirmed
+`relay.db`/`logs/relay.log` land under the given `RELAY_DATA_DIR`, no
+orphan process left behind afterward. The scratch `.build-venv` and
+PyInstaller's intermediate `backend/build/` were deleted after use (not
+meant to be a permanent fixture — Python's own `venv` module writes a
+`.gitignore` inside itself, so it was never at risk of being committed
+regardless).
+
+## Installer artifact inspection
+
+`desktop/dist/Relay-Setup-0.1.0.exe`, ~112 MB. `npx asar list` on the
+packaged `app.asar` confirmed exactly the intended `src/`, `styles/`,
+`assets/icons/`, `package.json`, plus `qrcode`'s own runtime
+dependencies — no `.git`, no test fixtures, no source maps, no dev-only
+files. `resources/backend/` contains only `relay-backend.exe` + its
+`_internal/` support dir (P38's bundle) — no `.venv`, no Python source, no
+`requirements*.txt`. The installer is **unsigned**
+(`Get-AuthenticodeSignature` → `NotSigned`) — code signing remains
+explicitly out of scope for V1 (`docs/12_Packaging_Deployment.md` §12); a
+real end user will see an "unrecognized publisher"/SmartScreen warning on
+first run. `Relay.exe`'s embedded version resource shows `ProductName:
+Relay`, `FileVersion: 0.1.0` — `CompanyName` shows "GitHub, Inc." (inherited
+from the unmodified upstream Electron binary; electron-builder doesn't
+override it without an explicit `win.legalTrademarks`/publisher config).
+Purely cosmetic (Explorer's file-properties dialog, not anything
+user-facing in the app itself) and left as-is — not worth a new config
+knob for a field nothing in the spec requires.
+
+## Verification actually performed (live, on this machine)
+
+Everything below was exercised against the **real installed
+application**, not just the installer artifact or source:
+
+- **Clean install** (`Relay-Setup-0.1.0.exe /S`, then again without
+  `/CURRENTUSER` after that flag combination silently no-op'd under `/S` —
+  worth knowing if scripting silent installs later: plain `/S` is the
+  reliable form for this `perMachine:false` config): installed to
+  `%LOCALAPPDATA%\Programs\Relay`, registered
+  `HKCU:\...\Uninstall\...` as "Relay 0.1.0", created both `Relay.lnk`
+  shortcuts (Desktop + Start Menu), both pointing at `Relay.exe` with its
+  embedded P36 icon (confirmed via `WScript.Shell` shortcut inspection and
+  `Icon.ExtractAssociatedIcon`).
+- **First launch from a clean userData state**: `%APPDATA%\Relay` didn't
+  exist pre-launch; after launch it held `relay.db`,
+  `logs\desktop.log`, and Electron's own Chromium cache dirs.
+  `resources/backend/relay-backend.exe` spawned as a real child process of
+  `Relay.exe` (confirmed via `Win32_Process.ParentProcessId`), became
+  healthy, and the renderer showed the Pairing screen (screenshotted) with
+  no dev server, no Python, no visible console window. **One real
+  environment hazard found and worked around, not synthetic**: a leftover
+  `uvicorn --reload` dev backend from outside this session was already
+  listening on port 8000 (its reloader parent + a still-alive worker
+  subprocess after the parent died), which made `backend-manager.js`
+  correctly — but misleadingly, for this test — treat it as
+  "externally managed" and skip spawning the packaged exe. Stopped both
+  processes (with user confirmation) before the first-launch test above
+  is valid; noted here so it isn't mistaken for a packaging defect.
+- **Single-instance behavior**: launching `Relay.exe` a second time did not
+  spawn a second `relay-backend.exe` or a second window — same PID
+  throughout, matching the existing `requestSingleInstanceLock()` logic
+  (unchanged by this milestone).
+- **Close-to-tray vs. real quit**: closing the main window (X button) hid
+  it but left `relay-backend.exe` running and healthy (confirmed via
+  `/health`) — matches the existing `window.on("close", ...)` behavior.
+  Force-killing all `Relay.exe` processes (simulating a crash) left **no**
+  orphaned `relay-backend.exe` behind — Windows terminated the child along
+  with the parent. A subsequent clean relaunch came back up healthy with
+  the prior `relay.db` intact and reconciliation running without error.
+  (Graceful quit via the tray's "Quit" item, which calls
+  `backendManager.stop()`, was not independently re-clicked in this pass —
+  that code path is unchanged since M14/P38 and the crash-path test above
+  is the stronger of the two failure modes anyway.)
+- **Backend-startup failure UX**: renamed
+  `resources\backend\relay-backend.exe` away, relaunched. `spawn` failed
+  with `ENOENT` (logged), `waitUntilHealthy()` timed out at 20s, and the
+  app showed a real modal dialog — title "Relay", error icon, "The Relay
+  backend failed to start." / "Backend did not become healthy within
+  20000ms." / the exact log file path / a "Quit" button (screenshotted) —
+  then exited cleanly. Confirms `main.js`'s existing failure handling
+  (unchanged) produces a non-silent, non-broken-looking failure in a real
+  packaged build. Restored the renamed exe afterward.
+- **Upgrade / data preservation**: created real state on the 0.1.0 install
+  — paired a device via the real `/pairing/start` → `/pairing/request` →
+  `/pairing/approve` → `/pairing/result` sequence (no physical Android
+  device available; simulated the same HTTP calls a real device would
+  make), shared a file, flipped `discovery_enabled` to `false`. Bumped the
+  desktop version to `0.1.1` (test-only — reverted to `0.1.0` afterward;
+  not a real release), rebuilt, installed over the existing install.
+  `relay.db`'s own mtime predated the reinstall (untouched by NSIS), and
+  after relaunch `GET /devices`, `GET /files`, and `GET /settings` all
+  returned the exact pre-upgrade data — paired device, shared file, and
+  the non-default setting all survived. `ProductVersion` correctly read
+  `0.1.1.0` post-upgrade.
+- **Uninstall**: ran the generated `Uninstall Relay.exe /S`. Removed:
+  install directory, both shortcuts, the `HKCU` uninstall registry entry.
+  **Preserved** (by NSIS's own default — nothing added to make this
+  happen): `%APPDATA%\Relay` (`relay.db`, settings, logs) and the shared
+  source file living outside any Relay-owned directory. This matches the
+  milestone's explicit "prefer preserving user files" instruction, but is
+  worth stating plainly: a reinstall after an uninstall silently resurrects
+  the old paired-device/shared-file/settings state, since the database was
+  never touched. If a future milestone wants uninstall to actually offer
+  data removal, that needs deliberate NSIS scripting (`deleteAppDataOnUninstall`
+  or a custom macro) — not present today.
+
+## Not verified / deferred
+
+- **Real Android functionality** (§18 of the milestone brief): no physical
+  device was available in this pass. Pairing/sharing/settings were
+  exercised via direct HTTP calls standing in for the Android client, not
+  the real app — genuine end-to-end (QR scan, real transfer bytes, folder
+  upload, Unicode/zero-byte files) remains unverified against this
+  packaged build specifically (it was verified against the *unpackaged*
+  dev build across P1–P36).
+- **Windows Firewall prompt** (§16): the backend genuinely bound to
+  `0.0.0.0:8000`/UDP `40890` across many real launches in this pass, and
+  no firewall rule for `relay-backend.exe`/`Relay.exe` existed before or
+  after (`Get-NetFirewallRule` came back empty throughout) — but no
+  interactive "Windows Defender Firewall has blocked some features of this
+  app" prompt was observed in any of this session's screenshots either.
+  Inconclusive, not negative: this environment may not surface that
+  OS-level interactive prompt the way a normal logged-in desktop session
+  would. Needs a real verification pass on an ordinary end-user machine —
+  flagged as a concrete P41 checklist item, not fixed or assumed here. No
+  firewall rule was added or modified.
+- **Full runtime-dependency isolation** (§11): Python and Node *are* on
+  this machine's normal `PATH` (they're this project's own dev
+  tools), and reliably stripping `PATH` for a GUI subprocess launch
+  inside this session's shell tooling did not work cleanly (multiple
+  attempts failed at the launcher level, not the app level). Confidence
+  here rests on: (a) `backend-manager.js`'s packaged branch spawns an
+  absolute path to `relay-backend.exe`, never a bare `python`/`node`/`npm`
+  command (confirmed by reading the code); (b) Electron bundles its own
+  Node/Chromium runtime by design; (c) P38 already did a rigorous
+  PATH-scrubbed, isolated-directory test of this exact executable. A fresh
+  PATH-scrubbed test of the full installed app was not independently
+  repeated here.
+- **Build reproducibility across machines**: only built/verified on this
+  one Windows 10 dev machine. Prerequisites recorded below are accurate
+  for this machine; not cross-checked on a second one.
+
+## Build prerequisites (for reproducing this build)
+
+Node v24.18.1 / npm 11.16.0 (any reasonably current Node 22+ per
+`README.md`'s existing requirement should work), Electron 43.2.0 (pinned
+via `desktop/package.json`), electron-builder 26.15.3, Python 3.13 +
+`requirements-build.txt` in a **clean, disposable** virtualenv (never
+`backend/.venv`). Order matters: rebuild the backend bundle
+(`pyinstaller relay-backend.spec` from `backend/`) **before** running
+`npm run dist` from `desktop/` — electron-builder's `extraResources` reads
+`../backend/dist/relay-backend` at build time and does not rebuild it.
+No CI/CD pipeline exists or was added; this is a manual, documented
+two-step local build.
+
+## Documentation changes
+
+This entry (`docs/15_QA_NOTEBOOK.md`, Milestone P39). `docs/12_Packaging_Deployment.md`
+§3 updated with the actual electron-builder/NSIS architecture. `CLAUDE.md`
+updated with a new "Windows Desktop Installer (P39)" convention note and
+its "Next Planned Milestone" section updated to mark P39 complete and
+point at P40. `README.md` was updated only where it stated no installer
+existed — see its own P39-related edits.
+
+P39 ends here. P40 (Android release APK) was not started, per this
+milestone's explicit boundary.

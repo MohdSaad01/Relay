@@ -8,6 +8,12 @@ const { BackendManager } = require("./backend-manager");
 const { createTray } = require("./tray");
 const { registerIpcHandlers } = require("./ipc-handlers");
 
+// The single source of truth for the backend's port: BackendManager always
+// passes this explicitly via `--port` (backend-manager.js's resolveCommand()),
+// and backend/run.py re-exports it into Settings.PORT before the backend
+// process constructs its FastAPI app, so the pairing QR payload and the UDP
+// discovery broadcast advertise this exact value rather than
+// app/core/config.py's own PORT default (see run.py's docstring, P39).
 const BACKEND_PORT = 8000;
 // Windows taskbar/title-bar icon: a multi-resolution .ico renders crisper
 // than a single PNG at the OS's various icon sizes. The tray icon (below)

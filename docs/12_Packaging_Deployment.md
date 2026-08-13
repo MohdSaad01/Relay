@@ -1,7 +1,9 @@
 # Packaging & Deployment Specification
 
-Version: 1.0 — condensed. This is Version 1's **next planned milestone**
-(see `CLAUDE.md`) — nothing below is implemented yet.
+Version: 1.0 — condensed. Packaging & Deployment is Version 1's final
+milestone sequence (see `CLAUDE.md`); §3 (Desktop), §4 (Backend), and §5
+(Android) are implemented as of P39/P40 — P41's full packaged
+cross-platform validation is what remains.
 
 ---
 
@@ -80,8 +82,26 @@ from a clean virtual environment holding only `requirements.txt` +
 
 # 5. Android Distribution
 
-Distributed as a standard APK during development; future releases may use
-Android App Bundles (AAB) for store distribution.
+**Decided and implemented (Milestone P40):** a real release build now
+exists. Release builds explicitly permit the plain-HTTP LAN traffic
+Relay's networking model requires via `android/android/app/src/main/res/xml/network_security_config.xml`
+(`<base-config cleartextTrafficPermitted="true" />`, wired through
+`AndroidManifest.xml`'s `android:networkSecurityConfig`) — Android's
+release-build default otherwise silently blocks all of it. Release signing
+reads credentials from a gitignored `android/android/keystore.properties`
+(template: `keystore.properties.example`) or equivalent environment
+variables; if neither is supplied, `assembleRelease`/`bundleRelease` fails
+fast with a clear error rather than falling back to the debug keystore.
+`cd android/android && ./gradlew.bat :app:assembleRelease` produces
+`android/android/app/build/outputs/apk/release/app-release.apk`. The
+signing identity verified during P40 is an explicitly-labeled **local
+verification keystore, not a final production signing identity** — a real
+release keystore must be generated (see `keystore.properties.example`)
+and kept secure outside the repository before any real distribution. See
+`docs/15_QA_NOTEBOOK.md`'s P40 entry for full build/verification detail.
+
+Distributed as a standard APK (sideloaded — no store listing exists);
+future releases may use Android App Bundles (AAB) for store distribution.
 
 ---
 

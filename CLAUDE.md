@@ -819,21 +819,71 @@ only the artifact vs. only source, and the leftover-dev-backend-on-port-8000
 hazard hit and worked around mid-milestone) is in
 `docs/15_QA_NOTEBOOK.md`'s P39 entry.
 
+### Android Release Build (P40)
+
+**A release build now genuinely works — cleartext LAN networking and
+release signing were both real, confirmed-live blockers, not theoretical
+ones.** `android/android/app/src/main/res/xml/network_security_config.xml`
+(`<base-config cleartextTrafficPermitted="true" />`, wired through
+`AndroidManifest.xml`'s `android:networkSecurityConfig`) is now the
+durable mechanism for permitting the plain-HTTP LAN traffic Relay's
+networking model requires — chosen over a bare
+`manifestPlaceholders["usesCleartextTraffic"]` override because it is
+self-documenting, verifiable directly from the built APK's own resources,
+and (since `minSdk` is 26) unconditionally takes precedence over the RN
+Gradle plugin's own per-build-type placeholder regardless of what that
+plugin resolves it to. **Any future Android networking change must keep
+this file's `cleartextTrafficPermitted="true"` — Relay has no HTTPS/TLS
+layer, and removing this reintroduces the exact silent release-build
+networking failure P37/P40 found and fixed.**
+
+**Release signing must never fall back to `debug.keystore`.**
+`android/android/app/build.gradle` resolves release signing credentials
+from a gitignored `android/android/keystore.properties` (tracked template:
+`keystore.properties.example`) or equivalent `RELAY_RELEASE_STORE_FILE`/
+`RELAY_RELEASE_STORE_PASSWORD`/`RELAY_RELEASE_KEY_ALIAS`/
+`RELAY_RELEASE_KEY_PASSWORD` environment variables; if neither source
+supplies all four values, `assembleRelease`/`bundleRelease` fails fast
+with a clear `GradleException` rather than silently signing with the
+debug key (other tasks, including `assembleDebug`, are unaffected). This
+is the same "tracked template, gitignored real values" pattern
+`backend/.env.example`/`backend/.env` already establishes. The signing
+identity verified live during P40 (`CN=Relay Local Verification, OU=Relay
+P40`, generated via `keytool -genkeypair`) is explicitly a **local
+verification keystore, not a final production signing identity** — before
+any real distribution, generate a real release keystore per
+`keystore.properties.example`'s documented command and store it securely
+outside this repository. Never commit a keystore file or
+`keystore.properties` — both are gitignored (`android/.gitignore`).
+
+`cd android/android && ./gradlew.bat :app:assembleRelease` produces
+`android/android/app/build/outputs/apk/release/app-release.apk`
+(~90 MB, first build ~35 minutes with no prior release-variant cache).
+P40 verified this artifact live on a physical device (RMX3997) over a real
+phone-hotspot LAN — not just via source inspection or a successful Gradle
+run — confirming discovery, QR pairing, authenticated file/folder
+download, Open, Transfers, Settings, and Clear History all work correctly
+with zero Metro/dev-server dependency. `versionCode`/`versionName`
+(`1`/`"1.0"`) and the pre-existing backend/desktop/Android version-string
+drift (`docs/15_QA_NOTEBOOK.md`'s P37 entry) were deliberately left
+unresolved — not required to produce a working release APK. Full
+build/verification detail: `docs/15_QA_NOTEBOOK.md`'s P40 entry.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)
 * WebSockets / real-time push (transfer progress is currently polled via `GET /transfers/{id}`)
-* Packaging & distribution (`docs/12_Packaging_Deployment.md`): the backend has a verified PyInstaller `--onedir` production bundle (P38) and the desktop app now has a real, verified NSIS installer (P39) — but there is still no signed release APK, and the desktop installer itself is unsigned (code signing is out of scope for V1); the Android app still runs from source
+* Packaging & distribution (`docs/12_Packaging_Deployment.md`): the backend has a verified PyInstaller `--onedir` production bundle (P38), the desktop app has a real, verified NSIS installer (P39), and Android has a real, physically-verified release APK (P40) — but none of the three is code-signed for public distribution (out of scope for V1), the Android release signing identity is currently a local verification keystore rather than a final production one, and no packaged Windows-installer + release-APK cross-platform validation has been run yet (P41)
 * Whether `Devices`/`Settings`/`Pairing`/`Discovery` should also require a paired-device session was raised during M9 and left open — revisit if Android is ever expected to call those routes directly
 
 ## Next Planned Milestone
 
 **Packaging & Deployment** (`docs/12_Packaging_Deployment.md`) — the last
 major piece before Version 1 is distributable. P37 (an audit-only
-milestone) broke this into a concrete four-milestone sequence; **P38 and
-P39 are now complete** (see "Backend Production Bundle (P38)" /
-"Windows Desktop Installer (P39)" above and `docs/15_QA_NOTEBOOK.md`'s P38
-and P39 entries for full detail):
+milestone) broke this into a concrete four-milestone sequence; **P38, P39,
+and P40 are now complete** (see "Backend Production Bundle (P38)" /
+"Windows Desktop Installer (P39)" / "Android Release Build (P40)" above
+and `docs/15_QA_NOTEBOOK.md`'s P38, P39, and P40 entries for full detail):
 
 * ~~**P38 — Backend Production Bundle.**~~ **Done.** Pinned backend
   dependencies (three-way split: production/dev-test/build-only); added
@@ -852,16 +902,30 @@ and P39 entries for full detail):
   check (inconclusive in this environment, deferred to P41), and real
   Android-device verification against this specific packaged build
   (deferred to P41).
-* **P40 — Android Release APK.** Fix the `usesCleartextTraffic`
-  release-build blocker and the debug-keystore release-signing gap (both
-  confirmed by P37, detailed above); produce a real signed APK.
+* ~~**P40 — Android Release APK.**~~ **Done.** Added an explicit Network
+  Security Config so release builds permit the plain-HTTP LAN traffic
+  Relay requires (the RN Gradle plugin's per-variant `usesCleartextTraffic`
+  placeholder otherwise silently blocks it on release); replaced the
+  debug-keystore release-signing fallback with a fail-fast pipeline that
+  reads real credentials from a gitignored `keystore.properties` or
+  environment variables and never signs a release build with the debug
+  key. Built and physically verified `app-release.apk` on RMX3997 over a
+  real phone-hotspot LAN: discovery, QR pairing, authenticated file/folder
+  download, Open, Transfers, Settings, and Clear History all confirmed
+  working with zero Metro/dev-server dependency. The signing identity used
+  is explicitly a local verification keystore, not a final production
+  signing identity. Versioning drift (backend/desktop `0.1.0`, Android
+  `1.0`/`1`) was left unresolved — not required to produce a working
+  release APK.
 * **P41 — Packaged End-to-End Release Validation.** The full
   Windows/Android/cross-platform matrix in `docs/15_QA_NOTEBOOK.md`'s P37
-  entry, run against the real packaged artifacts from P38–P40 — including
-  the Windows Firewall prompt and real Android-device checks P39 left
-  open.
+  entry, run against the real packaged artifacts from P38–P40 together
+  (installed Desktop + real backend bundle + real release APK) — including
+  the Windows Firewall prompt and the fuller transfer matrix (upload,
+  multi-GB files, Unicode/long filenames, cancellation, induced failures,
+  restart-mid-transfer) P39/P40 each left open.
 
-Do not begin P40 automatically — each of these remains its own
+Do not begin P41 automatically — each of these remains its own
 milestone, reviewed before the next starts, per this file's Git Workflow
 rules.
 

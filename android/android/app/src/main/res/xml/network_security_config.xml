@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+     Relay's networking model is plain HTTP over the local LAN/hotspot only
+     (docs/09_Networking.md, docs/10_Security.md §12) — the app never talks
+     to the public internet. Android's Network Security Config governs
+     cleartext traffic on API 24+ (this app's minSdk is 26) and, when
+     present, takes precedence over the manifest's own
+     android:usesCleartextTraffic attribute. The React Native Gradle
+     plugin resolves that manifest attribute per build type (debug "true",
+     release "false" — see AndroidManifest.xml's own comment), which
+     silently blocked all networking in a release build (P37/P40). This
+     file makes the real requirement explicit at the application level
+     instead of depending on that per-variant plugin default: cleartext is
+     permitted for every destination, matching the debug build's existing
+     behavior, because the desktop backend's LAN address is discovered at
+     pairing time and cannot be known in advance to scope to specific
+     hosts.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

@@ -8182,3 +8182,479 @@ existed — see its own P39-related edits.
 
 P39 ends here. P40 (Android release APK) was not started, per this
 milestone's explicit boundary.
+
+---
+
+# Milestone P40 — Android Release APK & Production Build
+
+Resolved both Android release blockers P37 identified (cleartext HTTP
+blocked by default, release signing falls back to the debug keystore),
+built a real `app-release.apk`, and verified it live end-to-end — LAN
+discovery, QR pairing, file download, folder download, Open, Transfers,
+Settings, Clear History — over the RMX3997's own mobile hotspot against a
+real desktop backend, all over plain HTTP.
+
+## 1. Requirements addressed
+
+CLAUDE.md's "Next Planned Milestone" P40 bullet and this milestone's own
+instructions: fix `usesCleartextTraffic` for release builds, replace the
+debug-keystore release signing fallback with a real signing pipeline that
+never silently falls back to it, produce and verify a real release APK,
+and test it physically on RMX3997 if available (it was).
+
+## 2. Baseline before changes
+
+Re-verified P37's findings against the current repository rather than
+assuming them still true:
+
+- `android/android/app/build.gradle`: `signingConfigs` defined only
+  `debug` (the committed, intentionally-non-secret `debug.keystore`,
+  RN-template default credentials); `buildTypes.release.signingConfig`
+  pointed at `signingConfigs.debug` with the stock RN-template warning
+  comment. Confirmed unchanged since P37.
+- `AndroidManifest.xml:22`: `android:usesCleartextTraffic=
+  "${usesCleartextTraffic}"`, still an unresolved Gradle manifest
+  placeholder — no `manifestPlaceholders` assignment anywhere in the
+  project. Confirmed unchanged since P37.
+- `versionCode 1` / `versionName "1.0"`, `applicationId "com.relay.mobile"`
+  — unchanged. Backend `APP_VERSION` and desktop `package.json` `version`
+  both still `0.1.0` — the P37-documented three-way version drift still
+  exists, unresolved (see §17).
+- P36 icon assets (`mipmap-anydpi-v26/ic_launcher.xml` → `ic_launcher_background`
+  color + `ic_launcher_foreground` drawable) unchanged and still correctly
+  wired.
+- No `res/xml/` directory existed yet under `app/src/main/res/` (the two
+  `@xml/provider_paths`/`@xml/share_download_paths` references in the
+  manifest resolve from library `node_modules`, not from this app).
+
+## 3. Exact release blockers reproduced
+
+Before changing anything, ran `./gradlew.bat :app:processReleaseManifest`
+(baseline, on the pre-P40 source) and read the actual merged output at
+`app/build/intermediates/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml`:
+
+```
+android:usesCleartextTraffic="false"
+```
+
+confirming P37's finding as a live fact of the current build, not
+documentation. No `android:networkSecurityConfig` attribute existed. The
+release signing gap was already confirmed by reading `build.gradle`
+directly (§2) — no build step needed to reproduce it, since Gradle accepts
+signing with the debug keystore without error (the defect is silent, not
+a build failure).
+
+## 4. Root causes
+
+1. **Cleartext traffic**: `@react-native/gradle-plugin`'s
+   `AgpConfiguratorUtils.kt` resolves the `${usesCleartextTraffic}`
+   manifest placeholder per build type — `"true"` for `debug`, `"false"`
+   for `release` — with no project-level override. Android's default
+   Network Security Config then blocks all cleartext HTTP on a release
+   build, which breaks 100% of Relay's networking (the app talks to the
+   desktop backend over plain HTTP on the LAN by design,
+   `docs/10_Security.md` §12) with no code-level exception to debug from.
+2. **Release signing**: `buildTypes.release.signingConfig` was hardcoded
+   to `signingConfigs.debug` — the stock React Native template default,
+   never replaced with a real release identity.
+
+## 5. Architecture/configuration decisions
+
+**Cleartext traffic — Network Security Config, not a bare manifest
+placeholder override.** Added `app/src/main/res/xml/network_security_config.xml`
+(`<base-config cleartextTrafficPermitted="true" />`) and wired it via
+`android:networkSecurityConfig="@xml/network_security_config"` on
+`<application>`. Chose this over simply setting
+`manifestPlaceholders["usesCleartextTraffic"] = "true"` in `build.gradle`
+for both build types because: (a) it makes the real requirement explicit
+and self-documenting in a dedicated, commented resource file rather than a
+build-script string that silently interacts with a third-party plugin's
+per-variant default; (b) it is verifiable directly from the built
+artifact's own resources (`aapt2 dump xmltree`/`dump resources`), not just
+inferred from a Gradle variable; (c) since `minSdk` is 26 (Android's
+Network Security Config governs cleartext traffic outright from API 24
+onward when present, taking precedence over the legacy
+`android:usesCleartextTraffic` manifest attribute), this is a complete fix
+regardless of what the RN plugin's placeholder resolves to. The
+`android:usesCleartextTraffic="${usesCleartextTraffic}"` attribute itself
+was deliberately left in place (still resolves `"false"` on release) since
+removing it is out of scope and it is now provably inert — a comment in
+the manifest explains why. A domain-scoped `<domain-config>` (limiting
+cleartext to specific hosts) was considered and rejected: Relay's desktop
+address is discovered dynamically per LAN at pairing time
+(`docs/09_Networking.md`), so no fixed hostname/IP exists to scope to —
+the same reasoning P37 already gave for preferring the blanket-allow
+option over a scoped one.
+
+**Release signing — externally-supplied credentials, fail-fast, no debug
+fallback.** `app/build.gradle` now reads release signing credentials from
+`android/android/keystore.properties` (gitignored) if present, falling
+back to `RELAY_RELEASE_STORE_FILE`/`RELAY_RELEASE_STORE_PASSWORD`/
+`RELAY_RELEASE_KEY_ALIAS`/`RELAY_RELEASE_KEY_PASSWORD` environment
+variables. If neither source supplies all four values, **no
+`signingConfigs.release` is registered at all**, and a
+`gradle.taskGraph.whenReady` check throws a clear `GradleException` the
+moment `assembleRelease`/`bundleRelease` is actually requested (other
+tasks, including `assembleDebug`, are completely unaffected). This means
+release builds can never silently inherit the debug keystore — either a
+real release signing config is supplied, or the release build refuses to
+run. Mirrors the existing `backend/.env.example` → `backend/.env`
+"tracked template, gitignored real values" convention already used
+elsewhere in this repo; `keystore.properties.example` is the tracked
+template.
+
+## 6. Files modified
+
+- `android/android/app/src/main/AndroidManifest.xml` — added
+  `android:networkSecurityConfig`, with an explanatory comment about the
+  now-inert `usesCleartextTraffic` placeholder.
+- `android/android/app/src/main/res/xml/network_security_config.xml`
+  (new) — `<base-config cleartextTrafficPermitted="true" />`, with a
+  comment explaining why.
+- `android/android/app/build.gradle` — release signing credential
+  resolution (`keystore.properties`/env vars), the fail-fast
+  `gradle.taskGraph.whenReady` check, `signingConfigs.release` (only
+  registered when credentials are present), `buildTypes.release.signingConfig`
+  now points at `signingConfigs.findByName("release")` instead of
+  `signingConfigs.debug`.
+- `android/android/keystore.properties.example` (new, tracked) — the
+  documented template for supplying real release signing credentials.
+- `android/.gitignore` — added `keystore.properties` (the existing
+  `*.keystore`/`!debug.keystore` pair already covered the keystore file
+  itself).
+
+Not modified: `versionCode`/`versionName` (§17), `minifyEnabled`/ProGuard
+posture (still off, unchanged — no new keep rules were needed since
+nothing about minification changed), `app_name` string resource
+(`"RelayMobile"` — pre-existing, unrelated to P40, see §14).
+
+## 7. Build commands
+
+```
+cd android/android
+./gradlew.bat :app:processReleaseManifest   # baseline reproduction only
+./gradlew.bat :app:assembleRelease          # real release build, post-fix
+```
+
+First-ever release build for this project: **35m20s**, 578 actionable
+tasks (494 executed, 84 up-to-date) — the long duration reflects Hermes
+bytecode compilation, native codegen, and lint-vital analysis across this
+app's full dependency set (MLKit, CameraKit, Notifee, etc.) with no
+existing release-variant build cache, not a problem with the P40 changes
+themselves; a Java process CPU-time check mid-build (two samples 8s apart,
+613.25 → 621.19 CPU-seconds) confirmed active work rather than a hang
+before waiting the full duration out.
+
+## 8. Release artifact details
+
+`android/android/app/build/outputs/apk/release/app-release.apk` —
+**94,828,582 bytes (~90.4 MB)**. Confirmed via `aapt2 dump badging`:
+
+```
+package: name='com.relay.mobile' versionCode='1' versionName='1.0'
+minSdkVersion:'26'  targetSdkVersion:'36'
+application: label='RelayMobile' icon='res/BW.xml'
+launchable-activity: name='com.relay.mobile.MainActivity'
+```
+
+Icon resource (`res/BW.xml`, aapt2's renamed path for the adaptive-icon
+XML) confirmed to reference the same `ic_launcher_background`/
+`ic_launcher_foreground` pair as source — the P36 icon geometry is
+correctly packaged, not stale.
+
+## 9. Signing verification
+
+`apksigner verify --print-certs -v app-release.apk`:
+
+```
+Verifies
+Verified using v2 scheme (APK Signature Scheme v2): true
+Signer #1 certificate DN: CN=Relay Local Verification, OU=Relay P40, O=Relay Dev, L=Local, ST=Local, C=US
+Signer #1 certificate SHA-256 digest: 230fe66672f24068c9bd22f2c457bc0a993a74c4e0c9644cf7a7707a13b98907
+```
+
+Compared against the debug keystore's own fingerprint
+(`keytool -list -v -keystore app/debug.keystore -storepass android`,
+`SHA256: FA:C6:17:45:DC:09:03:78:6F:B9:ED:E6:2A:96:2B:39:9F:73:48:F0:BB:6F:89:9B:83:32:66:75:91:03:3B:9C`)
+— **confirmed different certificates**: the release APK is not
+debug-signed.
+
+**LOCAL VERIFICATION KEYSTORE — NOT THE FINAL PRODUCTION SIGNING
+IDENTITY.** `android/android/relay-release-local-verification.keystore`
+was generated locally this session (`keytool -genkeypair`, PKCS12, RSA
+2048, 10000-day validity, CN "Relay Local Verification") solely to prove
+the signing pipeline (§5) actually works end to end — it is not a real
+production identity, was never intended to publish anything under, and
+both it and `android/android/keystore.properties` (which points at it)
+are confirmed gitignored (`git check-ignore -v`, both files matched: the
+former by `android/.gitignore`'s `*.keystore` pattern, the latter by the
+new `keystore.properties` line added in §6). **This distinction matters:
+the build pipeline is release-safe (never falls back to debug, always
+requires an explicit real keystore); a final production signing identity
+has not been established** — that requires generating a real keystore
+(per `keystore.properties.example`'s documented `keytool` command),
+storing it securely outside this repository, and is a decision for
+whoever actually publishes Relay, not something P40 should manufacture.
+
+## 10. Cleartext/network verification
+
+Confirmed from the **built artifact itself**, not just source:
+
+- `aapt2 dump xmltree app-release.apk --file AndroidManifest.xml` shows
+  `android:networkSecurityConfig(0x01010527)=@0x7f140004` present on
+  `<application>` (alongside the now-inert
+  `android:usesCleartextTraffic=false`).
+- `aapt2 dump resources` resolved `0x7f140004` to `xml/network_security_config`
+  → packaged as `res/8G.xml` inside the APK (resource names are shortened
+  in a release build; confirmed via the resource table, not guessed).
+- `aapt2 dump xmltree app-release.apk --file res/8G.xml` shows the actual
+  compiled content:
+  ```
+  E: network-security-config
+      E: base-config
+        A: cleartextTrafficPermitted=true
+  ```
+
+This proves the release APK, as built, explicitly permits cleartext HTTP
+— not merely that the source `.xml` file looks correct.
+
+## 11. Physical-device verification (RMX3997)
+
+Device already connected via `adb` (`69DADENFONAIOZS4`, confirmed
+`ro.product.model=RMX3997`). Full sequence, all physically executed and
+observed (screenshots taken at each step), not merely inferred from logs:
+
+**Install.** The device already had a debug-signed `com.relay.mobile`
+installed. Since the release APK carries a different signing certificate,
+`adb install` alone would fail with a signature mismatch — `adb uninstall
+com.relay.mobile` first (Success), then `adb install app-release.apk`
+(Success). This is an expected, direct consequence of fixing the signing
+gap (§9), not a defect.
+
+**No Metro / no dev server.** A stray Metro instance (`react-native
+start`, PID 12976) was found already running on port 8081 from a prior
+session (process start time: the previous evening, well before this
+milestone) — stopped it (trivially restartable via `npm start`) so the
+"no Metro dependency" check would be unambiguous. Cleared logcat, launched
+the app cold (`adb shell am start`). Confirmed via logcat: `ReactNativeJS:
+Running "RelayMobile"` (bundle loads from the embedded release asset, not
+a Metro connection) and `ScrollOptimizationHelper: will not debug for
+debug is false` (explicit release/production-mode signal from the RN
+runtime itself). No crash, no red-box/dev-menu, `dumpsys activity
+activities` confirmed `topResumedActivity` was the app in the foreground.
+
+**Networking — real LAN/hotspot, not localhost.** The PC running this
+session was already connected, over Wi-Fi, to the RMX3997's own mobile
+hotspot (SSID `samsung`; confirmed by matching BSSID between
+`netsh wlan show interfaces` on the PC and the phone's own
+`SoftApConfiguration` in `dumpsys wifi`). The phone's hotspot-side
+interface (`ap0`) carries `10.93.152.58/24`; the PC's Wi-Fi interface
+carries `10.93.152.233` — same subnet, genuinely two different physical
+network stacks talking over real Wi-Fi radio, not a loopback shortcut.
+Started the desktop app in dev mode (`npm start` from `desktop/`, which
+spawns the dev backend on `0.0.0.0:8000`) to have something real to
+connect to.
+
+**Discovery.** The release app's Devices screen auto-discovered the
+desktop ("Thomas") via UDP broadcast within seconds of the backend
+starting — confirmed via screenshot, no manual action needed.
+
+**Pairing.** Tapped the discovered device, granted the camera permission
+prompt, completed a physical QR scan against the desktop's displayed QR
+code. Backend access log (`[BACKEND] INFO: ...` lines, timestamped and
+IP-stamped by Uvicorn) confirms the full handshake happened over the real
+LAN, not loopback:
+```
+10.93.152.58:45574 - "POST /api/v1/pairing/request HTTP/1.1" 200 OK
+127.0.0.1:64082     - "POST /api/v1/pairing/approve HTTP/1.1" 200 OK   (desktop's own loopback approval)
+10.93.152.58:45574 - "GET  /api/v1/pairing/result/... HTTP/1.1" 200 OK
+```
+`pairing_service` logs: `Pairing approved: identifier=5d9cbd1a-...
+name=RMX3997 device_id=1`. Immediately followed by continuous, successful,
+`DeviceSession`-token-authenticated polling from `10.93.152.58` of
+`/api/v1/files`, `/api/v1/folders`, `/api/v1/transfers`,
+`/api/v1/transfers/requests` — every one `200 OK` — over plain HTTP. This
+is the direct, conclusive regression test for the P37 blocker: the same
+release build that would have had every one of these requests silently
+rejected by Android's default Network Security Config now completes them
+all.
+
+**File download.** Shared a small test file via the desktop's own loopback
+API (equivalent to a user clicking Share in the desktop UI — desktop-side
+interaction is outside P40's scope). It appeared on the Android release
+app's Files screen via live polling. Tapped Download → granted the
+notification permission prompt (foreground-service transfer notification,
+per `docs/11_File_Transfer.md`) → button transitioned Download →
+Downloading… → Open. Verified via `adb shell cat` on the actual on-device
+path (`/storage/emulated/0/Download/Relay/<file>`) that the downloaded
+bytes matched the source file exactly. Tapped Open → Android's native
+"Open with" chooser appeared correctly (cancelled without opening a
+specific app, since verifying the chooser itself appears is what matters
+here).
+
+**Folder download.** Shared a small nested test folder (a root file plus
+one file in a subfolder) the same way. Files screen correctly showed
+`Folder · 2 items · 22 B`. Downloaded; verified via `adb shell find`/`cat`
+that the exact nested structure and both files' contents landed correctly
+on-device — consistent with P21.1's documented folder-transfer design (N
+ordinary child transfers presented as one row), now confirmed working on
+the release build specifically.
+
+**Transfers screen.** Showed the completed download as `Completed`, byte
+count `51 B / 51 B`.
+
+**Settings screen.** Device display name (`RMX3997`) + Edit Name, and
+Download folder (`Default (Downloads/Relay)`) + Change Folder both
+rendered and matched the P23/P14.3 documented layout.
+
+**Clear History.** From the Files screen, tapped Clear History → the
+`AppDialog` confirmation (P30) rendered correctly (title, explanatory
+body, Cancel/destructive-styled confirm button) → confirmed → the
+completed download's entry disappeared from the Shared Files/history view,
+while the on-device file itself was confirmed still present (already
+verified above) — matching P28's documented history-marker behavior
+exactly.
+
+**Cleanup.** Stopped the test Electron/backend instance, deleted all test
+files/folders from both the desktop-side scratch directory and the
+device's `Download/Relay` folder, confirmed `netstat`/`git status` show no
+leftover state.
+
+Not exercised (deliberately, per this milestone's "not a huge regression
+campaign" boundary): upload (Android → desktop), a multi-GB file, Unicode/
+long filenames, cancellation, a deliberately induced failure, or an app
+restart mid-transfer — these are already covered by P1–P36's prior
+physical-device testing on debug builds and are explicitly P41's job to
+re-verify against the fully packaged artifacts (installed Desktop + this
+release APK together), not P40's.
+
+## 12. Automated tests
+
+- `npx tsc --noEmit` (from `android/`): **0 errors.**
+- `npx eslint .` (from `android/`): **0 errors**, 4 pre-existing warnings
+  unrelated to any P40 change (`react/no-unstable-nested-components` in
+  `FilesScreen.tsx`/`TransferListScreen.tsx`, `no-void` in
+  `TransferStreamManager.ts`) — none of these files were touched this
+  milestone.
+- `npx jest` (from `android/`): **42/42 suites, 365/365 tests passed.**
+- `./gradlew.bat :app:assembleRelease`: **BUILD SUCCESSFUL** (§7).
+- No native Gradle unit/instrumented test suite exists to run
+  (`android/android/app/src/` has only a `main/` source set — no `test/`
+  or `androidTest/`) — this project's Android-layer testing is the Jest
+  suite above (business logic in TypeScript) plus this milestone's own
+  physical-device verification; consistent with every prior milestone,
+  none of which ran `./gradlew test` either.
+
+## 13. Git/security audit
+
+- `git status`: only the intentional P40 changes appear (§6) — no
+  keystore, no `keystore.properties`, no build output, no leftover test
+  file staged or untracked-and-unexpected.
+- `git ls-files | grep -iE "keystore|\.jks$"` → only `android/android/app/debug.keystore`
+  (pre-existing, intentionally-non-secret RN-template debug key — not
+  introduced by P40).
+- `git check-ignore -v` confirmed, individually: the local verification
+  keystore (`*.keystore` pattern), `keystore.properties` (new pattern
+  added this milestone), and the release APK itself
+  (`app/build/outputs/apk/release/app-release.apk`, covered by the
+  existing generic `build/` pattern) are all correctly untracked.
+- No password, key material, or other secret was hardcoded into any
+  tracked file — `build.gradle`'s signing block only ever reads from the
+  gitignored `keystore.properties` or environment variables.
+
+## 14. Problems discovered
+
+- `app_name` string resource (`android/android/app/src/main/res/values/strings.xml`)
+  is `"RelayMobile"`, which is what actually renders as the release APK's
+  application label (confirmed via `aapt2 dump badging`) — not the
+  desktop/Android-icon-adjacent "Relay" branding used elsewhere in the
+  project. Pre-existing, unrelated to P40 (not a signing/networking/build
+  concern), not fixed here per this milestone's "don't fix unrelated
+  issues" boundary — noted for whoever next touches Android app identity/
+  branding.
+- The already-installed debug build on RMX3997 had to be uninstalled
+  before the release build could be installed, losing its local pairing
+  session (expected consequence of fixing the signing gap, documented in
+  §11, not itself a defect).
+
+## 15. Deferred issues
+
+- **Versioning drift** (§17): backend `0.1.0`, desktop `0.1.0`, Android
+  `1.0`/`1` — still three independently maintained values, as P37
+  documented. Not resolved here; not required to produce a working
+  release APK, and turning it into a real fix is explicitly out of this
+  milestone's scope per its own instructions.
+- **Final production signing identity**: not established (§9) — deferred
+  to whoever actually publishes a Relay release, following
+  `keystore.properties.example`'s documented process.
+- **P41's full validation matrix**: upload, multi-GB files, Unicode/long
+  filenames, cancellation, induced failures, restart-mid-transfer, and the
+  full cross-platform (installed Desktop + release APK) matrix all remain
+  P41's explicit job, not re-run here.
+- `New_Issues.txt` being tracked in git, the unused-`DEBUG`-field/
+  `BACKEND_PORT` duplication (both already resolved at P39), and other
+  P37-era housekeeping items not related to the Android release build were
+  not revisited — out of scope per this milestone's boundary.
+
+## 16. Documentation changes
+
+This entry (`docs/15_QA_NOTEBOOK.md`, Milestone P40). `CLAUDE.md` updated
+with a new "Android Release Build (P40)" convention note (the Network
+Security Config pattern, the `keystore.properties` signing convention, and
+the confirmed physical-device verification) and its "Next Planned
+Milestone" section updated to mark P40 complete and point at P41.
+`docs/12_Packaging_Deployment.md` §5 updated to describe the release build
+as implemented rather than "standard APK during development" only.
+`README.md`'s milestones table and "Known Limitations" updated to reflect
+the release APK's existence (still unpublished/no store listing, still
+using a local verification signing identity — not overclaiming a finished
+public release). `android/.gitignore` updated (§6).
+
+## 17. Remaining limitations
+
+- The release signing identity used to produce and verify this APK is a
+  **local verification keystore, not a final production identity** (§9) —
+  a real one must be generated and secured before any real distribution.
+- The Android/backend/desktop version-string drift (§15) remains
+  unresolved.
+- No code signing / Play Protect reputation exists for this APK (matches
+  the desktop installer's own already-accepted unsigned status, P39) — a
+  real end user sideloading it will see an "unknown sources"/Play Protect
+  warning; out of scope for V1 per `docs/12_Packaging_Deployment.md` §12.
+- `minifyEnabled` remains `false` on release (unchanged from before P40) —
+  `proguard-rules.pro` is still boilerplate-only; enabling minification
+  was not required to produce a working release APK and was not attempted.
+- This was verified on exactly one physical device (RMX3997) and one
+  Windows dev machine — no second device/machine reproduction was
+  performed, consistent with every prior milestone's own stated
+  limitations.
+
+## 18. Suggested commit message
+
+```
+feat(android): fix release cleartext traffic and signing (P40)
+
+Add an explicit network security config so release builds permit the
+plain-HTTP LAN traffic Relay requires (previously silently blocked by
+Android's release-build default), and replace the debug-keystore
+release-signing fallback with a real, externally-supplied signing
+pipeline that fails fast instead of ever signing a release build with
+the debug key.
+```
+
+## 19. Final verdict
+
+**P40 COMPLETE.** Both confirmed P37 blockers are resolved and verified
+from the built artifact itself (not just source): the release APK
+explicitly permits cleartext HTTP (`network_security_config.xml`,
+confirmed via `aapt2` against the actual packaged resource) and is signed
+with a real, non-debug certificate via a pipeline that cannot silently
+fall back to the debug keystore. A real `app-release.apk` was built,
+inspected, installed on RMX3997, and exercised live over a genuine
+phone-hotspot LAN against a real desktop backend: discovery, QR pairing,
+authenticated polling, file download, folder download, Open, Transfers,
+Settings, and Clear History all worked correctly with no Metro/dev-server
+dependency. The signing identity used is explicitly a **local verification
+keystore, not a final production identity** — that distinction is
+recorded, not glossed over. Versioning drift and P41's full validation
+matrix are correctly left for later, per this milestone's own boundary.

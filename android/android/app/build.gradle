@@ -72,6 +72,48 @@ def enableProguardInReleaseBuilds = false
  */
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 
+/**
+ * Release signing credentials, per docs/12_Packaging_Deployment.md and
+ * CLAUDE.md's Android release-build convention (P40). Never hardcode a
+ * real keystore path/password/alias here — the debug keystore fallback
+ * that used to sign release builds is exactly what P40 removed.
+ *
+ * Source, in order of precedence:
+ *   1. android/android/keystore.properties (gitignored — see
+ *      keystore.properties.example for the format), read relative to this
+ *      Gradle project's root (android/android/).
+ *   2. Environment variables RELAY_RELEASE_STORE_FILE /
+ *      RELAY_RELEASE_STORE_PASSWORD / RELAY_RELEASE_KEY_ALIAS /
+ *      RELAY_RELEASE_KEY_PASSWORD.
+ *
+ * If neither source provides all four values, no release signingConfig is
+ * registered and assembling a release build fails fast with a clear error
+ * instead of silently falling back to the debug keystore.
+ */
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+def releaseStoreFilePath = keystoreProperties.getProperty("RELAY_RELEASE_STORE_FILE") ?: System.getenv("RELAY_RELEASE_STORE_FILE")
+def releaseStorePassword = keystoreProperties.getProperty("RELAY_RELEASE_STORE_PASSWORD") ?: System.getenv("RELAY_RELEASE_STORE_PASSWORD")
+def releaseKeyAlias = keystoreProperties.getProperty("RELAY_RELEASE_KEY_ALIAS") ?: System.getenv("RELAY_RELEASE_KEY_ALIAS")
+def releaseKeyPassword = keystoreProperties.getProperty("RELAY_RELEASE_KEY_PASSWORD") ?: System.getenv("RELAY_RELEASE_KEY_PASSWORD")
+def hasReleaseSigningConfig = releaseStoreFilePath && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+
+gradle.taskGraph.whenReady { taskGraph ->
+    if (!hasReleaseSigningConfig && taskGraph.allTasks.any { it.name.equals("assembleRelease") || it.name.equals("bundleRelease") }) {
+        throw new GradleException(
+            "Release signing is not configured. Copy android/android/keystore.properties.example to " +
+            "android/android/keystore.properties and fill in a real release keystore's details, or set the " +
+            "RELAY_RELEASE_STORE_FILE / RELAY_RELEASE_STORE_PASSWORD / RELAY_RELEASE_KEY_ALIAS / " +
+            "RELAY_RELEASE_KEY_PASSWORD environment variables. Release builds never fall back to the " +
+            "debug keystore."
+        )
+    }
+}
+
 android {
     ndkVersion rootProject.ext.ndkVersion
     buildToolsVersion rootProject.ext.buildToolsVersion
@@ -104,15 +146,27 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        if (hasReleaseSigningConfig) {
+            release {
+                storeFile rootProject.file(releaseStoreFilePath)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            // Real release keystore, supplied externally — see the signing
+            // credentials block above. Deliberately has no fallback to
+            // signingConfigs.debug: the gradle.taskGraph check above already
+            // fails the build before this point if no release keystore was
+            // provided, so signingConfigs.findByName("release") is always
+            // non-null whenever this build type actually gets assembled.
+            signingConfig signingConfigs.findByName("release")
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }

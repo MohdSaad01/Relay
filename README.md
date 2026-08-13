@@ -15,12 +15,18 @@ This repository contains Version 1 of Relay.
 Version 1 is **feature-complete**: the backend API, the Electron desktop
 app, and the React Native Android app all implement the full pairing →
 discovery → share → transfer → stream flow described in `docs/`. The
-Windows desktop app now has a real installer
-(`docs/12_Packaging_Deployment.md`) — `cd desktop && npm run dist`
-produces `desktop/dist/Relay-Setup-<version>.exe`, a per-user NSIS
-installer bundling the packaged FastAPI backend. What remains before a
-real release is a **signed Android APK** — the Android app still runs
-from source only — plus the enhancements listed under
+Windows desktop app has a real installer (`docs/12_Packaging_Deployment.md`)
+— `cd desktop && npm run dist` produces
+`desktop/dist/Relay-Setup-<version>.exe`, a per-user NSIS installer
+bundling the packaged FastAPI backend. The Android app now has a real,
+physically-verified release build too — `cd android/android &&
+./gradlew.bat :app:assembleRelease` produces `app-release.apk` — though
+it is currently signed with a local verification keystore rather than a
+final production identity, and is sideloaded (no store listing). What
+remains before a public release is code signing for all three artifacts
+(out of scope for V1) and the full cross-platform validation pass over
+the packaged Windows installer + release APK together
+(`docs/15_QA_NOTEBOOK.md`'s P41), plus the enhancements listed under
 [Known Limitations](#known-limitations) below.
 
 ## Features
@@ -203,6 +209,15 @@ for the native-build root cause these address.
 
 Run tests: `npm test` (from `android/`). Lint: `npm run lint`. Type-check: `npm run typecheck`.
 
+**Building the release APK:** copy `android/android/keystore.properties.example`
+to `android/android/keystore.properties` and fill in a real release
+keystore's details (see that file for the `keytool` command to generate
+one — never commit the keystore or this file), then `cd android/android
+&& ./gradlew.bat :app:assembleRelease` to produce
+`android/android/app/build/outputs/apk/release/app-release.apk`. See
+`docs/12_Packaging_Deployment.md` §5 and `docs/15_QA_NOTEBOOK.md`'s P40
+entry.
+
 ## API Overview
 
 All backend routes are versioned under `/api/v1`. Full endpoint reference,
@@ -264,7 +279,8 @@ here before release._
 | — | Android client (React Native) | Done |
 | P38 | Backend production bundle (PyInstaller) | Done |
 | P39 | Windows desktop installer (electron-builder/NSIS) | Done |
-| — | Android release APK (signed) | Not started |
+| P40 | Android release APK (cleartext networking + release signing) | Done |
+| P41 | Packaged end-to-end release validation | Not started |
 
 See `CLAUDE.md` for the detailed, per-milestone implementation notes.
 
@@ -278,10 +294,14 @@ Deliberately out of scope for Version 1 (`docs/11_File_Transfer.md` §16,
 * No bandwidth limiting.
 * No WebSockets/real-time push — transfer progress is polled
   (`GET /transfers/{id}`).
-* No signed release APK for Android — it currently runs from source only.
-  The desktop app has a real installer (P39) but it is unsigned, so
-  Windows will show an "unrecognized publisher" warning on first run;
-  code signing is out of scope for Version 1.
+* No code-signed artifacts for public distribution — out of scope for
+  Version 1. The desktop app has a real installer (P39) but it is
+  unsigned, so Windows will show an "unrecognized publisher" warning on
+  first run. Android has a real release APK (P40) — `cd android/android
+  && ./gradlew.bat :app:assembleRelease` — but it's sideloaded (no store
+  listing) and currently signed with a local verification keystore rather
+  than a final production identity; see `android/android/keystore.properties.example`
+  to supply a real one.
 * Whether the always-unauthenticated routes (`/settings`, `/pairing`,
   `/discovery`, and most of `/devices`) should also require a
   paired-device session was raised during M9 and left open; in practice

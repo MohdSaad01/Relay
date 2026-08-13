@@ -93,3 +93,47 @@ test('wraps a network failure as an ApiError with a user-facing message', async 
     ),
   );
 });
+
+// Regression coverage for P31.1: the request-timeout AbortController
+// (REQUEST_TIMEOUT_MS) firing produces exactly this shape of rejection —
+// a DOMException/Error named "AbortError" — on both a genuine timeout and
+// (historically, via the now-removed [QR-DEBUG] console.error) whenever a
+// poll happened to outlive its caller. It must be handled the same way as
+// any other network failure: converted to the friendly ApiError below,
+// never logged as a console error (which triggers React Native's dev-only
+// Console Error overlay even though the caller already handles it).
+test('wraps an AbortError (request timeout) as the same friendly ApiError, without logging it as an error', async () => {
+  setApiConfig({ baseUrl: 'http://desktop:8000/api/v1' });
+  const abortError = new Error('Aborted');
+  abortError.name = 'AbortError';
+  (globalThis.fetch as jest.Mock).mockRejectedValueOnce(abortError);
+  const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+  await expect(apiClient.get('/pairing/result/abc')).rejects.toMatchObject(
+    new ApiError(
+      'Unable to reach Relay Desktop. Make sure the PC is running Relay and both devices are on the same network.',
+      0,
+    ),
+  );
+  expect(consoleErrorSpy).not.toHaveBeenCalled();
+  expect(consoleWarnSpy).not.toHaveBeenCalled();
+
+  consoleErrorSpy.mockRestore();
+  consoleWarnSpy.mockRestore();
+});
+
+test('a successful request never logs to console.error or console.warn', async () => {
+  setApiConfig({ baseUrl: 'http://desktop:8000/api/v1' });
+  mockFetchOnce(200, { success: true, message: 'ok', data: { status: 'awaiting_approval' } });
+  const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+  await apiClient.get('/pairing/result/abc');
+
+  expect(consoleErrorSpy).not.toHaveBeenCalled();
+  expect(consoleWarnSpy).not.toHaveBeenCalled();
+
+  consoleErrorSpy.mockRestore();
+  consoleWarnSpy.mockRestore();
+});

@@ -4988,3 +4988,131 @@ A few gotchas worth remembering independent of any single milestone above:
   form a client can present gracefully; any future per-row action handler
   on either platform should follow Android's pattern here, not Desktop's
   current one.
+
+---
+
+# Milestone P31.1 — Android `[QR-DEBUG]` Console Error Cleanup
+
+**Baseline symptom:** a physical-device screenshot showed React Native's
+dev-only Console Error overlay (Dismiss/Minimize/Copy controls) reading
+`[QR-DEBUG] 10. fetch() threw: AbortError: Aborted`. This same
+`[QR-DEBUG]` instrumentation had already been flagged as leftover
+technical debt as far back as P8.1, and repeatedly re-flagged through
+P18/P22/P23/P31 (`android/src/api/client.ts`'s shared HTTP wrapper) without
+ever being removed.
+
+**Investigation:** traced the full call path rather than assuming the
+prefix alone was the problem. `client.ts`'s `request()` function is the
+one HTTP wrapper behind every Android API call (`apiClient.get/post/patch/
+del`) — pairing, files, transfers, settings, all of it. It builds its own
+short-lived `AbortController`/`setTimeout(..., REQUEST_TIMEOUT_MS)`
+(10s) purely as a request-hang guard (added to fix an earlier defect where
+an unreachable desktop froze the UI for minutes); that controller's signal
+is the *only* thing ever passed to `fetch()`. Checked every pairing/
+polling call site (`QrScanScreen.tsx`, `PairingWaitingScreen.tsx`,
+`api/endpoints/pairing.ts`) and confirmed **no caller ever wires its own
+`AbortController` or `signal` into this client** — `PairingWaitingScreen`'s
+poll loop cancels itself on unmount via a plain `cancelled` boolean flag
+that only suppresses acting on a *late-arriving* result, it never aborts
+the in-flight `fetch()` itself. So every `AbortError` this client can ever
+throw comes from exactly one source: its own internal 10-second timeout.
+
+**Root cause:** not a defect in cancellation logic, and not a genuine
+unhandled failure — the `AbortError` is the app's own intentional,
+already-documented request-timeout mechanism firing (desktop slow/
+unreachable, network hiccup, backgrounded polling), and it was **already**
+being converted into a friendly `ApiError` (`UNREACHABLE_MESSAGE`,
+"Unable to reach Relay Desktop...") that every caller already displays
+correctly (`PairingWaitingScreen` → "Lost contact with the desktop while
+waiting.", `QrScanScreen` → "Could not reach that desktop.", every other
+screen's own inline error banner). The only actual defect was one line:
+`client.ts`'s fetch-catch block logged the raw error via
+**`console.error('[QR-DEBUG] 10. fetch() threw:', err)`** before throwing
+the friendly `ApiError` — and React Native's `LogBox` intercepts every
+`console.error` call in a debug build and renders it as the full-screen
+Console Error overlay, regardless of whether the thrown error is itself
+fully handled downstream. A second, unrelated finding from the same
+instrumentation (recorded at P18): its request/response logs
+(`console.log`) dumped full request bodies and parsed response envelopes —
+including pairing responses carrying the device secret and session
+token — to this device's own logcat. Never remotely reachable, but genuine
+leftover diagnostic logging of sensitive values in a shared production
+code path.
+
+**Implementation** (`android/src/api/client.ts`): removed all five
+`[QR-DEBUG]` `console.log`/`console.error` statements and their "TEMP
+DEBUG LOGGING" comments outright — this was confirmed to be stale
+development instrumentation left over from the original QR pairing
+diagnosis, not a mechanism worth replacing with a new logging strategy.
+The fetch-catch block's error is no longer logged at all (the thrown
+`ApiError` is the real, already-correct propagation of the failure — nothing
+is swallowed); its comment was rewritten to explain *why* every fetch
+failure, `AbortError` included, reduces to the same generic message. The
+now-redundant `try/catch` around `response.json()` (previously
+`console.error`-then-rethrow, now a no-op wrapper once the log line was
+removed) was simplified to a direct `await` — a genuine malformed-response
+parse failure still throws and still propagates to the caller exactly as
+before, just without a middleman catch block. No caller, no error
+classification, and no timeout value changed.
+
+**Tests** (`android/__tests__/api/client.test.ts`): added two regression
+tests — one mocks `fetch` rejecting with a `DOMException`-shaped
+`AbortError` and asserts `apiClient` still throws the identical
+`UNREACHABLE_MESSAGE` `ApiError` *and* that `console.error`/`console.warn`
+are never called; the other asserts an ordinary successful request also
+never touches `console.error`/`console.warn`, so any future reintroduction
+of an error-level log on this path fails a test immediately rather than
+waiting to be noticed on a physical device. `npx tsc --noEmit` — clean.
+`npx eslint .` — 0 errors, the same 4 pre-existing warnings this session
+started with (`FilesScreen.tsx`, `TransferListScreen.tsx`,
+`TransferStreamManager.ts`; none touch `client.ts`). `npx jest` — 42
+suites / 365 tests passed (up from 40/363 pre-change, the 2 new tests).
+
+**Physical-device verification (RMX3997):** Metro + `adb reverse
+tcp:8081 tcp:8081` + the real Electron desktop app (`npm start`) were
+started, the installed debug build was force-stopped/relaunched to pick up
+this session's code. With the existing pairing intact (deliberately never
+unpaired or re-paired — Discovery/QrScan are structurally unreachable
+while a session exists, per P24, and this device is the only physical
+pairing available; forcing a fresh pairing to reach `QrScanScreen`/
+`PairingWaitingScreen` live was judged not worth risking it), navigated
+Files → Transfers → Settings and confirmed via `adb logcat` that no
+`[QR-DEBUG]`/`console.error`/`LogBox` output appeared. Then, to reproduce
+an actual fetch failure on-device against the exact shared code path this
+milestone changed: stopped the desktop app and its backend process
+entirely (confirmed via `curl` returning connection-refused), switched
+tabs to trigger a live request, and captured a real in-app red error
+banner — **"Unable to reach Relay Desktop. Make sure the PC is running
+Relay and both devices are on the same network."** — rendered inline with
+**zero** Console Error/LogBox overlay (confirmed empty `adb logcat` grep
+for the same terms). Restarted the desktop app/backend and confirmed the
+app recovered cleanly on the next tab switch with no residual error state
+and the pairing session still intact. This exercised the identical
+single catch-all block the `AbortError` timeout path also runs through
+(there is no error-type branching in `client.ts` — every fetch rejection,
+`AbortError` or otherwise, is handled by the same code), which is the
+strongest live proof available without disrupting the only real pairing on
+this device; the `AbortError`/timeout variant specifically is covered by
+the two new deterministic Jest tests above rather than a live 10-second
+network hang, per this milestone's own guidance to document
+source/test-verification honestly when a physical repro would risk the
+device's only pairing.
+
+**Regression checks:** Discovery/Pairing screens were not reachable live
+(already-paired session, expected per P24 — not a defect). Files,
+Transfers, Settings, tab navigation, and error/recovery banners all
+confirmed working through the live backend-down/backend-up cycle above.
+`client.ts` is shared by every API call in the app, so the backend-down
+repro (which exercised a plain `GET /transfers` fetch, not a pairing
+endpoint) also directly confirms normal non-pairing API error handling is
+unchanged. No backend or Desktop source was touched; the backend was only
+started/stopped as a black box to produce a real network failure.
+
+**`[QR-DEBUG]` remaining:** none in application source — confirmed via a
+full-tree search after the change. One reference remains, intentionally,
+in a code comment inside the new regression test explaining what was
+removed and why.
+
+**Remaining limitations:** none identified. This was confirmed to be
+stale instrumentation with an already-correct underlying error-handling
+path, not a deeper defect — no further work is indicated here.

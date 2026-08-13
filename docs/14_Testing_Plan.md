@@ -463,8 +463,9 @@ external-deletion detection, Android→desktop upload, notifications, and
 Clear History. No blocker found. Identified (but did not fix, per this
 milestone's explicit scope) two backlog items: `fileIdentity.ts` has the
 same class of id-reuse gap P17 just fixed for folders, and `[QR-DEBUG]`
-debug logging (P8.1) is still present in `android/src/api/client.ts`. Full
-detail in `docs/15_QA_NOTEBOOK.md`'s P18 entry.
+debug logging (P8.1) is still present in `android/src/api/client.ts` (later
+removed in P31.1, after it surfaced as a React Native Console Error
+overlay). Full detail in `docs/15_QA_NOTEBOOK.md`'s P18 entry.
 
 ---
 
@@ -479,11 +480,6 @@ named milestone in `docs/15_QA_NOTEBOOK.md` for full detail on any entry.
   available as the same independent signal; not yet wired in. Reachable
   only via an unshare-to-empty-then-reshare sequence, not normal use —
   technical debt, not a blocker (P18).
-- **Debug-only `[QR-DEBUG]` console logging remains in
-  `android/src/api/client.ts`**, first flagged in P8.1 as flooding
-  `logcat` and hampering on-device investigation — still not removed as
-  of P18. Logs full request/response bodies, including pairing secrets,
-  to this device's own log only (not remotely reachable).
 - **Packaging is unimplemented** (T8): no PyInstaller/equivalent backend
   bundle, no Electron installer, no signed release APK. See
   `docs/12_Packaging_Deployment.md`.

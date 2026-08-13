@@ -609,6 +609,28 @@ system prompt) should be replaced — only dialogs Relay's own UI renders.
 Rename (inline-edit on both platforms, P29/P23) is not a confirmation
 prompt and does not go through either dialog primitive.
 
+### Android API Client Error Logging (P31.1)
+
+**`android/src/api/client.ts`'s single fetch-catch block converts every
+network failure — connection refused, DNS failure, and the client's own
+internal `REQUEST_TIMEOUT_MS` `AbortController` firing (surfaced as
+`AbortError`) alike — into the same friendly `ApiError`
+(`UNREACHABLE_MESSAGE`), which every caller already displays correctly.**
+None of these are ever logged via `console.error`/`console.warn`: React
+Native's `LogBox` intercepts both in a debug build and renders a
+full-screen Console Error/Warning overlay regardless of whether the error
+is already fully handled downstream — this is exactly what happened with
+the now-removed `[QR-DEBUG]` instrumentation (P8.1–P31.1), which logged a
+handled `AbortError` via `console.error` and produced a user-visible
+overlay for an outcome the app was already recovering from correctly. Any
+future Android networking code (this client, `streaming/blobUtil.ts`, or a
+new one) must apply the same rule: a caught error that is already being
+converted into a user-facing result must not also be logged at
+`console.error`/`console.warn` level; use `console.log` (or nothing) if
+developer-only visibility is still wanted. A genuinely unhandled/unexpected
+exception (one that isn't caught and turned into a result the UI already
+displays) is not covered by this rule and should still surface loudly.
+
 ## Not Yet Implemented
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)

@@ -77,9 +77,6 @@ async function request<T>(
     init.body = JSON.stringify(body);
   }
 
-  // TEMP DEBUG LOGGING — remove after pairing QR pipeline is diagnosed.
-  console.log('[QR-DEBUG] 8. HTTP request about to be sent:', method, `${baseUrl}${path}`, init.body);
-
   // Built from AbortController rather than the newer AbortSignal.timeout()
   // static — React Native polyfills AbortController/AbortSignal via the
   // `abort-controller` package (see setUpXHR.js), which does not implement
@@ -91,15 +88,14 @@ async function request<T>(
   let response: Response;
   try {
     response = await fetch(`${baseUrl}${path}`, { ...init, signal: timeoutController.signal });
-    // TEMP DEBUG LOGGING
-    console.log('[QR-DEBUG] 9. HTTP response received:', response.status, response.ok);
-  } catch (err) {
-    // TEMP DEBUG LOGGING — the underlying error (timeout vs. connection
-    // failure vs. something else) stays logged for development, but the
-    // user-facing ApiError below never repeats it verbatim: a bare
-    // "TypeError: Network request failed" or "AbortError" means nothing to
-    // a non-technical user.
-    console.error('[QR-DEBUG] 10. fetch() threw:', err);
+  } catch {
+    // Every fetch failure — a genuine connection failure, a DNS failure, or
+    // the timeout above firing (surfaced as AbortError) — reduces to the
+    // same outcome for the caller: the desktop wasn't reachable. None of
+    // those raw errors (e.g. "TypeError: Network request failed" or
+    // "AbortError: Aborted") mean anything to a non-technical user, so
+    // they're intentionally not logged or repeated verbatim here; this
+    // ApiError is the real, fully-handled propagation of the failure.
     throw new ApiError(UNREACHABLE_MESSAGE, 0);
   } finally {
     clearTimeout(timeoutId);
@@ -109,16 +105,7 @@ async function request<T>(
     return undefined as T;
   }
 
-  let envelope: ApiResponse<T>;
-  try {
-    envelope = (await response.json()) as ApiResponse<T>;
-    // TEMP DEBUG LOGGING
-    console.log('[QR-DEBUG] 9b. Response envelope parsed:', envelope);
-  } catch (err) {
-    // TEMP DEBUG LOGGING
-    console.error('[QR-DEBUG] 10. response.json() threw:', err);
-    throw err;
-  }
+  const envelope = (await response.json()) as ApiResponse<T>;
   if (!response.ok || envelope.success === false) {
     if (response.status === 401) {
       // Awaited so callers observing the thrown ApiError are guaranteed to

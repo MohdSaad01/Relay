@@ -6581,3 +6581,221 @@ cleaned up at session end; the one exception (an unremovable disposable
 folder on the physical device, harmless and orphaned from the app's own
 listing) is documented above. Paired-device state was not disturbed.
 P35 ends here — P36 was not started.
+
+# Milestone P36 — App Icon Geometry Refinement
+
+**Scope:** a single, isolated visual refinement to Relay's existing app
+icon — widen the negative space between the two opposing white arrows,
+which currently touch (tangent, zero gap) where the top arrow's
+lower-chevron prong and the bottom arrow's upper-chevron prong meet in the
+middle. Explicitly not a redesign: color, arrow direction, stroke width,
+and overall proportions are all preserved exactly.
+
+## Baseline (investigated before any change)
+
+Located the authoritative geometry and every derived asset before touching
+anything:
+
+- **Vector source of truth:**
+  `android/android/app/src/main/res/drawable/ic_launcher_foreground.xml` —
+  a 108x108dp vector with two `<path>` elements (white, `strokeWidth="8"`,
+  round caps/joins, transparent fill), each a shaft line plus a 3-point
+  chevron polyline. This is the same glyph as the bottom-nav Transfers
+  icon (`android/src/components/icons.tsx`) and Desktop's `transferIcon`
+  (`desktop/src/renderer/icons.js`), per P23/P25's documented cross-platform
+  icon-reuse convention. It is consumed live by Android O+ launchers via
+  `mipmap-anydpi-v26/ic_launcher.xml`/`ic_launcher_round.xml`.
+- **Derived raster assets**, all pre-rendered (no build-time generation
+  script exists in the repo for any of them — `scripts/generate_tray_icon.js`,
+  referenced in this file's M14 history, no longer exists):
+  `android/.../mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png` and
+  `ic_launcher_round.png` (48/72/96/144/192px, legacy pre-O launcher icons),
+  `desktop/assets/icons/tray.png` (256px) and `icon.ico` (16/24/32/48/64/
+  128/256px frames, Windows title-bar/taskbar icon).
+- Confirmed the exact background (`#2D6CDF`, matches
+  `android/.../values/colors.xml`'s `ic_launcher_background` and Desktop's
+  `--color-primary`) and foreground (`#FFFFFF`) colors by sampling pixels
+  directly (Python/Pillow) from `tray.png` and the xxxhdpi launcher PNGs.
+- Measured, by pixel-scanning every existing raster asset, that each one is
+  a direct `scale = canvas_size / 108` rasterization of the vector (no
+  extra padding/offset) — confirmed by comparing the vector's own computed
+  stroke-inclusive bounding box (`x:[26,82] y:[26,82]`, accounting for the
+  8-unit stroke width and its round-cap/join bulge) against the measured
+  raster bounding box fraction (~0.238–0.240 to ~0.755–0.758 of canvas
+  width/height at every size checked: 48, 192, 256px).
+- Inspected the icon at the sizes actually used: Desktop title-bar/taskbar
+  (`icon.ico`'s 16/32/48/128px frames, plus the live rendered 16px taskbar
+  button), Desktop tray (`tray.png` resized to 16x16 at runtime by
+  `tray.js`), Android launcher/adaptive icon (all five mipmap densities,
+  live on the physical device's app-drawer icon), and Android task switcher
+  (live, via `KEYCODE_APP_SWITCH`).
+- At the two smallest real-world sizes (Desktop's 16px taskbar/tray icon,
+  Android's smallest mdpi 48px launcher icon) the touching point was
+  confirmed to visibly blur the two arrows into a single blob — the
+  strongest evidence the "too close together" complaint is real, not
+  cosmetic nitpicking.
+
+## Exact geometry change
+
+Both existing `<path>` elements' shaft/chevron coordinates were shifted as
+a rigid whole, vertically, 4 vector units further from the shared
+centerline (`y=54`, the exact midpoint between the two arrows) than
+before. Nothing else about either path changed — same x-positions (shaft
+length, chevron reach), same `strokeWidth`, same `strokeLineCap`/
+`strokeLineJoin`, same colors.
+
+| | before | after |
+|---|---|---|
+| Top arrow shaft/chevron centerline | `y=42` | `y=38` |
+| Top arrow path | `M30,42 L70,42 M58,30 L70,42 L58,54` | `M30,38 L70,38 M58,26 L70,38 L58,50` |
+| Bottom arrow shaft/chevron centerline | `y=66` | `y=70` |
+| Bottom arrow path | `M78,66 L38,66 M50,54 L38,66 L50,78` | `M78,70 L38,70 M50,58 L38,70 L50,82` |
+
+At the closest-approach point (the top arrow's lower chevron prong tip vs.
+the bottom arrow's upper chevron prong tip, each a round stroke-cap disk of
+radius 4 units): before, the two disk centers were exactly 8 units apart
+(purely horizontal) — equal to the sum of their radii, i.e. **exactly
+tangent, zero gap**. After, the centers are `sqrt(8² + 8²) ≈ 11.3` units
+apart, leaving a **~3.3-unit visible gap** between the white shapes. The
+combined two-arrow bounding box grew from `y:[26,82]` (56 units, 51.9% of
+the 108 canvas) to `y:[22,86]` (64 units, 59.3%) — still inside the
+existing "~66dp safe zone" the vector's own header comment documents (66/
+108 = 61.1%), with ~2dp of margin, so no adaptive-icon launcher mask clips
+it.
+
+## Affected assets
+
+- `android/android/app/src/main/res/drawable/ic_launcher_foreground.xml` —
+  hand-edited directly (the true vector source); comment updated to record
+  the P36 change and rationale.
+- `android/android/app/src/main/res/mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png`
+  and `ic_launcher_round.png` (10 files) — regenerated.
+- `desktop/assets/icons/tray.png` and `desktop/assets/icons/icon.ico` —
+  regenerated.
+
+**Regeneration technique** (one-off Python/Pillow script, run from the
+scratchpad, not committed — no reproducible generation pipeline existed in
+the repo to extend, and adding a permanent one was judged out of this
+milestone's narrow scope): for every raster asset, verified a central
+erase box (vector-space `[18,90]x[18,90]`, safely inside the arrow
+geometry's old-and-new combined bounding box and safely outside every
+asset's corner-rounding/circular-mask antialiasing zone — checked
+programmatically per file that every pixel in the box is fully opaque,
+i.e. `alpha == 255`, before touching it) was flattened to the exact
+background color, then the new arrow geometry was redrawn on top
+(supersampled 8x for anti-aliasing, matching the round-cap/round-join
+stroke rendering of the vector). This guarantees every pixel outside that
+box — background color, rounded-corner shape, circular adaptive-icon
+mask — is byte-for-byte unchanged; confirmed by diffing every regenerated
+file against its original and verifying the diff's bounding box falls
+entirely inside the erase box, at every one of the 12 regenerated raster
+files. `icon.ico`'s 7 frames were all generated from the same 256px master
+as `tray.png` via Pillow's own multi-size ICO writer (`sizes=[...]`),
+matching how the original frames were evidently produced (confirmed by an
+isolated test: Pillow's ICO writer does not preserve independently
+supplied per-size frames via `append_images` — it resizes one base image —
+so a single shared master, not per-size hand-rendering, was the only
+technique consistent with the original file's own construction).
+
+## Automated verification
+
+- `git status` after regeneration showed exactly the 13 expected files
+  changed (1 vector XML + 10 Android PNGs + `tray.png` + `icon.ico`) —
+  nothing else touched.
+- Android: `npm test` — **42 suites / 365 tests, all pass** (resource-only
+  change; no JS/TS touched, run as a sanity check). `eslint`/`tsc` were not
+  re-run — no `.ts`/`.tsx` file was part of this change.
+- Desktop: no test/lint script exists for the plain-HTML/CSS/JS desktop
+  project (confirmed via `package.json`); no JS/HTML/CSS was touched by
+  this milestone, so none was applicable.
+- Backend: untouched (no files under `backend/`), not re-run.
+
+## Desktop verification
+
+Launched the real Electron app (`npm start` in `desktop/`, which starts
+the FastAPI backend as a child process per M14) and confirmed live, via a
+full-screen capture (`System.Drawing`/`System.Windows.Forms` screenshot,
+since this is an interactive Windows session, not headless):
+
+- **Title bar/window icon:** cropped and zoomed the running window's
+  title-bar icon — shows the widened gap clearly.
+- **Taskbar icon:** the taskbar auto-hides in this session; revealed it by
+  moving the cursor to the screen's bottom edge, then cropped/zoomed the
+  Relay taskbar button — same refined geometry, correctly picked up from
+  the regenerated `icon.ico`.
+- **System tray icon:** revealed the taskbar's hidden-icons flyout (the
+  `^` overflow chevron) and zoomed the tray icon(s) at their actual
+  rendered size (`tray.js` resizes `tray.png` to 16x16 at runtime) — the
+  gap is visible even at this small size, a clear improvement over the
+  previous tangent/touching baseline.
+- Corner color and background (`#2D6CDF`) confirmed unchanged by direct
+  pixel sampling of the regenerated files before launching.
+- Cleaned up: stopped the launched Electron process(es)
+  (`Stop-Process -Force`) at the end of verification.
+
+## Android physical-device verification
+
+Device: `RMX3997` (`69DADENFONAIOZS4`), connected via USB/ADB (`adb
+devices -l` confirmed), already paired from a prior session — not
+re-paired or disturbed.
+
+- Rebuilt and installed: `./gradlew installDebug` from
+  `android/android/`. First attempt failed
+  (`javax.xml.stream.XMLStreamException`: `"--"` is not permitted inside
+  an XML comment — a typographic double-hyphen in this milestone's own
+  first-draft comment text in `ic_launcher_foreground.xml`); fixed by
+  replacing it with a semicolon and rebuilding. Second build succeeded
+  (`BUILD SUCCESSFUL`, installed on `RMX3997 - 16`).
+- **Launcher icon:** opened the app drawer on-device (swipe-up gesture,
+  scrolled to "RelayMobile"), screenshotted and zoomed — the adaptive icon
+  (rendered live from the edited vector XML by the launcher itself, not a
+  pre-rendered PNG) shows the same widened gap as Desktop's.
+- **Task switcher:** launched the app, opened recents
+  (`KEYCODE_APP_SWITCH`), screenshotted and zoomed both the card-header
+  icon and the bottom dock icon — same refined geometry.
+- App was brought to the foreground once as a basic non-crash sanity check
+  (no red-box error, no crash dialog); full functional exercise (pairing,
+  transfers) was out of this icon-only milestone's scope and not
+  performed, consistent with "do not modify application behavior."
+- Cleaned up: removed the screenshot temp files this session wrote to
+  `/sdcard/`; did not disturb the existing pairing/session state.
+
+## Before/after result
+
+Confirmed at every inspected size (Desktop: 16/32/48/64/128/256px;
+Android: 48/72/96/144/192px legacy, plus the live adaptive-icon and
+task-switcher renders) that the two arrows now show a clear, consistent
+gap where they previously touched, while background color, corner
+rounding/circular mask, arrow color, direction, and stroke weight are
+pixel-identical to before outside the arrow region itself (verified by
+diff-bounding-box, see Automated verification above).
+
+## Documentation changes
+
+This entry (`docs/15_QA_NOTEBOOK.md`, Milestone P36). `CLAUDE.md` was not
+updated — this is a one-time geometry tweak to an already-established
+icon, not a new durable convention; the existing P23/P25 cross-platform
+icon-reuse conventions already cover "where the authoritative glyph lives"
+and remain accurate (the vector's own path data is simply different
+numbers now). `README.md` was not touched — it contains no icon/branding
+detail that became inaccurate. `.gitignore` was not touched — no new
+generated-artifact category was introduced (the regeneration script itself
+was a scratchpad one-off, not added to the repo).
+
+## Limitations
+
+- No reproducible icon-generation script was added to the repository.
+  Desktop's `tray.png`/`icon.ico` remain, as before this milestone, hand/
+  script-maintained binary assets with no checked-in build step — a future
+  icon change will need to repeat the same measure-erase-redraw process (or
+  a future milestone could formalize one, which was out of this narrow
+  brief).
+- The Android debug build was verified on-device via the launcher and task
+  switcher; the running app's own UI was not exercised beyond a basic
+  foreground/non-crash check, per the milestone's explicit "do not modify
+  application behavior" / icon-only boundary.
+- Desktop's taskbar in this session is auto-hidden by default and required
+  a cursor-edge reveal to screenshot; this is an environment/session
+  characteristic, not related to the icon change itself.
+
+P36 ends here.

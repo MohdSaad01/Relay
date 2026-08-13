@@ -2,21 +2,26 @@
 <!-- P23 adaptive-icon foreground: the same two-opposing-arrows "relay"
      glyph as the bottom-navigation Transfers icon (src/components/icons.tsx),
      scaled onto the 108x108dp adaptive-icon canvas and kept within the
-     ~66dp safe zone so no launcher mask clips it. -->
+     ~66dp safe zone so no launcher mask clips it.
+     P36: each arrow's shaft/chevron is shifted 4 units further from the
+     shared y=54 centerline than the original (was centered on y=42/y=66,
+     now y=38/y=70) to widen the negative space where the two chevrons
+     meet in the middle; geometry, direction, stroke width, and color are
+     otherwise unchanged. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
   <path
-      android:pathData="M30,42 L70,42 M58,30 L70,42 L58,54"
+      android:pathData="M30,38 L70,38 M58,26 L70,38 L58,50"
       android:strokeColor="#FFFFFF"
       android:strokeWidth="8"
       android:strokeLineCap="round"
       android:strokeLineJoin="round"
       android:fillColor="#00000000" />
   <path
-      android:pathData="M78,66 L38,66 M50,54 L38,66 L50,78"
+      android:pathData="M78,70 L38,70 M50,58 L38,70 L50,82"
       android:strokeColor="#FFFFFF"
       android:strokeWidth="8"
       android:strokeLineCap="round"

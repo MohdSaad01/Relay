@@ -22,12 +22,13 @@ bundling the packaged FastAPI backend. The Android app now has a real,
 physically-verified release build too — `cd android/android &&
 ./gradlew.bat :app:assembleRelease` produces `app-release.apk` — though
 it is currently signed with a local verification keystore rather than a
-final production identity, and is sideloaded (no store listing). What
-remains before a public release is code signing for all three artifacts
-(out of scope for V1) and the full cross-platform validation pass over
-the packaged Windows installer + release APK together
-(`docs/15_QA_NOTEBOOK.md`'s P41), plus the enhancements listed under
-[Known Limitations](#known-limitations) below.
+final production identity, and is sideloaded (no store listing). The
+installed Desktop app, its bundled backend, and this release APK have been
+verified working together as one product over a real LAN, with no release
+blockers found (`docs/15_QA_NOTEBOOK.md`'s P41). What remains before a
+public release is code signing for all three artifacts (out of scope for
+V1) and real production signing identities for both platforms, plus the
+enhancements listed under [Known Limitations](#known-limitations) below.
 
 ## Features
 
@@ -280,7 +281,7 @@ here before release._
 | P38 | Backend production bundle (PyInstaller) | Done |
 | P39 | Windows desktop installer (electron-builder/NSIS) | Done |
 | P40 | Android release APK (cleartext networking + release signing) | Done |
-| P41 | Packaged end-to-end release validation | Not started |
+| P41 | Packaged end-to-end release validation | Done |
 
 See `CLAUDE.md` for the detailed, per-milestone implementation notes.
 

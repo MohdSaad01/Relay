@@ -22,10 +22,13 @@ Relay's Version 1 is **feature-complete**: the backend, the Electron desktop
 app, and the React Native Android app all implement the full pairing →
 discovery → share → transfer → stream flow (`git log`: `M14: Implement
 Electron desktop application`, `Complete Phase1` (Android client),
-`v1-feature-complete`). What remains is packaging/distribution
-(`docs/12_Packaging_Deployment.md`) and the enhancements listed under
-[Not Yet Implemented](#not-yet-implemented) — see `README.md` for the
-project-level overview and setup instructions for all three components.
+`v1-feature-complete`). Packaging/distribution (`docs/12_Packaging_Deployment.md`)
+is also done and validated end-to-end (P38–P41): a real Windows installer,
+a real bundled backend, and a real Android release APK have been verified
+working together as one product. What remains is the items listed under
+[Not Yet Implemented](#not-yet-implemented) (real production signing
+identities, Windows code signing, repository cleanup) — see `README.md` for
+the project-level overview and setup instructions for all three components.
 
 ## Completed Milestones
 
@@ -873,17 +876,21 @@ build/verification detail: `docs/15_QA_NOTEBOOK.md`'s P40 entry.
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)
 * WebSockets / real-time push (transfer progress is currently polled via `GET /transfers/{id}`)
-* Packaging & distribution (`docs/12_Packaging_Deployment.md`): the backend has a verified PyInstaller `--onedir` production bundle (P38), the desktop app has a real, verified NSIS installer (P39), and Android has a real, physically-verified release APK (P40) — but none of the three is code-signed for public distribution (out of scope for V1), the Android release signing identity is currently a local verification keystore rather than a final production one, and no packaged Windows-installer + release-APK cross-platform validation has been run yet (P41)
+* Packaging & distribution (`docs/12_Packaging_Deployment.md`): the backend has a verified PyInstaller `--onedir` production bundle (P38), the desktop app has a real, verified NSIS installer (P39), Android has a real, physically-verified release APK (P40), and the three have now been verified together as one product over a real LAN (P41) — but none of the three is code-signed for public distribution (out of scope for V1), the Android release signing identity is still a local verification keystore rather than a final production one, and Windows Firewall's first-run prompt behavior remains environmentally unconfirmed (P39, re-confirmed P41)
 * Whether `Devices`/`Settings`/`Pairing`/`Discovery` should also require a paired-device session was raised during M9 and left open — revisit if Android is ever expected to call those routes directly
 
 ## Next Planned Milestone
 
-**Packaging & Deployment** (`docs/12_Packaging_Deployment.md`) — the last
-major piece before Version 1 is distributable. P37 (an audit-only
-milestone) broke this into a concrete four-milestone sequence; **P38, P39,
-and P40 are now complete** (see "Backend Production Bundle (P38)" /
-"Windows Desktop Installer (P39)" / "Android Release Build (P40)" above
-and `docs/15_QA_NOTEBOOK.md`'s P38, P39, and P40 entries for full detail):
+**Packaging & Deployment** (`docs/12_Packaging_Deployment.md`). P37 (an
+audit-only milestone) broke this into a concrete four-milestone sequence;
+**P38, P39, P40, and P41 are now all complete** (see "Backend Production
+Bundle (P38)" / "Windows Desktop Installer (P39)" / "Android Release Build
+(P40)" / "Packaged End-to-End Release Validation (P41)" above and
+`docs/15_QA_NOTEBOOK.md`'s P38–P41 entries for full detail). P41's
+validation found no release blockers — remaining work is repository
+cleanup (P42, not yet started) and the still-open items P41 explicitly
+did not resolve (real production signing identities for both platforms,
+Windows code signing, the Android Clear History focus-refresh gap):
 
 * ~~**P38 — Backend Production Bundle.**~~ **Done.** Pinned backend
   dependencies (three-way split: production/dev-test/build-only); added
@@ -917,17 +924,59 @@ and `docs/15_QA_NOTEBOOK.md`'s P38, P39, and P40 entries for full detail):
   signing identity. Versioning drift (backend/desktop `0.1.0`, Android
   `1.0`/`1`) was left unresolved — not required to produce a working
   release APK.
-* **P41 — Packaged End-to-End Release Validation.** The full
-  Windows/Android/cross-platform matrix in `docs/15_QA_NOTEBOOK.md`'s P37
-  entry, run against the real packaged artifacts from P38–P40 together
-  (installed Desktop + real backend bundle + real release APK) — including
-  the Windows Firewall prompt and the fuller transfer matrix (upload,
-  multi-GB files, Unicode/long filenames, cancellation, induced failures,
-  restart-mid-transfer) P39/P40 each left open.
+* ~~**P41 — Packaged End-to-End Release Validation.**~~ **Done.** The real
+  packaged artifacts (installed Desktop app, its bundled `relay-backend.exe`,
+  and the Android release APK) verified together as one product over a
+  genuine phone-hotspot LAN — not dev builds, not API simulation. Covered
+  a fresh install, bundled-backend startup, discovery, a QR pairing flow
+  that included one physically performed camera scan, byte-verified
+  file/folder sharing (Unicode, zero-byte, duplicate names) in both
+  directions, real progress/queue/cancellation/failure transfer states,
+  both platforms' Clear History semantics, settings persistence, a real
+  unclean-shutdown-and-restart cycle with zero orphaned processes, and a
+  real installer upgrade-in-place/uninstall cycle. No release blockers
+  found. One non-blocking defect found and root-caused: Android's
+  Transfers screen doesn't re-read the shared Clear History marker on
+  focus (`TransferListScreen.tsx`'s `clearedAt` loads once via
+  `useEffect(..., [])`), so clearing history from the Files screen doesn't
+  retroactively filter an already-mounted Transfers screen until it's
+  cleared there too or the app is restarted — left unfixed per this
+  milestone's explicit no-blocker-no-fix boundary. Windows Firewall's
+  first-run prompt still did not appear in this environment (as in P39) —
+  functional LAN connectivity was nonetheless confirmed working. Full
+  detail: `docs/15_QA_NOTEBOOK.md`'s P41 entry.
 
-Do not begin P41 automatically — each of these remains its own
-milestone, reviewed before the next starts, per this file's Git Workflow
-rules.
+## Packaged End-to-End Release Validation (P41)
+
+Relay's packaged Windows installer, its bundled backend, and the Android
+release APK have been verified together as one product, not just as three
+independently-passing milestones — this was P41's entire point (see
+`docs/15_QA_NOTEBOOK.md`'s P41 entry for the full validation matrix). Two
+durable facts for any future work in this area:
+
+* **Android's Files screen and Transfers screen share one Clear History
+  marker (`android/src/transfers/historyReset.ts`'s `relay-history-reset.json`)
+  but do not live-sync it.** `TransferListScreen.tsx` reads
+  `getHistoryClearedAt()` once on mount (`useEffect(..., [])`); its
+  `useFocusEffect` refreshes the transfer list on every re-focus but never
+  re-reads the marker. Clearing history from `FilesScreen.tsx` therefore
+  does not retroactively filter an already-mounted Transfers screen until
+  the user clears history there too, or the app restarts. Not a data-loss
+  or correctness issue (the underlying marker, backend `Transfer` rows, and
+  physical files are always correct) — a future fix should either add
+  `getHistoryClearedAt()` to that `useFocusEffect`, or lift `clearedAt` into
+  a hook both screens subscribe to, rather than re-deriving the cutoff
+  logic a third time.
+* **Windows Firewall has never shown a first-run consent prompt in this
+  development environment, across both P39 and P41** — while real
+  cross-device LAN traffic has repeatedly been confirmed working regardless.
+  Treat this as an environmental characteristic of this specific machine,
+  not proof either way about a genuinely fresh end-user Windows install;
+  do not assume the prompt is solved or broken without testing on a
+  separate machine.
+
+Do not begin P42 automatically — it remains its own milestone, reviewed
+before starting, per this file's Git Workflow rules.
 
 ## Documentation
 

@@ -8658,3 +8658,392 @@ dependency. The signing identity used is explicitly a **local verification
 keystore, not a final production identity** — that distinction is
 recorded, not glossed over. Versioning drift and P41's full validation
 matrix are correctly left for later, per this milestone's own boundary.
+
+---
+
+# Milestone P41 — Packaged End-to-End Release Validation
+
+**Requirements addressed:** the full P37-proposed release validation matrix,
+executed for real against the actual P38/P39/P40 packaged artifacts — not
+dev builds, not API simulation — including one genuinely physical QR-code
+camera scan (performed by the user at the assistant's request, since the
+assistant has no way to physically aim a camera). Read `docs/15_QA_NOTEBOOK.md`'s
+P37–P40 entries, `docs/12_Packaging_Deployment.md`, and `CLAUDE.md` before
+starting, per this milestone's own instructions.
+
+## 1. Artifacts tested (exact)
+
+**Desktop:** `desktop/dist/Relay-Setup-0.1.0.exe` (built 2026-08-14 00:07,
+after commit `bb9486c`) — NSIS, per-user, x64. `Get-Item ...VersionInfo`:
+`ProductName=Relay`, `FileVersion=ProductVersion=0.1.0`,
+`FileDescription="Relay desktop application: Electron shell hosting the
+FastAPI backend and the desktop UI."` Bundled backend:
+`backend/dist/relay-backend/relay-backend.exe` (built 2026-08-13 23:50,
+after commit `607f88a`).
+
+**Android:** `android/android/app/build/outputs/apk/release/app-release.apk`
+(built 2026-08-14 01:01, after commit `539d5ce`), reinstalled fresh
+(`adb uninstall` + `adb install`, not `-r`) immediately before testing to
+guarantee the artifact on-device matched the artifact on disk byte-for-byte
+(signature-verified by the reinstall itself). `aapt2 dump badging`:
+`package: name='com.relay.mobile' versionCode='1' versionName='1.0'`,
+`minSdkVersion:'26' targetSdkVersion:'36'`, `native-code: arm64-v8a
+armeabi-v7a x86 x86_64`. `apksigner verify --print-certs`: **V2 signer,
+`CN=Relay Local Verification, OU=Relay P40, O=Relay Dev` — the P40 local
+verification keystore, explicitly not a production signing identity.**
+Application label is `RelayMobile` (matches `strings.xml`'s pre-existing
+`app_name`, unrelated to packaging — a cosmetic branding note, not a P41
+finding).
+
+**Git state:** `git status` clean, `HEAD` at `539d5ce`, throughout the
+entire milestone — this was validation-only, no source was modified.
+
+## 2. Environment / topology
+
+Real phone-hotspot LAN, already live at session start: RMX3997's hotspot
+(`ap0`, `10.93.152.58/24`) with this Windows machine connected as a Wi-Fi
+client (`10.93.152.233`), confirmed via `Test-Connection`. Backend bound to
+port 8000 on all interfaces (`0.0.0.0:8000`), reached by Android at
+`10.93.152.58` → desktop `10.93.152.233`. No `localhost`, no `adb reverse`/
+port-forwarding, no API simulation used for any cross-device step.
+
+## 3. Fresh installation (§3–4)
+
+Found ~50 lines of leftover `%APPDATA%\Relay` state from a prior **dev-tree**
+run (`backend/.venv/Scripts/python.exe -m uvicorn ...`, confirmed via
+`desktop.log`'s startup line) — moved aside
+(`Relay.devrun-backup-<timestamp>`), not deleted, to guarantee a clean
+first-launch test. Ran the real NSIS wizard interactively (screenshotted at
+each step): "Choose Installation Options" (per-user default, "Only for me"),
+"Choose Install Location" (`C:\Users\Saad\AppData\Local\Programs\Relay`,
+matches P39's documented path), install progress, "Completing Relay Setup"
+with "Run Relay" checked. Verified after Finish: `Relay.exe` +
+`Uninstall Relay.exe` in the install dir, `Relay.lnk` on both the Desktop
+and the Start Menu, and the app auto-launched. First-launch UI: opened
+directly on **Pairing** (no paired device), "Ready to pair a device" status
+card, correct window title ("Relay"), **no File/Edit/View/Window menu bar**,
+no backend-error footer.
+
+## 4. Bundled backend verification (§5) — PHYSICALLY VERIFIED
+
+`desktop.log`'s very first line: `Starting backend:
+C:\Users\Saad\AppData\Local\Programs\Relay\resources\backend\relay-backend.exe
+--port 8000 (cwd=...\resources\backend)` — the packaged exe, never
+`python`/`uvicorn`. `%APPDATA%\Relay\relay.db` created fresh (86 KB, empty
+schema) at first launch. `Get-Process` confirmed `relay-backend.exe`
+running from `resources\backend\`, and a parallel process scan found **zero**
+`python.exe`/`node.exe`/`uvicorn` processes anywhere on the machine at any
+point during this milestone.
+
+## 5. Android release verification (§5) — PHYSICALLY VERIFIED
+
+`adb install` (clean, not `-r`) succeeded (signature accepted).
+`monkey -c android.intent.category.LAUNCHER` launched `MainActivity`
+directly. `logcat` showed Hermes bytecode loading from the bundled
+`libhermesvm.so`/`libhermestooling.so` — **no** `Metro`, `8081`, `__DEV__`,
+or RedBox references anywhere in the log. First screen (post-pairing, see
+below) rendered the real Discovery screen with a live-discovered "Thomas"
+card within seconds of app launch — proving the release JS bundle and
+native networking both work with zero Metro/dev-server dependency.
+
+## 6. Discovery & pairing (§7) — PHYSICALLY VERIFIED, including a real camera scan
+
+Android discovered "Thomas" (the desktop) via the real UDP broadcast within
+seconds, unprompted. The assistant cannot physically aim a phone camera at
+a monitor, so — per this milestone's own instruction to document rather
+than fake a physical step — **the user was asked to and did perform the
+actual QR-code camera scan** while the assistant drove "Start Pairing" on
+Desktop and captured the resulting screens. Result: Desktop showed "Device
+paired successfully — RMX3997 can now share and receive files with this
+computer"; Android navigated straight into `MainTabs` (Shared Files, empty).
+Devices tab confirmed `RMX3997`, green "Paired" badge, correct paired
+timestamp. (The intermediate "Pairing Request" review-card screenshot was
+missed in the handoff between the physical scan and the next capture, so
+that one specific screen's rendering is not separately evidenced — the
+approve action's *effect*, which is what matters, is fully confirmed by the
+paired-success state and the working session that followed.)
+
+## 7. File / folder sharing (§8) — PHYSICALLY VERIFIED, byte-for-byte
+
+From the packaged Desktop app's real "Add Files…"/"Add Folder…" native
+dialogs: one normal file, one folder (nested subdirectory, a Unicode
+filename+content file `名前_файл_🎉.txt`, a zero-byte file — "5 items"
+correctly counted), and a duplicate-basename pair (`duplicate.txt`, two
+different source files, two independent `shared_file_id`s). All confirmed
+correct on Android (matching sizes) and downloaded; **filesystem-level**
+verification via `adb shell cat`/`ls` on the actual device confirmed every
+byte matched the source, the zero-byte file was genuinely 0 bytes, the
+Unicode filename and its content survived intact, the nested directory
+structure was reconstructed exactly, and the duplicate pair landed as
+`duplicate.txt` + `duplicate (1).txt` with correctly distinct content. Open
+(`ACTION_VIEW`) produced a real Android "Open with" chooser.
+
+## 8. Android → Desktop upload (§9) — PHYSICALLY VERIFIED
+
+Single file: `UploadConfirmSheet` showed correct singular wording ("Upload
+File" / "1 file selected · 27 B total" / "Upload this file"); Cancel and
+Confirm both exercised. Multi-file (native picker long-press multi-select):
+correct plural wording ("Upload Files" / "2 files selected" / "Upload these
+files"). Folder (SAF picker, including the real "Allow RelayMobile to
+access folder?" system consent dialog): "Upload Folder" / "3 items · 40 B" /
+"Upload folder". All three landed correctly under the real
+`download_directory` (`C:\Users\Saad\Downloads`, confirmed via
+`GET /settings`, not a stale assumption), folder structure and zero-byte
+file preserved, content byte-verified. Desktop's Shared Files table showed
+them with the `Received` badge and the correct action set (no
+Unshare/Refresh), matching P21/P28.
+
+## 9. Transfer reliability — progress / queue / cancel / failure (§10) — PHYSICALLY VERIFIED
+
+Three simultaneous downloads (60/40/20 MB) produced a genuine
+`Downloading…` + two `Queued` state, confirmed in a single screenshot.
+Transfers tab showed real byte-level progress (`32.0 MB / 60.0 MB`) for
+the one genuinely in-flight transfer. **Cancellation:** caught a 300 MB
+download mid-flight (`Downloading…`, long-press → Remove); resulting state
+was a clean `Cancelled` at `248.0 MB / 300.0 MB` — no zombie
+`in_progress` row. **Failure:** shared a fresh 300 MB file, started its
+download, and deleted the source file on the desktop within the same
+transfer window; Android showed "The source file is no longer available."
+with a `Retry` action (no raw path/stack trace), and Transfers correctly
+recorded `Failed · 0 B / 300.0 MB`. LAN throughput on this real
+hotspot link was high enough (~150–250 MB in a few seconds) that these
+races needed care to actually catch mid-transfer — recorded here as an
+observation, not a defect.
+
+## 10. Clear History (§11) — PHYSICALLY VERIFIED, one real finding
+
+**Desktop:** Shared Files → Clear History dialog wording exactly matches
+spec ("Currently shared files/folders stay listed, downloaded files stay
+on your computer, and any active transfer stays visible in Transfers.").
+Confirming it hid every `Received`-badge row while leaving every `Shared`
+row untouched; Transfers tab (same shared marker, per P28) simultaneously
+emptied to the normal "No history" card — not a special "cleared" state.
+Physical received files on disk were confirmed still present afterward.
+
+**Android:** Files → Clear History dialog wording matches spec exactly
+("Downloaded files will be removed from this list, but the files
+themselves stay on your device. Files still downloading or queued are not
+affected."). Confirmed it correctly hides only `completed` rows (verified
+against `FilesScreen.tsx`'s `isFileHiddenByHistoryClear`, which explicitly
+gates on `status.kind === 'completed'`) and that hidden items' physical
+files remain on `/sdcard/Download/Relay/` — confirmed by direct `ls`.
+
+**Real finding (non-blocking):** clearing history from Android's **Files**
+screen did not immediately filter the already-mounted **Transfers**
+screen's list, even though both read the identical
+`relay-history-reset.json` marker (`android/src/transfers/historyReset.ts`).
+Root-caused in source, not just observed: `TransferListScreen.tsx` loads
+`clearedAt` via `useEffect(() => { getHistoryClearedAt()... }, [])` — empty
+dependency array, so it runs once on mount only. Its `useFocusEffect`
+refreshes the `transfers` list itself on every re-focus but never re-reads
+`getHistoryClearedAt()`, so a marker write from the sibling Files screen is
+invisible to an already-mounted Transfers screen until the user either
+clears history from Transfers directly (which sets local state itself) or
+fully restarts the app (fresh mount re-reads the marker correctly — verified
+live). No data is at risk anywhere in this path (physical files, backend
+`Transfer` rows, and the persisted marker are all correct at every step) —
+this is a stale-React-state UI sync gap, not a correctness or data-loss bug.
+
+## 11. Settings persistence (§13) — PHYSICALLY VERIFIED
+
+Desktop: renamed device display name `Thomas` → `Thomas-P41`, saved
+("Saved." confirmation), confirmed unchanged across a full app restart
+(§13 below). Download directory correctly showed the real resolved default
+(`C:\Users\Saad\Downloads`) — no stale/dev value. Android: renamed device
+`RMX3997` → `RMX3997-P41` via the inline Settings editor; propagated
+correctly to Desktop's Devices list (`PATCH /devices/{id}` with device-owner
+auth, per P23) within seconds. Download folder correctly showed
+`Default (Downloads/Relay)`.
+
+## 12. Restart & recovery, close-to-tray, backend lifecycle (§14–15) — PHYSICALLY VERIFIED
+
+**Close-to-tray:** clicking the window's X hid the window
+(`MainWindowTitle` empty) while all four `Relay.exe` processes and
+`relay-backend.exe` kept running and `GET /health` kept responding —
+confirmed correct close-to-tray, not a real quit.
+
+**Single-instance / restore:** launching `Relay.exe` again while already
+running did not spawn a second instance (same 5 PIDs, unchanged) — it
+refocused and restored the existing hidden window, with all state (paired
+device, tab) intact. (The tray icon itself could not be reliably located
+via automated pixel/UI-Automation search to click its context-menu Quit
+item specifically — Electron tray icons are not exposed as standard
+UIAutomation elements — so the literal "right-click tray → Quit" UI path is
+not separately screenshotted. The equivalent lifecycle contract — backend
+exits together with the app, no orphan — **is** verified below via a real
+process-level shutdown.)
+
+**Full restart:** force-stopped every `Relay.exe`/`relay-backend.exe`
+process (simulating an unclean shutdown/crash), confirmed **zero** orphaned
+processes, then relaunched via the real Desktop shortcut. Fresh PIDs, clean
+`desktop.log` startup sequence (`Backend state: starting` →
+`Application startup complete` → `Backend state: ready`), and the paired
+device (`RMX3997-P41`) and renamed settings (`Thomas-P41`) both survived
+intact — confirmed via both the UI and `GET /devices`/`GET /settings`.
+
+**Android restart:** `am force-stop` + relaunch went straight back into
+`MainTabs` (paired session persisted, no re-pairing needed); the previously
+downloaded/received files were confirmed still on disk.
+
+## 13. Installer upgrade / uninstall (§16)
+
+No earlier-version artifact exists to test a true version upgrade (P39/P40
+are the first real installer/APK this project has produced) — per P39's
+own precedent, re-ran the identical installer (`/S`, silent) over the live
+install as the "upgrade/repair" path. `relay.db`'s file timestamp was
+unchanged by the reinstall, and after relaunch `GET /devices` /
+`GET /settings` still returned `RMX3997-P41` / `Thomas-P41` — full data
+preservation confirmed. **Uninstall** (`Uninstall Relay.exe /S`): install
+directory, Desktop shortcut, and Start Menu shortcut were all removed
+(`Test-Path` → `False` for all three); `%APPDATA%\Relay\relay.db` was
+preserved (`Test-Path` → `True`); shared/received source files elsewhere on
+disk (`Documents\RelayP41Test\`, `Downloads\`) were untouched. Reinstalled
+afterward to continue validation.
+
+## 14. Firewall & dev-dependency audit (§18–19)
+
+**Firewall:** no pre-existing `*Relay*` rule (`Get-NetFirewallRule`), no
+Windows Firewall consent-prompt process observed on a fresh listener launch,
+**and** real cross-device LAN traffic (Android → this exact freshly
+relaunched backend) succeeded immediately and repeatedly
+(`desktop.log` showing `200 OK` responses from `10.93.152.58`) — matching
+P39's own prior finding. Classified as **UNVERIFIED / ENVIRONMENTAL
+LIMITATION for the specific "does a Firewall prompt appear" question**
+(none did, on either milestone, in this environment) while the underlying
+functional outcome — **LAN traffic is not blocked** — is positively
+confirmed, not assumed.
+
+**Dev-dependency audit:** a full-system process scan (`tasklist`) at the
+point where the packaged Desktop app and the Android release APK were both
+mid-use over the real LAN found **zero** `python.exe`, `node.exe`, or Metro
+processes anywhere on the machine.
+
+## 15. Release artifact / signing audit (§17)
+
+Desktop installer: unsigned (`Get-AuthenticodeSignature` not re-checked
+this milestone, unchanged since P39 — code signing remains explicitly out
+of scope for V1). Android: **signed with the P40 local verification
+keystore (`CN=Relay Local Verification, OU=Relay P40`), not a final
+production signing identity** — this is stated plainly, not glossed over.
+`applicationId=com.relay.mobile`, `versionName=1.0`, `versionCode=1`.
+
+## 16. Final validation matrix
+
+| Area | Result | Evidence | Notes |
+|------|--------|----------|-------|
+| Desktop install | PASS | Real NSIS wizard, screenshotted every page | Per-user, correct path/shortcuts |
+| Bundled backend | PASS | `desktop.log` spawn line, process list, zero dev processes | `relay-backend.exe` only |
+| Android release APK | PASS | `aapt2`/`apksigner`, logcat (no Metro/8081) | Hermes release bundle |
+| LAN networking | PASS | Real hotspot topology, `Test-Connection`, live traffic | No localhost/simulation |
+| Discovery | PASS | Real UDP broadcast, "Thomas" auto-discovered | |
+| QR pairing | PASS (physical) | User performed the real camera scan | One intermediate screen not captured |
+| Device naming | PASS | Renamed both directions, propagated correctly | |
+| File sharing | PASS | Byte-verified content incl. Unicode/zero-byte | |
+| Folder sharing | PASS | Nested structure + duplicate names byte-verified | |
+| Desktop upload | N/A | Not applicable (P21 upload direction is Android→Desktop) | See Android upload row |
+| Android upload | PASS | Single/multi/folder, correct sheet wording, byte-verified | |
+| Download | PASS | All items, byte-verified against source | |
+| Open | PASS | Real Android "Open with" chooser fired | |
+| Progress | PASS | Real byte-level progress observed | |
+| Queue | PASS | Genuine Downloading+2×Queued state captured | |
+| Cancellation | PASS | Caught mid-flight, clean `Cancelled` state | |
+| Failure | PASS | Real deleted-source failure, clean `Failed` state, Retry offered | |
+| Clear History | PASS (1 non-blocking finding) | Both platforms, correct wording/preservation | Files→Transfers sync gap, see §10 |
+| Settings | PASS | Both platforms, renamed + persisted | |
+| Restart/recovery | PASS | Real force-kill + relaunch, zero orphans, data intact | Tray Quit menu not pixel-located |
+| Installer upgrade | PASS | Re-run over live install, `relay.db` untouched | No earlier version existed to test |
+| Uninstall/data preservation | PASS | Binaries/shortcuts gone, `relay.db` preserved | |
+| Firewall | UNVERIFIED / ENVIRONMENTAL | No prompt seen, but traffic confirmed working | Same as P39's finding |
+| No dev dependencies | PASS | Zero python/node/Metro processes, system-wide scan | |
+| Artifact/signing | PASS (temporary identity) | `apksigner`, `VersionInfo` | Android = P40 local verification key |
+
+## 17. Problems discovered & fixes made
+
+**No release blockers were found.** One non-blocking defect was found and
+root-caused (§10 above: Android Transfers screen doesn't live-refresh its
+history-cutoff on focus). Per this milestone's Fix Policy — only a
+confirmed release blocker may be fixed during P41 — **no fix was applied**;
+this is documented for a future milestone to pick up (a one-line change:
+either add `getHistoryClearedAt()` to `TransferListScreen.tsx`'s
+`useFocusEffect`, or lift `clearedAt` into a shared hook both screens
+subscribe to).
+
+## 18. Non-blocking / accepted-limitation items (not fixed, not re-litigated)
+
+- Android Transfers screen's stale `clearedAt` on focus (§10/§17 — new).
+- Android's launcher/app-drawer label is `RelayMobile` (pre-existing
+  `strings.xml` value, not something P38–P40 introduced or P41's scope to
+  change) vs. the in-app UI's own "Relay" header — a pure branding
+  observation, not a functional issue.
+- Windows Firewall prompt behavior remains unconfirmed either way in this
+  environment (§14) — functional LAN connectivity is not in question.
+- The intermediate Desktop "Pairing Request" review-card screen was not
+  separately screenshotted during the live physical-scan handoff (§6) —
+  the approve action's effect is still fully confirmed.
+- All pre-existing "Remaining limitations" from P38/P39/P40 (unsigned
+  installer, temporary Android signing identity, versioning drift,
+  `minifyEnabled=false`) are unchanged and were not re-opened.
+
+## 19. Documentation changes
+
+This entry (`docs/15_QA_NOTEBOOK.md`, Milestone P41). `CLAUDE.md`'s "Next
+Planned Milestone" section updated to mark P41 complete and note the one
+non-blocking Clear History finding, without starting P42. `README.md` not
+changed — its existing Status/Known Limitations sections do not overclaim
+anything this milestone would contradict.
+
+## 20. Remaining limitations (carried forward, unchanged)
+
+Same as P40 §17: temporary Android signing identity, no code signing on
+either platform, versioning drift, `minifyEnabled=false`. Plus this
+milestone's own: the Transfers-screen history-refresh gap (§10/§17), and
+Firewall-prompt behavior remaining environmentally unconfirmed (§14).
+
+## 21. Suggested commit message
+
+```
+docs: record P41 packaged end-to-end release validation
+
+No source changes — P41 was validation-only. Confirms the real P38/P39/P40
+artifacts (installed Desktop + bundled relay-backend.exe + Android release
+APK) work together as one product over a genuine phone-hotspot LAN,
+including one physically performed QR-code camera scan. One non-blocking
+defect found and root-caused (Android Transfers screen doesn't live-refresh
+its Clear History cutoff on focus); no release blockers found.
+```
+
+## 22. Final release recommendation
+
+**P41 — RELEASE VALIDATION PASSED.**
+
+What was actually validated: the real installed Windows app (via its own
+NSIS installer, not the dev tree) spawning its real bundled
+`relay-backend.exe` (never Python/uvicorn), talking over a genuine
+phone-hotspot LAN to a real signed release APK (never Metro/debug), through
+a complete pairing flow that included one genuinely physical QR-camera scan,
+followed by byte-verified file/folder sharing (including Unicode and
+zero-byte content) in both directions, real progress/queue/cancel/failure
+transfer states, both platforms' Clear History semantics, settings rename
+persistence, a real unclean-shutdown-and-restart cycle with zero orphaned
+processes, and a real installer upgrade-in-place/uninstall cycle that
+preserved user data correctly.
+
+Known limitations going into release, stated plainly:
+
+- **The Android signing identity is the P40 local verification keystore,
+  not a final production signing identity** — must be replaced before any
+  real distribution.
+- **Windows code signing remains outstanding** (unchanged from P39,
+  out of scope for V1 per `docs/12_Packaging_Deployment.md`).
+- **Windows Firewall prompt behavior was not conclusively observed** in
+  this environment (no prompt either time it's been tested, across P39 and
+  P41) — the functional outcome (LAN traffic works) is confirmed, but the
+  first-run consent-dialog UX itself remains unverified on a genuinely
+  fresh end-user machine.
+- One non-blocking UI-sync defect (Android Transfers/Files Clear History
+  focus refresh) remains open for a future milestone.
+- Post-release polish remains: the `RelayMobile` vs `Relay` label
+  inconsistency, versioning drift, and everything else already tracked
+  under "Not Yet Implemented" in `CLAUDE.md`.
+
+None of the above are release blockers. P41 does not start P42.

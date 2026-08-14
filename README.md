@@ -133,9 +133,9 @@ Relay/
 ├── android/           React Native client (TypeScript)
 │   └── src/            api, discovery, pairing, session, files, transfers, streaming, screens, navigation
 ├── docs/               Project specification — source of truth for Version 1
-├── scripts/            Development utilities (e.g. tray icon generation)
 ├── requirements.txt        Backend runtime dependencies
 ├── requirements-dev.txt    Backend dev/test/lint dependencies
+├── requirements-build.txt  Backend build-only dependencies (PyInstaller)
 ├── CLAUDE.md           Instructions for Claude Code working in this repo
 └── README.md           This file
 ```

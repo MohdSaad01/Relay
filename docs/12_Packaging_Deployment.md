@@ -2,8 +2,12 @@
 
 Version: 1.0 — condensed. Packaging & Deployment is Version 1's final
 milestone sequence (see `CLAUDE.md`); §3 (Desktop), §4 (Backend), and §5
-(Android) are implemented as of P39/P40 — P41's full packaged
-cross-platform validation is what remains.
+(Android) are implemented (P38–P40), and P41 has validated all three
+packaged artifacts together end-to-end over a real LAN with no release
+blockers found. See `docs/15_QA_NOTEBOOK.md`'s P38–P41 entries for the
+full verification record. What remains before public distribution is
+code signing (out of scope for V1) and real production signing
+identities for both platforms.
 
 ---
 

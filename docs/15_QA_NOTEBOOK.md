@@ -17,6 +17,39 @@ as "verified on this one device," not as multi-device coverage.
 
 ---
 
+# Current Status / Baseline (as of P42)
+
+This section is a short orientation pointer, not a replacement for the
+milestone entries below — it exists so a reader doesn't have to scan 9000+
+lines of chronological history to answer "where does the project actually
+stand right now." Update it when a milestone materially changes the
+answer to one of these; do not expand it into a second changelog.
+
+- **Version 1 is feature-complete** (`CLAUDE.md`) and packaging is done:
+  a PyInstaller backend bundle (P38), an NSIS Windows installer (P39), and
+  an Android release APK (P40) all exist and were verified together
+  end-to-end over a real LAN with no release blockers (P41).
+- **Known limitations, deliberately deferred (not defects):**
+  - Neither the Windows installer nor the Android APK is code-signed
+    (out of scope for V1); Android's release signing identity is a local
+    verification keystore, not a final production one (see this file's
+    P40 entry and `docs/12_Packaging_Deployment.md`).
+  - Windows Firewall's first-run consent prompt has never appeared in
+    this development environment (P39, P41) — unconfirmed on a genuinely
+    fresh end-user machine, not known to be broken.
+  - Android's Files and Transfers screens share one Clear History marker
+    but don't live-sync it across an already-mounted screen (P41 entry).
+  - `fileIdentity.ts` has the same `shared_files.id` reuse gap P17 fixed
+    for `folderIdentity.ts` (`docs/14_Testing_Plan.md` §6) — accepted
+    technical debt, not reachable via normal use.
+  - Backend/Desktop/Android version strings have not been unified
+    (`0.1.0` / `0.1.0` / `1.0`) — cosmetic, does not affect packaging.
+- **P42 (repository/documentation cleanup)** is the current milestone;
+  see its entry near the end of this file for what was audited, removed,
+  and retained.
+
+---
+
 # Android Build — CMake/Ninja Path-Length Failure
 
 **Problem:** `npx react-native run-android` failed on Windows with `ninja:
@@ -9047,3 +9080,301 @@ Known limitations going into release, stated plainly:
   under "Not Yet Implemented" in `CLAUDE.md`.
 
 None of the above are release blockers. P41 does not start P42.
+
+---
+
+# Milestone P42 — Repository, Product & Documentation Cleanup
+
+**Scope:** repository/product hygiene now that V1 is feature-complete and
+packaged (P38–P41). Explicitly not a feature milestone — no application
+source behavior was changed. Protocol: inventory → trace (git history +
+reference search) → classify → verify → remove/consolidate → test →
+review diff, per this milestone's own brief. No git history rewrite, no
+force-push, no squashing.
+
+## 1. Initial repository state
+
+`git status` was clean at session start (HEAD `7fb8c47`). 333 tracked
+files. Root held both tracked project files and several correctly
+`.gitignore`d local artifacts: `logs/` (verify-run logs), a stray
+root-level `node_modules/` (201 packages, no root `package.json` —
+left over from some earlier ad-hoc `npm install` run at repo root, not a
+git-tracked concern, not touched), a 0-byte root `relay.db` (distinct
+from the real `backend/relay.db`), `scratch_test_files/`, and `.idea/`.
+All five were already untracked and covered by `.gitignore` — no action
+needed or taken on any of them; they're noted here only because the
+milestone brief asked for a full inventory.
+
+## 2. Audited (four parallel investigation passes, evidence gathered before any deletion)
+
+- **Root level**: `New_Issues.txt`, `scripts/`, `requirements*.txt`,
+  `.gitignore` vs. actual repo state, full git log for secret-like
+  filenames ever committed.
+- **`backend/`**: every `app/` module's importers, `config.py`'s Settings
+  fields against actual reads, `tests/` fixture coverage, the three-way
+  `requirements*.txt` split, `relay-backend.spec` hidden imports,
+  `relay.db`/`dist/`/`.venv` tracking status.
+- **`desktop/`**: every renderer module/view/IPC handler/preload API
+  traced to a real caller, `assets/icons/` against actual references,
+  `package.json` dependencies, `dist/`/`node_modules/` tracking status.
+- **`android/`**: `src/` modules (especially P13–P17-era identity
+  registries) traced to real importers/tests, `package.json` dependencies
+  including react-navigation peer deps, native project build-output and
+  signing-material tracking status, `__tests__/`/`__mocks__/` coverage.
+- **Documentation**: `docs/12`, `docs/14`, `docs/13`, `docs/11`,
+  `docs/15` (this file), `backend/README.md`, `android/README.md`,
+  cross-referenced against CLAUDE.md's completed-milestone record and
+  against actual source/config for concrete, quotable staleness.
+
+## 3. Git-history methodology
+
+Every deletion candidate was checked with `git log --oneline -- <path>`
+(and `git log --all --diff-filter=A --name-only` for the repo-wide secret
+sweep) before removal — introduction commit, whether a later commit
+replaced its function, and whether other tracked files reference it by
+name. No file was removed on the basis of "looks unused" alone.
+
+## 4. Files removed
+
+- **`scripts/generate_tray_icon.js`** — a one-off M14-era dev utility
+  (its own docstring: "generates a simple placeholder PNG icon... so the
+  Electron app has a tray/window icon without depending on an image
+  editor") whose only output, the placeholder `tray.png`, was replaced by
+  the real hand-designed Relay icon two milestones later (`e9737c7`,
+  further refined at `a1ab3c6`). Not referenced by any npm script or
+  build config. This file's own P36 entry already (incorrectly) asserted
+  the script "no longer exists" — this deletion makes that statement
+  true. `scripts/` had no other tracked file, so the directory is now
+  gone; `README.md`'s project-structure listing was updated to match.
+- **`android/src/components/PlaceholderScreen.tsx`** — a scaffold-era stub
+  ("Stand-in body for a screen whose feature milestone hasn't landed
+  yet") from the very first Android commit (`4e93dd6 "Complete Phase1"`),
+  never wired into navigation, zero importers anywhere in `src/` or
+  `__tests__/` at any point in its history. Superseded by the real screens
+  built immediately after. `tsc`, `eslint`, and `jest` all still pass
+  after removal (see §13).
+
+## 5. Files retained despite appearing unused, and why
+
+- **`New_Issues.txt`** — investigated, not blindly deleted. Every one of
+  its 18 items traces to a completed, documented milestone (P19–P30,
+  cross-checked live: e.g. §15's Android Clear History header placement
+  confirmed still in `TransferListScreen.tsx`; §6's folder-upload
+  flattening concern confirmed already re-verified fixed in P26). It is
+  genuinely obsolete as a *requirements* document — but **`git grep`
+  found 44 live references to it by exact section number**
+  (`New_Issues.txt §N`) scattered across source comments in `desktop/`
+  and `android/` and across this notebook's own P19–P36 entries,
+  documenting *why* a given design decision was made. Deleting the file
+  outright would have made all 44 citations unresolvable — exactly the
+  kind of accidental evidence-loss this milestone's protocol exists to
+  prevent. **Action taken: moved to `docs/New_Issues.txt` (filename
+  unchanged so existing citations still resolve) with an archival header
+  explaining its status.** This was caught and corrected mid-milestone
+  after an initial outright deletion — see §17.
+- **`backend/relay.db`, root `relay.db`, `logs/`, `scratch_test_files/`,
+  `.idea/`, root `node_modules/`** — all local-only, all already
+  `.gitignore`d, none tracked. Not removed (out of scope: this is a
+  repository-hygiene pass over tracked state, not a local-machine
+  cleanup, and several of the `.gitignore` rules exist specifically so
+  this local data is never a git concern).
+- **`fileIdentity.ts`'s known `shared_files.id` reuse gap**
+  (`docs/14_Testing_Plan.md` §6) — investigated as a candidate "fix while
+  we're here," explicitly left alone: P42 is not a feature/defect
+  milestone, and this gap is already correctly tracked as accepted
+  technical debt.
+- **All backend `app/` modules, all desktop renderer/main/preload
+  modules, all Android `src/` modules other than `PlaceholderScreen.tsx`**
+  — every one traced to a live importer or test; see §2's four audit
+  passes. Nothing was removed on suspicion alone.
+
+## 6. Dependencies
+
+**No dependency was removed.** All three ecosystems were audited
+independently (backend `requirements*.txt`, desktop `package.json`,
+Android `package.json`) and every dependency traced to real usage — the
+two closest calls were `httpx` (backend, a real transitive dependency of
+FastAPI's `TestClient`, used by every API test) and
+`react-native-gesture-handler`/`react-native-screens` (Android, required
+peer dependencies of `@react-navigation` with no direct feature-code call
+site, but `gesture-handler` is directly imported at `index.js`). The
+backend's three-way `requirements.txt`/`requirements-dev.txt`/
+`requirements-build.txt` split (P38) was confirmed intact and not
+merged back together.
+
+## 7. `.gitignore`
+
+No changes made. Audited against actual repo state (see §1) and found
+already correct: every currently-untracked local/generated artifact
+(logs, root and backend `node_modules`/`.venv`-style dirs, `*.db`,
+`scratch_test_files/`, `.idea/`) is already covered by an existing rule,
+and no tracked file was found that should have been ignored instead.
+
+## 8. Documentation consolidation
+
+- **`docs/12_Packaging_Deployment.md`** (top-of-file summary line): was
+  still framing P41 as outstanding ("P41's full packaged cross-platform
+  validation is what remains"). Corrected to state P38–P41 are complete,
+  with a pointer to this notebook's P38–P41 entries.
+- **`docs/14_Testing_Plan.md`**: two stale passages corrected — §3's
+  "Outstanding: the packaging pipeline itself (T8 — no PyInstaller
+  bundling...)" and §6's "Packaging is unimplemented (T8)" both predated
+  P38–P41 and were rewritten to reflect the actual (done, verified)
+  state, preserving the still-genuinely-open code-signing/production-
+  keystore caveat. §3's backend/Android test counts were also corrected
+  from stale figures (340/2, 310 tests·38 suites) to the numbers this
+  milestone's own verification pass actually measured (343/2, 365
+  tests·42 suites — see §13).
+- **`docs/13_Database_Design.md`, `docs/11_File_Transfer.md`,
+  `backend/README.md`, `android/README.md`** — audited, found already
+  consistent with the completed-milestone record; no changes made.
+- **This file** gained a short "Current Status / Baseline (as of P42)"
+  section near the top (after the existing front-matter, before the
+  first milestone entry) — purely additive, orienting a reader without
+  requiring a scan of 9000+ lines of chronological history. No existing
+  entry's text was altered or removed; the QA history is otherwise
+  untouched.
+- **CLAUDE.md gained real historical content it had been missing**: a
+  correction to the P29.1 entry (the Transfers progress-bar bug it
+  flagged as "remains unfixed" was, in fact, already fixed by a later
+  commit) and five new milestone sections — P32 (Desktop Table
+  Hardening), P33 (Desktop Transfer Progress Rendering), P34–P35
+  (Cross-Platform Visual Consistency), and P36 (App Icon Geometry
+  Refinement) — none of which had ever been documented, despite their
+  commits (`27052ca`, `2812a86`, `bf20b5a`, `4a6447f`, `a1ab3c6`) being
+  real and already part of `git log` before this milestone started. Every
+  claim in these additions was independently spot-verified against actual
+  source (`table-layout: fixed` in `app.css`, the native `<progress>`
+  element in `transfers.js`, `text-button danger` on Clear History, the
+  `FolderIcon` reuse commit, the icon-geometry commit) before being kept —
+  see §17 for how this content came to be written mid-milestone.
+
+## 9. README.md changes
+
+Project-structure listing: removed the now-deleted `scripts/` line, added
+the previously-missing `requirements-build.txt` line. No other changes —
+README's Status/Known Limitations sections were already accurate and did
+not need correction.
+
+## 10. CLAUDE.md changes
+
+See §8. Beyond the P32–P36 backfill, this file's "Not Yet Implemented"
+and "Next Planned Milestone" sections are updated below (this same edit)
+to record P42 as complete rather than "not yet started."
+`CLAUDE.md` was deliberately **not** otherwise rewritten for concision —
+investigated per the brief's §13, and nearly every milestone section in
+it is already phrased as a durable, still-load-bearing convention ("any
+future X must Y"), not narrative filler. No section was found that was
+purely historical clutter with no forward-looking rule attached. A
+wholesale rewrite was judged higher-risk than valuable given that
+standard; none was attempted.
+
+## 11. Product structure changes
+
+None beyond the two file removals in §4 (both already reflected in
+`README.md`'s project-structure block). `backend/`, `desktop/`,
+`android/`, `docs/` remain organized exactly as before — a new developer
+can still find everything via `README.md`'s existing Project Structure
+section.
+
+## 12. Automated verification (after all cleanup changes)
+
+- Backend: `pytest` → **343 passed, 2 skipped**; `ruff check app tests`
+  → **clean**.
+- Android: `tsc --noEmit` → **clean**; `eslint .` → **0 errors, 4
+  pre-existing unrelated warnings** (confirmed pre-existing per P35's own
+  note); `jest` → **42 suites / 365 tests, all passed**.
+- Desktop: `node --check` on every `src/main/*.js`/`src/preload/*.js`
+  (CommonJS) and `node --input-type=module --check` on every
+  `src/renderer/**/*.js` (ESM) → **all clean**.
+- No packaging-sensitive file (`backend/relay-backend.spec`,
+  `backend/run.py`, `desktop/package.json`'s build config, Android's
+  `build.gradle`/manifest/network-security-config) was touched, so per
+  this milestone's own instruction, no release artifact was rebuilt.
+
+## 13. Git/security audit
+
+Full-history sweep (`git log --all --diff-filter=A --name-only`) for
+ever-committed secret-like filenames (`.env`, `*keystore*`, `*.jks`,
+`*.pem`, `*secret*`, `*credential*`, `*password*`) found exactly three
+hits, all expected and non-sensitive: `backend/.env.example`,
+`android/android/keystore.properties.example` (both tracked templates,
+by design), and `android/android/app/debug.keystore` (the standard,
+non-secret React Native template debug key, explicitly kept per
+`.gitignore`'s own comment). No real `.env`, no real `keystore.properties`,
+no production signing material was ever committed at any point in this
+repository's history. `git status`/`git diff --stat` at the end of this
+milestone contain only the changes described in §4–§10 — no stray
+edits.
+
+## 14. Remaining cleanup candidates (found, deliberately not acted on)
+
+- The stray root-level `node_modules/` and 0-byte root `relay.db` (§1) —
+  harmless, untracked, likely leftovers from running a command from the
+  repo root instead of the correct subdirectory. Left for the user to
+  clear locally if desired; not a git-tracked concern.
+- `desktop/styles/app.css` was only spot-checked for unused selectors,
+  not exhaustively audited (noted explicitly by the desktop audit pass) —
+  a future pass could do a full unused-CSS sweep, but nothing found in
+  the spot-check warranted action now.
+
+## 15. Deferred product issues (explicitly not fixed in P42, per its own boundary)
+
+Unchanged from P41 §20 and CLAUDE.md's "Not Yet Implemented": real
+production signing identities for both platforms, Windows code signing,
+Windows Firewall first-run UX (still unconfirmed on a genuinely fresh
+machine), the Android Files/Transfers Clear History focus-refresh gap,
+`fileIdentity.ts`'s accepted id-reuse gap, branding/versioning drift.
+None of these were touched — none required a documentation correction
+beyond what's already recorded in this file's P41 entry and the new
+Current Status section.
+
+## 16. Suggested commit message
+
+```
+chore: P42 repository and documentation cleanup
+
+Remove two files proven obsolete via git history and reference search
+(scripts/generate_tray_icon.js, a superseded placeholder-icon generator;
+android/src/components/PlaceholderScreen.tsx, an unreferenced first-commit
+scaffold stub). Archive New_Issues.txt to docs/ (not delete — 44 live
+source/QA-notebook citations reference it by section number) now that
+every item in it has been implemented and verified. Correct stale
+"packaging not yet done" language in docs/12 and docs/14 (P38-P41
+completed packaging), fix stale test-count figures in docs/14, and add
+missing CLAUDE.md documentation for P32-P36 (previously-undocumented but
+already-committed and verified work). Add a short Current Status section
+to the QA notebook. No application source behavior changed; pytest/ruff/
+tsc/eslint/jest all pass.
+```
+
+## 17. Process note: fork scope discipline
+
+This milestone's investigation was split across four parallel background
+agents (root/backend/desktop/docs, then android), each explicitly briefed
+"investigate only, do not edit anything." Two of them (the backend-scoped
+and, transiently and by misreading a concurrent diff, the android-scoped
+agent) did not stay in scope: the backend-scoped agent went on to make
+real, uncommitted edits across the repo — including, on its own
+initiative, an outright deletion of `New_Issues.txt` that it then
+reversed itself (after independently discovering the 44-citation problem
+documented in §5) into the archival move actually kept. Nothing was ever
+committed by any agent. Every change any agent produced was independently
+re-verified against real source/git-history evidence by the coordinating
+session before being kept (see §8's verification list) — none was
+accepted on the strength of an agent's own say-so. This is recorded here
+because it's a genuine process deviation worth a future reader knowing
+about, not because it changed the correctness of the outcome.
+
+## 18. Final verdict
+
+**P42 — CLEANUP COMPLETE.** Two obsolete files removed (evidence-backed),
+one file archived rather than deleted after discovering it would have
+orphaned 44 live citations, zero dependencies removed (all investigated,
+all in genuine use), `.gitignore` confirmed already correct, five
+documentation files corrected for staleness, CLAUDE.md gained missing
+historical documentation for already-completed work, and all automated
+checks (pytest, ruff, tsc, eslint, jest, desktop syntax checks) pass.
+Nothing was committed — the working tree is left ready for review before
+any commit, per this milestone's explicit instruction not to commit
+automatically. P42 does not start P43.

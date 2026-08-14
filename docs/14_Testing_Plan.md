@@ -33,16 +33,19 @@ a feature-complete system, plus final packaging.
 # 3. Current Status Snapshot
 
 - **Relay V1 is feature-complete** and was declared a Release Candidate at T9.
-- **Backend:** 340 tests passed, 2 skipped (`pytest`); `ruff check` clean.
-- **Android:** 310 tests / 38 suites passed (`npx jest`); `tsc --noEmit`
-  clean; `eslint` clean.
+- **Backend:** 343 tests passed, 2 skipped (`pytest`); `ruff check` clean.
+- **Android:** 365 tests / 42 suites passed (`npx jest`); `tsc --noEmit`
+  clean; `eslint` clean (4 pre-existing, unrelated warnings — see P35).
 - **Desktop:** no automated test suite exists for the plain-JS renderer
   (unchanged since T1) — verified throughout by manual/live testing and
   `node --check`.
-- **Outstanding:** the packaging pipeline itself (T8 — no PyInstaller
-  bundling, no Electron installer, no signed release APK), the P17
-  candidate defect (`shared_folder_id` reuse), and a handful of accepted
-  V1-scope limitations — see §6.
+- **Packaging (T8) is now complete** — a PyInstaller backend bundle (P38),
+  an NSIS Electron installer (P39), and a release APK (P40) all exist and
+  were verified together end-to-end (P41). Neither artifact is
+  code-signed, and Android's release signing identity is still a local
+  verification keystore rather than a final production one — see
+  `docs/12_Packaging_Deployment.md`.
+- **Outstanding:** a handful of accepted V1-scope limitations — see §6.
 
 All live-device verification in this document and in the QA notebook was
 performed on a single physical device, a realme C65 5G (model RMX3997,
@@ -480,9 +483,11 @@ named milestone in `docs/15_QA_NOTEBOOK.md` for full detail on any entry.
   available as the same independent signal; not yet wired in. Reachable
   only via an unshare-to-empty-then-reshare sequence, not normal use —
   technical debt, not a blocker (P18).
-- **Packaging is unimplemented** (T8): no PyInstaller/equivalent backend
-  bundle, no Electron installer, no signed release APK. See
-  `docs/12_Packaging_Deployment.md`.
+- ~~Packaging is unimplemented (T8)~~ — **resolved P38–P41**: a PyInstaller
+  backend bundle, an NSIS Electron installer, and a release APK all exist
+  and were verified together end-to-end. See
+  `docs/12_Packaging_Deployment.md`. Still open: code signing for either
+  platform, and a final (non-verification) Android production keystore.
 - **"Share" (`ACTION_SEND`) is not implemented** on Android (P4, P6) —
   would require a new native dependency; deliberately out of scope so far.
 - **Byte-identical-size content edits inside a shared folder are

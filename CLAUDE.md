@@ -25,10 +25,11 @@ Electron desktop application`, `Complete Phase1` (Android client),
 `v1-feature-complete`). Packaging/distribution (`docs/12_Packaging_Deployment.md`)
 is also done and validated end-to-end (P38–P41): a real Windows installer,
 a real bundled backend, and a real Android release APK have been verified
-working together as one product. What remains is the items listed under
+working together as one product. Repository/documentation cleanup (P42)
+is also complete. What remains is the items listed under
 [Not Yet Implemented](#not-yet-implemented) (real production signing
-identities, Windows code signing, repository cleanup) — see `README.md` for
-the project-level overview and setup instructions for all three components.
+identities, Windows code signing) — see `README.md` for the project-level
+overview and setup instructions for all three components.
 
 ## Completed Milestones
 
@@ -560,14 +561,10 @@ must default to non-editing on every mount/remount; edit mode is entered
 only through the explicit Rename click, matching this same class-toggle
 mechanism.
 
-**`desktop/src/renderer/views/transfers.js`'s progress bar
-(`style="width:${progress}%"` on `.progress-fill`) has the identical bug
-and remains unfixed** — discovered as a byproduct of root-causing P29.1
-but out of scope for it (Transfers was excluded from that milestone's
-boundary). It currently always renders at full width regardless of actual
-transfer progress. Fix with the same class-toggle-or-stylesheet-variable
-approach when Transfers is next in scope; do not reach for
-`element.style.width =` there either.
+**`desktop/src/renderer/views/transfers.js`'s progress bar had the
+identical bug — discovered as a byproduct of root-causing P29.1 but out of
+scope for it at the time (Transfers was excluded from that milestone's
+boundary). It was fixed in P33, see below; do not "fix" it again.**
 
 ### Application-Wide Dialog Convention (P30)
 
@@ -633,6 +630,119 @@ converted into a user-facing result must not also be logged at
 developer-only visibility is still wanted. A genuinely unhandled/unexpected
 exception (one that isn't caught and turned into a result the UI already
 displays) is not covered by this rule and should still surface loudly.
+
+### Desktop Table Hardening (P32)
+
+**A `<table>` with no `table-layout`/column-width rule sizes every column
+to its widest cell's unbounded intrinsic content width — one pathological
+unbreakable string (e.g. a 180-character filename) drags the whole table,
+and therefore every row's Actions column, wider than the window,** because
+all `<td>`s in a column share one width across every `<tr>`. Both
+`desktop/src/renderer/views/files.js` and `transfers.js` render a plain
+`<table>` sharing this defect via `app.css`'s global rules. Fixed with
+`table-layout: fixed` plus an explicit `<colgroup>` per table (pixel-named
+utility classes, e.g. `.col-w-100`/`.col-w-410`, since the two tables'
+columns don't share a semantic grouping) and exactly one flexible
+free-text column per table (`.cell-truncate` — `overflow: hidden;
+text-overflow: ellipsis; white-space: nowrap;` — plus a `title` attribute
+for the full value on hover). **Any future Desktop table column holding
+unbounded free text (a filename, a device name) must get `.cell-truncate`
+and a fixed sibling-column width, not be left to the browser's default
+auto-layout.**
+
+**A single row's action failing (e.g. Refresh on a Shared File whose
+source was deleted externally) must not blank the entire view.**
+`desktop/src/renderer/views/files.js`'s Refresh handler previously caught
+the error but called `renderError(container, err)` — by design a
+whole-view failure card, wrong for a single row. Fixed via
+`showRowError(row, message, onRetry)`, which inserts one scoped
+`<tr class="row-error">` under just the failed row with a Retry button;
+the rest of the view is untouched. The backend's `ValidationError` message
+for a missing source path (`_validate_shareable_path`, `shared_file_
+service.py`/`shared_folder_service.py`) also embeds the raw absolute
+filesystem path — appropriate when the user just picked that path via the
+native share dialog, wrong verbatim on a Refresh of an already-shared
+item. The renderer maps any `400` from Refresh to a fixed, generic message
+("This item's source could not be found...") without ever touching
+`err.message`; any other status (network-down, `500`) keeps its own
+message. **Any future per-row action (not a whole-view load) must fail
+into a row-scoped error, never `renderError()`'s whole-view replacement —
+and a backend validation message meant for one caller (a fresh share)
+must not be echoed verbatim by a different caller (a refresh of existing
+state) without checking whether it's still appropriate in that context.**
+
+### Desktop Transfer Progress Rendering (P33)
+
+**A native `<progress value=".." max="100">` element — not a width-styled
+`<div>` — is the only way to render a variable-percentage bar in the
+Desktop renderer**, because the renderer's CSP (`style-src 'self'`, P29.1)
+blocks every inline `style=""` attribute regardless of how it's set, and a
+continuously-variable percentage doesn't scale to P29.1's class-toggle
+workaround (it would need ~100 discrete CSS classes). `progressBar(percent)`
+in `desktop/src/renderer/views/transfers.js` emits
+`<progress class="transfer-progress" value="${percent}" max="100">`,
+styled via Chromium-only `::-webkit-progress-bar`/`::-webkit-progress-value`
+pseudo-elements in `app.css` (safe since Electron's renderer is always
+Chromium) — a `value`/`max` DOM property is outside the CSP's authority
+entirely, unlike `style`. The shared `progressPercent(bytesTransferred,
+totalBytes, status)` helper (used by both the single-transfer and
+folder-batch row renderers) clamps to `[0, 100]` and treats a zero-byte
+transfer as 100% once `status === "completed"`, 0% otherwise. **Any future
+Desktop UI needing a variable/continuous visual fill must use a native
+`<progress>` element (or an equivalent CSP-exempt mechanism), never
+`style="width:...%"` or `element.style.width =`.**
+
+### Cross-Platform Visual Consistency (P34–P35)
+
+**Desktop's Shared Files folder rows and Android's Files/Transfers/
+FileActionMenu folder rows must render a folder via the app's own SVG
+icon system (`folderIcon` from `desktop/src/renderer/icons.js`,
+`FolderIcon` from `android/src/components/icons.tsx`), never a raw
+`📁`/`&#128193;` emoji literal concatenated into the row's text** — both
+platforms had this defect independently (Desktop's Shared Files folder
+row, P34; Android's Files/Transfers/FileActionMenu folder rows, P35),
+fixed the same way each time. `desktop/src/renderer/views/transfers.js`'s
+`renderBatchRow` folder-batch row still has the same unfixed emoji
+literal (P34 scoped its fix to Shared Files only, documented as a known
+carried-forward item, not a regression) — a reasonable candidate for a
+future pass, not something to "discover" as new.
+
+**Desktop's "Clear History" trigger button is red/destructive
+(`text-button danger`, `app.css`), matching Android's equivalent — this
+supersedes P30's general "only the confirm button carries red, not the
+trigger" rule for this one specific button**, per P34's explicit
+brief instruction to match Android's existing destructive-red treatment.
+P30's general rule is unchanged for every other Desktop confirmation
+trigger (Unpair, Delete, Unshare) — still neutral until its own dialog
+opens; do not generalize this one exception further without the same kind
+of explicit instruction.
+
+**Android's one destructive/error text color is `#dc2626`**, documented by
+name in `AppDialog.tsx`'s own top-of-file comment and now applied
+consistently (`FilesScreen.tsx`, `TransferListScreen.tsx`,
+`FileActionMenu.tsx`, and `SettingsScreen.tsx`'s `DeviceNameCard` warning
+text, corrected from a stray `#b91c1c` in P35). Any new Android
+error/destructive text should reuse this exact token rather than picking
+a visually-similar red. (`#2563eb` vs. `#2d6cdf`, two near-duplicate
+brand blues — the latter explicitly matching Desktop's `--color-primary`
+— was investigated in P35 and deliberately left unreconciled as a
+design-token-level change outside that milestone's scope, not an
+oversight.)
+
+### App Icon Geometry Refinement (P36)
+
+**The Relay two-opposing-arrows glyph (`android/android/app/src/main/
+res/drawable/ic_launcher_foreground.xml`, the true vector source; all
+per-density Android PNGs; `desktop/assets/icons/tray.png`/`icon.ico`) has
+a small, deliberate gap between the two arrows' closest chevron tips** —
+originally exactly tangent (zero gap), shifted 4 vector units further
+apart from the shared centerline each way in P36 for visual clarity, still
+well inside the icon's safe zone. Any future regeneration of these raster
+assets from the vector source must preserve this gap (do not reintroduce
+the tangent/touching geometry) and should reuse P36's verified technique —
+regenerate only inside a proven-opaque interior region, leaving
+background/corner-rounding/adaptive-icon-mask pixels byte-for-byte
+unchanged — rather than re-rendering each asset from scratch.
 
 ### Production Readiness Audit (P37)
 
@@ -887,10 +997,11 @@ audit-only milestone) broke this into a concrete four-milestone sequence;
 Bundle (P38)" / "Windows Desktop Installer (P39)" / "Android Release Build
 (P40)" / "Packaged End-to-End Release Validation (P41)" above and
 `docs/15_QA_NOTEBOOK.md`'s P38–P41 entries for full detail). P41's
-validation found no release blockers — remaining work is repository
-cleanup (P42, not yet started) and the still-open items P41 explicitly
-did not resolve (real production signing identities for both platforms,
-Windows code signing, the Android Clear History focus-refresh gap):
+validation found no release blockers, and **P42 (repository/documentation
+cleanup) is also now complete** (`docs/15_QA_NOTEBOOK.md`'s P42 entry) —
+remaining work is only the still-open items P41 explicitly did not
+resolve (real production signing identities for both platforms, Windows
+code signing, the Android Clear History focus-refresh gap):
 
 * ~~**P38 — Backend Production Bundle.**~~ **Done.** Pinned backend
   dependencies (three-way split: production/dev-test/build-only); added
@@ -945,6 +1056,21 @@ Windows code signing, the Android Clear History focus-refresh gap):
   first-run prompt still did not appear in this environment (as in P39) —
   functional LAN connectivity was nonetheless confirmed working. Full
   detail: `docs/15_QA_NOTEBOOK.md`'s P41 entry.
+* ~~**P42 — Repository, Product & Documentation Cleanup.**~~ **Done.**
+  Audit-and-cleanup pass over the tracked repository now that V1 is
+  feature-complete and packaged. Removed two files proven obsolete via
+  git history and reference search (`scripts/generate_tray_icon.js`, a
+  superseded placeholder-icon generator; `android/src/components/
+  PlaceholderScreen.tsx`, an unreferenced first-commit scaffold stub).
+  Archived (not deleted) `New_Issues.txt` to `docs/New_Issues.txt` — every
+  item in it is implemented, but 44 live source/QA-notebook citations
+  reference it by exact section number. No dependency was removed (all
+  investigated, all in genuine use); `.gitignore` confirmed already
+  correct; no application source behavior changed. Corrected stale
+  "packaging not yet done" language in `docs/12`/`docs/14` and stale test-
+  count figures, and backfilled this file's own missing documentation for
+  P32–P36 (real, already-committed work that had never been written up).
+  Full detail: `docs/15_QA_NOTEBOOK.md`'s P42 entry.
 
 ## Packaged End-to-End Release Validation (P41)
 
@@ -975,7 +1101,28 @@ durable facts for any future work in this area:
   do not assume the prompt is solved or broken without testing on a
   separate machine.
 
-Do not begin P42 automatically — it remains its own milestone, reviewed
+## Repository, Product & Documentation Cleanup (P42)
+
+Repository/documentation hygiene pass, not a feature milestone — no
+application source behavior was changed. Full detail (four-pass audit
+methodology, git-history evidence per deletion, dependency audit, doc
+corrections): `docs/15_QA_NOTEBOOK.md`'s P42 entry. Two durable notes for
+future work in this area:
+
+* **`New_Issues.txt` (now `docs/New_Issues.txt`) is archived, not a
+  current requirements source.** Every item in it was implemented across
+  P19–P36. It was moved rather than deleted specifically because dozens
+  of source comments and QA notebook entries cite it by exact section
+  number (`New_Issues.txt §N`) as the rationale for a design decision —
+  any future reference to it should use the new `docs/` path; do not
+  recreate a root-level copy.
+* **Before deleting any file that looks unused, search for it by name
+  across the whole repo, not just for code imports.** P42's one process
+  near-miss was an initial outright deletion of `New_Issues.txt` that had
+  to be reversed after discovering 44 non-import citations (comments,
+  docs) that a plain "who imports this" search would have missed.
+
+Do not begin P43 automatically — it remains its own milestone, reviewed
 before starting, per this file's Git Workflow rules.
 
 ## Documentation

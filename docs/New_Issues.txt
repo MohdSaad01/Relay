@@ -1,3 +1,15 @@
+> **Archived (P42).** This was the source requirements document for the
+> product UI/UX overhaul carried out across Milestones P31–P36 (see
+> `docs/15_QA_NOTEBOOK.md`). Every item below has been implemented and
+> verified; nothing here describes current or pending work. It is kept,
+> unedited, because dozens of live source comments and QA notebook entries
+> across `desktop/`, `android/`, and this notebook cite it by exact section
+> number (e.g. "New_Issues.txt §12") as the rationale for a design
+> decision — deleting it would make those citations unresolvable. Moved
+> from the repository root to `docs/` in P42 as part of repository
+> cleanup; the filename was kept unchanged so existing citations still
+> resolve with a repo-wide search.
+
 # Relay — UI/UX Issues and Required Changes
 
 ## Overall Objective

@@ -47,10 +47,18 @@ export interface PairingRequestSubmitRequest {
   platform: Platform;
 }
 
-/** Response for GET /pairing/result/{token}: one-time pairing credentials. */
+/**
+ * Response for GET /pairing/result/{token}: one-time pairing credentials.
+ * device_name is the backend's authoritative final name (P43.1) - it may
+ * differ from what this device submitted in PairingRequestSubmitRequest if
+ * the desktop user resolved a name collision with "Make it a new device"
+ * (e.g. "Thomas" -> "Thomas (1)"). Always use this value, never the
+ * originally-submitted name, when establishing the session.
+ */
 export interface PairingResultResponse {
   device_id: number;
   device_identifier: string;
+  device_name: string;
   device_secret: string;
   session_token: string;
   session_expires_at: string;

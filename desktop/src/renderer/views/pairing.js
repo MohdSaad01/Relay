@@ -100,7 +100,11 @@ async function pollPending(controller) {
   try {
     const { data: pending } = await api.get(`/pairing/pending/${controller.token}`);
     controller.setPollTimer(null);
-    renderReview(controller, pending);
+    if (pending.name_conflict) {
+      renderNameCollision(controller, pending);
+    } else {
+      renderReview(controller, pending);
+    }
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
       // The backend can't distinguish "nobody has submitted yet" from "this
@@ -154,19 +158,7 @@ function renderReview(controller, pending) {
     </div>
   `;
 
-  container.querySelector("#approve").addEventListener("click", async () => {
-    try {
-      await api.post("/pairing/approve", { pairing_token: token });
-      renderDecided(controller, {
-        icon: checkIcon,
-        variant: "success",
-        title: "Device paired successfully.",
-        message: `${pending.device_name} can now share and receive files with this computer.`,
-      });
-    } catch (err) {
-      renderError(container, err);
-    }
-  });
+  container.querySelector("#approve").addEventListener("click", () => approveWithDecision(controller));
 
   container.querySelector("#reject").addEventListener("click", async () => {
     try {
@@ -181,6 +173,84 @@ function renderReview(controller, pending) {
       renderError(container, err);
     }
   });
+}
+
+/**
+ * P43.1: a genuinely new device_identifier whose device_name collides with an
+ * already-paired device (a stale row from that same phone's previous install,
+ * still on Desktop's Devices list). Replaces the two-button Approve/Reject
+ * screen with a decision between Replace and Make it a new device -
+ * per the milestone brief, deliberately just these two, no third
+ * "Cancel pairing" option (the "Cancel" control on the QR-waiting screen
+ * remains the way to abandon a pairing attempt entirely).
+ */
+function renderNameCollision(controller, pending) {
+  const { container } = controller;
+  const conflict = pending.name_conflict;
+  container.innerHTML = `
+    ${pageHeader({ title: "Pairing Request" })}
+    <div class="card pairing-card">
+      ${iconBadge({ icon: deviceIcon, variant: "primary" })}
+      <h2>There is a device with the same name as this.</h2>
+      <p>What would you like to do?</p>
+      <p class="muted">Existing device: ${escapeHtml(conflict.existing_device_name)}</p>
+      <p class="muted">New device: ${escapeHtml(pending.device_name)}</p>
+      <div class="button-row">
+        <button class="primary" id="replace-device">Replace the current device</button>
+        <button id="make-new-device">Make it a new device</button>
+      </div>
+    </div>
+  `;
+
+  container
+    .querySelector("#replace-device")
+    .addEventListener("click", () => approveWithDecision(controller, "replace"));
+  container
+    .querySelector("#make-new-device")
+    .addEventListener("click", () => approveWithDecision(controller, "make_new"));
+}
+
+/**
+ * Shared Approve action for both the plain review screen and the P43.1
+ * collision screen. `nameConflictAction` is omitted for a plain approval.
+ *
+ * A 409 here means the backend re-checked live state at commit time
+ * (PairingService.approve_pairing) and found a collision the Desktop's last
+ * poll didn't know about yet - e.g. it appeared, or the decision no longer
+ * applies to the current state. Rather than a dead-end error card, this
+ * re-fetches the pending review and re-renders whichever screen the fresh
+ * state calls for, so the user can just try again.
+ */
+async function approveWithDecision(controller, nameConflictAction) {
+  const { container, token } = controller;
+  try {
+    const { data: device } = await api.post("/pairing/approve", {
+      pairing_token: token,
+      ...(nameConflictAction ? { name_conflict_action: nameConflictAction } : {}),
+    });
+    renderDecided(controller, {
+      icon: checkIcon,
+      variant: "success",
+      title: "Device paired successfully.",
+      message: `${device.device_name} can now share and receive files with this computer.`,
+    });
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 409) {
+      try {
+        const { data: freshPending } = await api.get(`/pairing/pending/${token}`);
+        if (freshPending.name_conflict) {
+          renderNameCollision(controller, freshPending);
+        } else {
+          renderReview(controller, freshPending);
+        }
+        return;
+      } catch (refreshErr) {
+        renderError(container, refreshErr);
+        return;
+      }
+    }
+    renderError(container, err);
+  }
 }
 
 function renderDecided(controller, { icon, variant, title, message }) {

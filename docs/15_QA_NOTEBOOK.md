@@ -9749,3 +9749,331 @@ identity" negative control were both confirmed on the physical device,
 against the real Desktop app and a real signed release APK. Nothing was
 committed, per this milestone's explicit instruction. P43 does not start
 P44.
+
+---
+
+# Milestone P43.1 — Device Name Collision & Re-Pairing Resolution
+
+**Scope:** the one lifecycle case P43 deliberately left open. A genuine
+Android uninstall/reinstall correctly (per P43) produces a new
+`device_identifier` — Android has no privacy-appropriate identifier that
+survives an uninstall. If the Desktop device isn't also removed first,
+re-pairing the fresh install collides on *name* (both submit the same
+default name, since Android's default is the phone model) while being a
+*different* identifier from Desktop's point of view — P43's own logic
+correctly treats this as "new device," producing exactly the
+`RMX3997`/`RMX3997` duplicate the milestone brief describes. This is a V1
+product/UX decision (a human-assisted collision dialog at pairing time),
+not a device-identity fix — no new identity mechanism was introduced.
+
+## 1. Why P43 doesn't (and shouldn't) already solve this
+
+- **A genuine reinstall correctly gets a new identity (P43 §4 Q3, §10).**
+  `android/src/pairing/deviceIdentifier.ts`'s persisted identifier lives in
+  app-private storage, wiped by uninstall along with everything else the
+  app owns. There is no other on-device signal Android could use instead
+  that would actually survive an uninstall and still be safe to trust
+  (any hardware identifier stable enough to survive would also be a
+  cross-app tracking vector — out of scope to introduce for V1).
+- **The old Desktop row has no signal telling it "this install is gone
+  for good."** `docs/15_QA_NOTEBOOK.md`'s P43 §4 Q7 already investigated
+  and ruled out last-seen/name heuristics for automatic staleness
+  detection — a stale row and a second legitimate phone with the same
+  model name are indistinguishable from the backend's data alone. It
+  remains "Paired" until the desktop user explicitly clicks Remove.
+- **Therefore identity alone cannot resolve this case** — by the time a
+  fresh install re-pairs, the backend genuinely cannot tell "this is my
+  old phone, reinstalled" from "this is a different phone that happens to
+  have the same model name" using `device_identifier` alone. The two
+  really are indistinguishable at the identity layer. P43.1's answer is
+  to surface the ambiguity to the one party who *can* resolve it — the
+  desktop user, who knows whether they just reinstalled Android or just
+  plugged in a second phone — rather than have the backend guess.
+
+## 2. V1 decision — identity precedence
+
+```
+same identifier                    -> P43 reconciliation (unchanged)
+different identifier, same name    -> P43.1 collision dialog (new)
+different identifier, different name -> normal new-device pairing (unchanged)
+```
+
+`device_identifier` always takes precedence over a name match — a
+matching identifier is a P43 re-pair even if the name also happens to
+differ (case D in the brief: rename survives, no dialog). This is
+deliberately narrow: device names are **not** a cryptographically
+reliable physical-device identity (two genuinely different phones can
+share a model name), so the collision dialog is a user-assisted
+resolution mechanism, not a new identity system.
+
+## 3. Architecture
+
+**Investigation first** (per this file's Rule 4): read
+`pairing_service.py`, `pairing_manager.py`, `device_service.py`,
+`pairing.py` (API), the Device model/repository/schema, the Desktop
+pairing/devices views, and every existing P43 test before writing any
+code — see the conversation's own research pass. The smallest correct
+insertion point turned out to be entirely inside the existing
+`PairingService`/`DeviceService`/`PairingManager` trio; no new table, no
+new endpoint collection, no new identity mechanism, no WebSockets.
+
+**Backend — collision detection (`DeviceService`,
+`app/services/device_service.py`):**
+`find_name_collision_or_none(device_name)` normalizes (trim +
+casefold, §7 of the brief — display casing is always preserved on
+storage, only the comparison is normalized) and checks the *live*
+device list — no cached snapshot anywhere. `generate_unique_name(base)`
+computes the smallest available `"{base} (N)"` suffix, also against the
+live list (not a device count — verified against the brief's explicit
+gap-filling example, §6/§19). `replace_device(old_device, ...)` deletes
+`old_device` (cascading its sessions via the same DB-level
+`ON DELETE CASCADE` `remove_device`/unpair already relies on) and
+registers the new device in its place, uncommitted, so the caller
+controls the transaction boundary.
+
+**Backend — pairing flow (`PairingService`,
+`app/services/pairing_service.py`):**
+`get_pending_request` (backing `GET /pairing/pending/{token}`, the
+existing polling endpoint the Desktop already calls — no new mechanism,
+satisfying §9's "reuse the existing pairing architecture") now returns a
+`PendingPairingReview` (requesting device info + an optional
+`NameConflictInfo`), computed fresh on every poll: identifier match is
+checked first, and only when it *doesn't* match is a name collision even
+considered. `approve_pairing(token, name_conflict_action=None)` re-runs
+the same live checks at commit time (not reusing whatever the last poll
+saw) in this order: identifier match → P43 reconciliation, unaffected by
+`name_conflict_action`; else a live name collision → dispatch on
+`name_conflict_action` (`"replace"` → `DeviceService.replace_device`,
+`"make_new"` → `DeviceService.generate_unique_name` +
+`register_device`, `None` → abort, see below); else → plain
+`register_device`, unchanged.
+
+**Race/stale-state handling (§8/§10 of the brief):** if a collision is
+found at commit time with no `name_conflict_action`, the device row is
+**not** created — `PairingManager.restore_awaiting_approval` (new)
+re-inserts the already-`claim_for_approval`'d attempt back as
+`AWAITING_APPROVAL` instead of losing it, and `NameConflictError` (new,
+`app/services/exceptions.py`, subclasses `ConflictError`) is raised. The
+Desktop can retry `approve_pairing` with a decision, or re-poll
+`get_pending_request` — either way the same token still resolves to the
+same pending review. This is also what makes "Approve re-checks the
+collision live at commit time" work for the *plain* review screen too:
+if a collision appears in the window between polling and clicking
+Approve, the same abort-and-restore path fires rather than silently
+creating a duplicate.
+
+**API contract (smallest compatible extension, per §15 of the brief —
+no new endpoints):** `PairingPendingRequestResponse` gained
+`name_conflict: NameConflictResponse | null` (`existing_device_id`,
+`existing_device_name` — no secrets, per §17). `PairingApproveRequest`
+gained `name_conflict_action: Literal["replace", "make_new"] | null`.
+`NameConflictError` maps to `409` with `data: {existing_device_id,
+existing_device_name}` (`app/api/exception_handlers.py`), so a caller
+that races past the poll still has enough information without a second
+round trip.
+
+**`PairingResultResponse` and `ApprovedResult` gained `device_name`** —
+previously absent (Android just echoed back what *it* submitted). Needed
+because `"make_new"` can assign a name Android never chose
+(`"RMX3997 (1)"`) — the backend is the sole authority for the final name
+(§20), so Android must learn it from the result, not calculate or assume
+it (§24). `android/src/screens/pairing/PairingWaitingScreen.tsx` now
+builds `Session.device_name` from `result.device_name`, not the
+`deviceName` route param it submitted.
+
+**Desktop UI (`desktop/src/renderer/views/pairing.js`):**
+`pollPending` branches on `pending.name_conflict` — present → the new
+`renderNameCollision` (exact text "There is a device with the same name
+as this. What would you like to do?", both device names shown, exactly
+two buttons — Replace / Make it a new device, no third "Cancel pairing"
+option, per §16); absent → the existing `renderReview` (Approve/Reject),
+unchanged. Both funnel into one shared `approveWithDecision(controller,
+nameConflictAction)` helper — a `409` response (the live race case
+above) re-fetches `get_pending_request` and re-renders whichever screen
+the fresh state calls for, instead of a dead-end error card. No new CSS
+was needed (reused `.pairing-card`/`.muted`/`iconBadge`, P19/P20
+conventions).
+
+## 4. Collision algorithm
+
+```
+normalize(name) = name.strip().casefold()
+
+find_name_collision_or_none(name):
+    for device in live device list:
+        if normalize(device.device_name) == normalize(name):
+            return device
+    return None
+
+generate_unique_name(base_name):
+    existing = {normalize(d.device_name) for d in live device list}
+    if normalize(base_name) not in existing:
+        return base_name
+    suffix = 1
+    while normalize(f"{base_name} ({suffix})") in existing:
+        suffix += 1
+    return f"{base_name} ({suffix})"
+```
+
+Verified against every example in the brief, including the
+non-sequential-count case: `{Thomas, Thomas (1), Thomas (3)}` + a new
+`Thomas` → `Thomas (2)`, not `Thomas (4)` — the algorithm searches for
+the smallest gap, never counts existing rows
+(`test_generate_unique_name_fills_the_smallest_gap`).
+
+## 5. Replace / Make-new semantics
+
+- **Replace:** one DB transaction — delete the colliding device (cascade
+  deletes its sessions, so its old credentials stop authenticating
+  immediately) then register the new device — committed once, so a
+  mid-transaction failure leaves the database in its *original*,
+  consistent state (SQLAlchemy's implicit rollback-on-uncaught-exception,
+  same pattern every other multi-step service method in this codebase
+  already relies on) rather than stranding zero or two devices. Exactly
+  one row remains afterward, carrying the newly-paired device's identity.
+- **Make-new:** the colliding device is left completely untouched (no
+  write to it at all); the new device is registered under the
+  backend-generated unique name. Both rows coexist afterward.
+- Neither path trusts a client-supplied name/id — `replace_device` is
+  called with the live `colliding_device` object just re-queried inside
+  `approve_pairing`, and `generate_unique_name` is recomputed at that
+  same moment, never a value carried over from an earlier
+  `get_pending_request` poll.
+
+## 6. Database uniqueness — explicitly not added
+
+Investigated per §21 of the brief and **deliberately not implemented**:
+no `UNIQUE` constraint was added to `devices.device_name`. P43 never
+defined names as globally unique (a Desktop `PATCH /devices/{id}` rename
+already permits duplicates today, unrelated to pairing), and P43.1's
+service-level collision check is sufficient for its actual job — catching
+a collision *at pairing time*, when the desktop user is available to
+decide. A DB-level constraint would additionally have to reject/handle
+collisions created by rename, which is explicitly out of this milestone's
+scope.
+
+## 7. Automated tests
+
+**Backend** (`tests/services/test_device_service.py`,
+`tests/services/test_pairing_manager.py`,
+`tests/services/test_pairing_service.py`, `tests/api/test_pairing.py`):
+name-collision detection (no match / case-insensitive+trimmed match /
+suffixed name is distinct), unique-name generation (base available,
+base taken, smallest-gap-fill, consecutive suffixes, case-insensitive),
+`replace_device` (deletes old + registers new, cascades old sessions),
+`PairingManager.restore_awaiting_approval`, and the full identity/name
+precedence matrix end to end through `PairingService.approve_pairing`
+(identifier-match-wins-over-name-difference / no-conflict-when-identifier-matches
+/ conflict-reported-for-new-identifier-same-name /
+raises-without-a-decision-and-does-not-strand-the-attempt / replace /
+make-new / smallest-available-suffix-across-repeated-pairings /
+`collect_result`'s `device_name` reflects the final assigned name), plus
+the same contract re-verified at the HTTP layer
+(`test_pending_reports_name_conflict_for_new_identifier_same_name`,
+`test_approve_without_decision_returns_409_and_creates_no_device`,
+`test_approve_replace_leaves_exactly_one_device_with_the_new_identity`,
+`test_approve_make_new_produces_two_devices_with_distinct_names`,
+`test_pairing_result_returns_the_final_assigned_device_name`). **376
+backend tests pass** (up from 350; 2 skipped, unrelated), **`ruff check`
+clean** on every touched file. Every pre-existing P43 test still passes
+unmodified except the one call site whose return *shape* changed
+(`get_pending_request` now returns a `requesting_device`/`name_conflict`
+pair instead of the bare device-info dataclass — updated in place, not
+weakened).
+
+**Android:** `PairingResultResponse`/`Session.device_name` plumbing
+changed, but no Android test exercises `PairingWaitingScreen.tsx`'s
+network callback directly, so no test file needed updating. `tsc
+--noEmit` and the full Jest suite were re-run: **367 tests pass, 0
+regressions.**
+
+## 8. Physical verification — RMX3997
+
+Performed live against the **dev-mode** Desktop app (`npm start` in
+`desktop/`, i.e. `backend/.venv/Scripts/python.exe -m uvicorn
+app.main:app` — the actual edited source, not a stale bundle) driven via
+a scratchpad Playwright `_electron` control script (screenshot/click
+only — never fabricated), the real Android device over `adb`, and the
+real hotspot LAN both were already joined to (`10.93.152.0/24`), exactly
+the P43 setup. Four physical QR scans were performed by the user at the
+agent's request (camera-to-screen alignment is not something the agent
+can perform); everything else — uninstall/rebuild/reinstall, DB
+inspection, API calls, screenshots, session invalidation — was done
+directly. A leftover **packaged** `Relay.exe`/`relay-backend.exe`
+instance was found already running and holding port 8000 at the start of
+this session (pre-P43.1 binary) — stopped before starting the dev
+instance, consistent with P39/P43's own documented "stale
+backend-on-port-8000" hazard.
+
+**Starting state:** one pre-existing row, `RMX3997`,
+`device_identifier=5d9cbd1a-…`, paired 8/13 (left over from earlier
+sessions, untouched by this one until the scenarios below).
+
+| # | Scenario | Action | Result |
+|---|---|---|---|
+| A | Fresh reinstall + same name + **Replace** | `adb uninstall`, rebuilt a debug APK with the P43.1 changes, fresh install → real Discovery screen ("Thomas" found via UDP broadcast) → Desktop "Start Pairing" → real camera scan → **collision dialog appeared** ("There is a device with the same name as this... Existing device: RMX3997 / New device: RMX3997") → user clicked **Replace the current device** | `POST /pairing/approve {name_conflict_action: "replace"}` → exactly **one** `RMX3997` row afterward, new `device_identifier` (`81d7f2d2-…`), fresh `paired_at`; old row's identity gone (`get_by_identifier_or_none("5d9cbd1a-…")` → None). Android's own Settings screen showed "RMX3997" (correct) and Files/Transfers loaded real authenticated data with the new session. |
+| B | Second fresh reinstall + same name + **Make it a new device** | `adb uninstall` + reinstall (same debug APK) → fresh QR → real camera scan → collision dialog again → user clicked **Make it a new device** | `POST /pairing/approve {name_conflict_action: "make_new"}` → **two** rows: the untouched `RMX3997` (id 1, identifier `81d7f2d2-…`, `paired_at` unchanged) plus a new `RMX3997 (1)` (id 2, identifier `08038967-…`). Android's Settings screen showed **"RMX3997 (1)"** — the backend-generated suffix, which Android itself never computed or even knew about ahead of time, confirming `PairingResultResponse.device_name` propagation end to end. |
+| D | Same-identifier re-pair, **no dialog expected** | Without any reinstall: deleted the current session row directly in the live DB (simulating ordinary session expiry) → next authenticated call got a real 401 → app correctly fell back to the Discovery/Pairing screen (session cleared, `device_identifier` file untouched) → fresh QR → real camera scan | **No collision dialog** — Desktop went straight to "Device paired successfully. RMX3997 (1) can now share and receive files with this computer." (the *preserved* name, via P43 reconciliation, not a fresh generation). Device count still exactly 2; `id=2`'s `paired_at` unchanged, only `updated_at` bumped — confirming identifier precedence over name held even though the reconciled device's own name (`RMX3997 (1)`) is itself a suffixed one. |
+
+**Scenarios C (existing suffix gaps) and E (different name → normal
+pairing, no dialog)** were not separately re-run physically this
+session — C is covered by the automated
+`test_approve_pairing_make_new_uses_smallest_available_suffix`/
+`test_generate_unique_name_fills_the_smallest_gap` against the real
+service code, and E is exactly P43's own already-physically-verified
+"two distinct identifiers, two distinct names" case (P43 §8 steps 3/11)
+plus this milestone's own automated
+`test_approve_pairing_creates_new_device_for_unknown_identifier`-style
+coverage — re-running them physically would have re-tested already-proven
+ground rather than new behavior, and was judged not worth the additional
+uninstall/reinstall cycles.
+
+## 9. Known V1 limitations (explicit, not silent)
+
+- **Device names are not a cryptographically reliable physical-device
+  identity.** Two genuinely different Android devices can intentionally
+  share a name — the collision dialog is a user-assisted V1 resolution
+  mechanism, not a stronger identity system. A future version could
+  introduce something better; explicitly out of scope here (§34 of the
+  brief).
+- **No database-level uniqueness constraint on `device_name`** (§6
+  above) — intentional, not an oversight.
+- **The packaged Desktop backend/installer still contain pre-P43.1 code**
+  — this session tested entirely against `npm start` (dev-mode, live
+  source). `pyinstaller relay-backend.spec` (clean venv) then `npm run
+  dist` in `desktop/` must run before an end user receives this fix, the
+  same rule P38/P39/P43 already established for every backend change.
+- **The collision dialog offers no "Cancel pairing" option**, per §16 of
+  the brief's explicit instruction — the only way to abandon a pairing
+  attempt once a collision is shown is to close/navigate away from the
+  Pairing view (unchanged existing behavior; the QR-waiting screen's
+  "Cancel" button is the dismissal mechanism for before a request
+  arrives).
+
+## 10. Suggested commit message
+
+```
+feat(pairing): resolve device-name collisions on re-pair (P43.1)
+
+A genuine Android reinstall correctly gets a new device_identifier
+(P43), but if Desktop's old row for that phone isn't removed first, a
+re-pair collides on name alone (both submit the same default name).
+Desktop now detects this live at pairing-approval time and asks the
+user to Replace the existing device or pair as a new one
+(name auto-suffixed, e.g. "Thomas (1)") — identifier match still always
+takes precedence over a name collision, so an ordinary P43 re-pair
+(session expiry, Remove-and-reconnect) is unaffected. Verified live on
+RMX3997: collision dialog, Replace, Make-new, and the no-dialog
+same-identifier path all confirmed against the real backend, Desktop,
+and Android app.
+```
+
+**P43.1 — FIX COMPLETE AND LIVE-VERIFIED, PACKAGED REBUILD STILL
+PENDING** (inherits the same pending-rebuild caveat P43 already left
+open — this session did not repackage the Desktop installer). Root cause
+addressed as a deliberate V1 UX decision at the pairing-approval layer,
+not a new identity mechanism; 376 backend + 367 Android automated tests
+pass; all four defining scenarios (Replace, Make-new, same-identifier
+no-dialog, and the identifier-precedence rule) were confirmed live on the
+physical device via real QR camera scans. Nothing was committed, per this
+milestone's explicit instruction. P43.1 does not start P44.

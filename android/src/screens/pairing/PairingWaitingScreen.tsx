@@ -45,7 +45,11 @@ export function PairingWaitingScreen() {
             session_token: result.session_token,
             session_expires_at: result.session_expires_at,
             desktop_base_url: desktopBaseUrl,
-            device_name: deviceName,
+            // The backend is authoritative for the final name (P43.1) - it
+            // may differ from what this device submitted (deviceName, the
+            // route param below) if the desktop user resolved a name
+            // collision with "Make it a new device".
+            device_name: result.device_name,
           },
         });
       } catch (err) {

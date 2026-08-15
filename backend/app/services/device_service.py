@@ -100,3 +100,72 @@ class DeviceService:
         """
         device.device_secret_hash = device_secret_hash
         return self.device_repository.update(device)
+
+    @staticmethod
+    def _normalize_name(name: str) -> str:
+        """Normalize a device name for P43.1 collision comparison: trim
+        whitespace, compare case-insensitively. The value actually stored and
+        displayed always preserves the user's original casing — only this
+        comparison is normalized."""
+        return name.strip().casefold()
+
+    def find_name_collision_or_none(self, device_name: str) -> Device | None:
+        """Return the currently paired device whose name collides with
+        `device_name` under P43.1's normalization rule, or None.
+
+        Checked against the live device list at call time — callers must
+        re-invoke this immediately before committing a decision rather than
+        reusing a result computed earlier (PairingService.approve_pairing
+        does this; see docs/15_QA_NOTEBOOK.md's P43.1 entry for the race this
+        guards against).
+        """
+        normalized = self._normalize_name(device_name)
+        for device in self.device_repository.list_all():
+            if self._normalize_name(device.device_name) == normalized:
+                return device
+        return None
+
+    def generate_unique_name(self, base_name: str) -> str:
+        """Compute the smallest-available `"{base_name} (N)"` suffix not
+        currently used by any paired device (P43.1's "Make it a new device"
+        decision), checked against the live device list. The backend is the
+        sole authority for this name — a Desktop-side preview must never be
+        trusted as the final value (a stale/racing UI could otherwise create
+        a duplicate)."""
+        existing = {self._normalize_name(d.device_name) for d in self.device_repository.list_all()}
+        if self._normalize_name(base_name) not in existing:
+            return base_name
+        suffix = 1
+        while self._normalize_name(f"{base_name} ({suffix})") in existing:
+            suffix += 1
+        return f"{base_name} ({suffix})"
+
+    def replace_device(
+        self,
+        old_device: Device,
+        *,
+        device_identifier: str,
+        device_name: str,
+        platform: Platform,
+        device_secret_hash: str,
+    ) -> Device:
+        """Replace an existing Device row with a newly pairing one of a
+        different identifier but a colliding name (P43.1's "Replace the
+        current device" decision).
+
+        Deletes `old_device` — cascading its sessions via the same DB-level
+        ON DELETE CASCADE remove_device/unpair already relies on, so its old
+        credentials stop authenticating immediately — then registers the new
+        device in its place. Does not commit, matching register_device's
+        convention: the caller (PairingService.approve_pairing) controls the
+        transaction boundary so the delete and the create land in one atomic
+        commit, never leaving zero or two devices for this name if something
+        fails in between.
+        """
+        self.device_repository.delete(old_device)
+        return self.register_device(
+            device_identifier=device_identifier,
+            device_name=device_name,
+            platform=platform,
+            device_secret_hash=device_secret_hash,
+        )

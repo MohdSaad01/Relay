@@ -44,6 +44,7 @@ class ApprovedResult:
 
     device_id: int
     device_identifier: str
+    device_name: str
     device_secret: str
     session_token: str
     session_expires_at: datetime
@@ -139,6 +140,21 @@ class PairingManager:
     def store_approved(self, attempt: PairingAttempt) -> None:
         """Put a finalized, APPROVED attempt back into the store for Android to collect."""
         with self._lock:
+            self._attempts[attempt.token] = attempt
+
+    def restore_awaiting_approval(self, attempt: PairingAttempt) -> None:
+        """Put a claimed attempt back as AWAITING_APPROVAL (P43.1).
+
+        approve_pairing calls claim_for_approval() before it knows whether a
+        name collision (P43.1) needs a Desktop-user decision it doesn't have
+        yet. If it aborts after claiming — no decision supplied, or one
+        supplied for a collision that no longer exists by commit time — the
+        attempt must not simply vanish: the same token still needs to resolve
+        to the same pending review the next time the Desktop calls
+        get_pending_request or retries approve_pairing with a decision.
+        """
+        with self._lock:
+            attempt.status = PairingStatus.AWAITING_APPROVAL
             self._attempts[attempt.token] = attempt
 
     def reject(self, token: str) -> PairingAttempt | None:

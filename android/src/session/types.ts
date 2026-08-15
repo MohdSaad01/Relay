@@ -13,10 +13,11 @@ export interface Session {
   desktop_base_url: string;
   /**
    * The human-readable display name this device is currently paired under.
-   * `PairingResultResponse` doesn't return it (only the credentials), so it's
-   * carried forward from the name Android itself submitted in
-   * `POST /pairing/request` (P23) — see PairingWaitingScreen.tsx. Kept in
-   * sync with the backend's `Device.device_name` by
+   * Taken from `PairingResultResponse.device_name` (P43.1) — the backend's
+   * authoritative final name, which may differ from what Android originally
+   * submitted in `POST /pairing/request` if the desktop user resolved a name
+   * collision with "Make it a new device" — see PairingWaitingScreen.tsx.
+   * Kept in sync with the backend's `Device.device_name` afterward by
    * SessionManager.updateDeviceName after a successful
    * `PATCH /devices/{id}` (api/endpoints/devices.ts's renameDevice), not by
    * re-fetching it.

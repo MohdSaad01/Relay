@@ -22,5 +22,23 @@ class ConflictError(ServiceError):
     """Raised when an operation would violate a uniqueness or state constraint."""
 
 
+class NameConflictError(ConflictError):
+    """Raised by PairingService.approve_pairing (P43.1) when the incoming device's
+    name collides with an already-paired device (a different device_identifier —
+    see docs/15_QA_NOTEBOOK.md's P43.1 entry for why identifier always takes
+    precedence) and no name_conflict_action ("replace"/"make_new") was supplied
+    to resolve it. Carries the colliding device's id/name so the API layer can
+    hand the Desktop UI enough information to render the collision dialog
+    without a second round trip."""
+
+    def __init__(self, existing_device_id: int, existing_device_name: str) -> None:
+        self.existing_device_id = existing_device_id
+        self.existing_device_name = existing_device_name
+        super().__init__(
+            f"A device named '{existing_device_name}' is already paired. "
+            "Choose whether to replace it or pair as a new device."
+        )
+
+
 class AuthenticationError(ServiceError):
     """Raised when a request's bearer session token is missing, unknown, or expired."""

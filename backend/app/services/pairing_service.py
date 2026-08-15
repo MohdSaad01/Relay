@@ -12,7 +12,9 @@ entirely in PairingManager and is never written to the database
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import timedelta
+from typing import Literal
 
 from sqlalchemy.orm import Session
 
@@ -25,7 +27,7 @@ from app.repositories.device_session_repository import DeviceSessionRepository
 from app.schemas.pairing import PairingQrPayload
 from app.services.app_settings_service import AppSettingsService
 from app.services.device_service import DeviceService
-from app.services.exceptions import NotFoundError, ValidationError
+from app.services.exceptions import NameConflictError, NotFoundError, ValidationError
 from app.services.pairing_manager import (
     ApprovedResult,
     PairingAttempt,
@@ -37,6 +39,33 @@ from app.utils.network import get_local_ip_address
 from app.utils.time import utc_now
 
 logger = logging.getLogger(__name__)
+
+NameConflictAction = Literal["replace", "make_new"]
+
+
+@dataclass
+class NameConflictInfo:
+    """A live P43.1 name collision found against the current device list:
+    `requesting_device.device_name` already belongs to a different,
+    already-paired device (a different device_identifier — see
+    PendingPairingReview)."""
+
+    existing_device_id: int
+    existing_device_name: str
+
+
+@dataclass
+class PendingPairingReview:
+    """Everything the Desktop needs to review a pairing request awaiting
+    approval: the requesting device's own info, plus a live P43.1 name
+    collision check. `name_conflict` is only ever set when
+    `device_identifier` does *not* already match a paired device — a
+    matching identifier is always a P43 reconciliation, never a P43.1
+    collision, even if the name also happens to match (identifier takes
+    precedence, docs/15_QA_NOTEBOOK.md's P43.1 entry)."""
+
+    requesting_device: RequestingDeviceInfo
+    name_conflict: NameConflictInfo | None
 
 
 class PairingService:
@@ -107,26 +136,63 @@ class PairingService:
         )
         return attempt
 
-    def get_pending_request(self, token: str) -> RequestingDeviceInfo:
-        """Return the requesting device's info for the desktop user to review."""
+    def get_pending_request(self, token: str) -> PendingPairingReview:
+        """Return the requesting device's info for the desktop user to review,
+        plus a live P43.1 name-collision check against the CURRENT device list.
+
+        device_identifier is checked first: a match is always a P43
+        reconciliation, never a P43.1 name collision, even if the name also
+        happens to match (identifier takes precedence).
+        """
         attempt = self.pairing_manager.get(token)
         if attempt is None or attempt.requesting_device is None:
             raise NotFoundError("No pending pairing request found for this token.")
-        return attempt.requesting_device
 
-    def approve_pairing(self, token: str) -> Device:
-        """Approve a pending pairing request: register (or re-pair) the device and mint its session.
+        requesting_device = attempt.requesting_device
+        name_conflict = None
+        if self.device_service.get_by_identifier_or_none(requesting_device.device_identifier) is None:
+            colliding_device = self.device_service.find_name_collision_or_none(
+                requesting_device.device_name
+            )
+            if colliding_device is not None:
+                name_conflict = NameConflictInfo(
+                    existing_device_id=colliding_device.id,
+                    existing_device_name=colliding_device.device_name,
+                )
+        return PendingPairingReview(requesting_device=requesting_device, name_conflict=name_conflict)
 
-        If device_identifier already belongs to a known Device (P43 — a
-        re-pair from the same Android install, not a fresh one: its
-        session expired, or the desktop user removed it and the same phone
-        reconnected), the existing row is reconciled in place
-        (DeviceService.reconcile_device — rotates device_secret_hash,
-        preserves device_name/id/paired_at) rather than creating a
-        duplicate. Every session previously issued to that device is
-        invalidated first, so old credentials stop authenticating the
-        moment the new pairing is approved. Otherwise this registers a
-        genuinely new Device, unchanged from before P43.
+    def approve_pairing(
+        self, token: str, name_conflict_action: NameConflictAction | None = None
+    ) -> Device:
+        """Approve a pending pairing request: register (or re-pair, or
+        collision-resolve) the device and mint its session.
+
+        Three cases, checked in this order (docs/15_QA_NOTEBOOK.md's P43.1
+        entry has the full reasoning — identifier always takes precedence
+        over name):
+
+        1. device_identifier already belongs to a known Device (P43 — a
+           re-pair from the same Android install: its session expired, or
+           the desktop user removed it and the same phone reconnected). The
+           existing row is reconciled in place (DeviceService.reconcile_device
+           — rotates device_secret_hash, preserves device_name/id/paired_at)
+           rather than creating a duplicate. name_conflict_action is ignored
+           entirely in this case.
+        2. A genuinely new identifier whose device_name collides (P43.1's
+           normalization rule) with an already-paired device — e.g. the same
+           phone, reinstalled, paired under its old name while the desktop
+           still has the pre-reinstall row. name_conflict_action must be
+           "replace" (DeviceService.replace_device) or "make_new"
+           (DeviceService.generate_unique_name + register_device). If it is
+           None, the device row is NOT created — the attempt is restored to
+           AWAITING_APPROVAL and NameConflictError is raised so the Desktop
+           can ask the user and retry with a decision.
+        3. A genuinely new identifier with no name collision — registers a
+           new Device, unchanged from before P43/P43.1.
+
+        The collision check in case 2 is re-run here (not reused from an
+        earlier get_pending_request call) so it reflects live state at the
+        moment of commit, not whatever the Desktop UI last polled.
         """
         attempt = self.pairing_manager.claim_for_approval(token)
         if attempt is None or attempt.requesting_device is None:
@@ -144,12 +210,35 @@ class PairingService:
                 existing_device, device_secret_hash=hash_token(device_secret)
             )
         else:
-            device = self.device_service.register_device(
-                device_identifier=requesting_device.device_identifier,
-                device_name=requesting_device.device_name,
-                platform=requesting_device.platform,
-                device_secret_hash=hash_token(device_secret),
+            colliding_device = self.device_service.find_name_collision_or_none(
+                requesting_device.device_name
             )
+            if colliding_device is None:
+                device = self.device_service.register_device(
+                    device_identifier=requesting_device.device_identifier,
+                    device_name=requesting_device.device_name,
+                    platform=requesting_device.platform,
+                    device_secret_hash=hash_token(device_secret),
+                )
+            elif name_conflict_action == "replace":
+                device = self.device_service.replace_device(
+                    colliding_device,
+                    device_identifier=requesting_device.device_identifier,
+                    device_name=requesting_device.device_name,
+                    platform=requesting_device.platform,
+                    device_secret_hash=hash_token(device_secret),
+                )
+            elif name_conflict_action == "make_new":
+                unique_name = self.device_service.generate_unique_name(requesting_device.device_name)
+                device = self.device_service.register_device(
+                    device_identifier=requesting_device.device_identifier,
+                    device_name=unique_name,
+                    platform=requesting_device.platform,
+                    device_secret_hash=hash_token(device_secret),
+                )
+            else:
+                self.pairing_manager.restore_awaiting_approval(attempt)
+                raise NameConflictError(colliding_device.id, colliding_device.device_name)
 
         session_token = generate_token()
         app_settings = self.app_settings_service.get_settings()
@@ -168,6 +257,7 @@ class PairingService:
         attempt.result = ApprovedResult(
             device_id=device.id,
             device_identifier=device.device_identifier,
+            device_name=device.device_name,
             device_secret=device_secret,
             session_token=session_token,
             session_expires_at=expires_at,

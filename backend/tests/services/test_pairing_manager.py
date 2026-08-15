@@ -172,6 +172,26 @@ def test_double_claim_for_approval_only_succeeds_once() -> None:
     assert second_claim is None
 
 
+def test_restore_awaiting_approval_reinstates_a_claimed_attempt() -> None:
+    """P43.1: approve_pairing may need to abort after claim_for_approval (no
+    name_conflict_action decision yet). The attempt must not be lost -
+    restore_awaiting_approval puts it back so a retry with a decision, or a
+    fresh get_pending_request poll, still finds it."""
+    manager = PairingManager()
+    attempt = _make_attempt()
+    manager.start(attempt)
+    manager.submit_request(attempt.token, _make_requesting_device())
+    claimed = manager.claim_for_approval(attempt.token)
+    assert claimed is not None
+    assert manager.get(attempt.token) is None
+
+    manager.restore_awaiting_approval(claimed)
+
+    restored = manager.get(attempt.token)
+    assert restored is claimed
+    assert restored.status is PairingStatus.AWAITING_APPROVAL
+
+
 def test_store_approved_makes_attempt_collectible() -> None:
     manager = PairingManager()
     attempt = _make_attempt()

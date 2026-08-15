@@ -14,6 +14,7 @@ from app.schemas.common import ApiResponse
 from app.services.exceptions import (
     AuthenticationError,
     ConflictError,
+    NameConflictError,
     NotFoundError,
     ValidationError,
 )
@@ -52,6 +53,22 @@ async def handle_conflict_error(request: Request, exc: ConflictError) -> JSONRes
     return _error_response(409, str(exc))
 
 
+async def handle_name_conflict_error(request: Request, exc: NameConflictError) -> JSONResponse:
+    """Map NameConflictError to 409, same status as ConflictError but with the
+    colliding device's id/name in `data` (P43.1) so the Desktop UI can render
+    the Replace/Make-it-a-new-device dialog straight from this response."""
+    logger.warning("Name conflict on %s %s: %s", request.method, request.url.path, exc)
+    body = ApiResponse(
+        success=False,
+        message=str(exc),
+        data={
+            "existing_device_id": exc.existing_device_id,
+            "existing_device_name": exc.existing_device_name,
+        },
+    )
+    return JSONResponse(status_code=409, content=body.model_dump(mode="json"))
+
+
 async def handle_request_validation_error(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
@@ -71,6 +88,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     """Attach all exception handlers to the FastAPI app instance."""
     app.add_exception_handler(NotFoundError, handle_not_found_error)
     app.add_exception_handler(ValidationError, handle_validation_error)
+    app.add_exception_handler(NameConflictError, handle_name_conflict_error)
     app.add_exception_handler(ConflictError, handle_conflict_error)
     app.add_exception_handler(AuthenticationError, handle_authentication_error)
     app.add_exception_handler(RequestValidationError, handle_request_validation_error)

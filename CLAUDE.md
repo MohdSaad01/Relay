@@ -28,9 +28,13 @@ a real bundled backend, and a real Android release APK have been verified
 working together as one product. Repository/documentation cleanup (P42)
 is also complete, and a device-identity/re-pairing defect found in the
 first real-world validation pass has been fixed and physically verified
-(P43 — see "Device Lifecycle & Re-Pairing Correctness (P43)" below);
+(P43 — see "Device Lifecycle & Re-Pairing Correctness (P43)" below), with
+a follow-up UX gap it deliberately left open — a stale Desktop device row
+colliding by name with a freshly reinstalled phone — also resolved and
+physically verified (P43.1 — see "Device Name Collision & Re-Pairing
+Resolution (P43.1)" below);
 **the packaged Desktop backend and installer still need to be rebuilt
-with this fix before it reaches an actual installed product.** What
+with both fixes before they reach an actual installed product.** What
 remains otherwise is the items listed under
 [Not Yet Implemented](#not-yet-implemented) (real production signing
 identities, Windows code signing) — see `README.md` for the project-level
@@ -1006,14 +1010,16 @@ validation found no release blockers, **P42 (repository/documentation
 cleanup) is also complete** (`docs/15_QA_NOTEBOOK.md`'s P42 entry), and
 **P43 (device lifecycle & re-pairing correctness) is also complete** (see
 "Device Lifecycle & Re-Pairing Correctness (P43)" below and
-`docs/15_QA_NOTEBOOK.md`'s P43 entry) — remaining work is only the
-still-open items P41 explicitly did not resolve (real production signing
-identities for both platforms, Windows code signing, the Android Clear
-History focus-refresh gap), plus **P43's own required follow-up: the
-packaged backend bundle and Desktop installer must be rebuilt
-(`pyinstaller relay-backend.spec` + `npm run dist`) before end users
-receive the P43 fix** — the currently-installed packaged product still
-runs pre-P43 backend code:
+`docs/15_QA_NOTEBOOK.md`'s P43 entry), and **P43.1 (device name collision
+& re-pairing resolution) is also complete** (see "Device Name Collision &
+Re-Pairing Resolution (P43.1)" below and `docs/15_QA_NOTEBOOK.md`'s
+P43.1 entry) — remaining work is only the still-open items P41 explicitly
+did not resolve (real production signing identities for both platforms,
+Windows code signing, the Android Clear History focus-refresh gap), plus
+**P43/P43.1's own required follow-up: the packaged backend bundle and
+Desktop installer must be rebuilt (`pyinstaller relay-backend.spec` +
+`npm run dist`) before end users receive either fix** — the
+currently-installed packaged product still runs pre-P43 backend code:
 
 * ~~**P38 — Backend Production Bundle.**~~ **Done.** Pinned backend
   dependencies (three-way split: production/dev-test/build-only); added
@@ -1103,6 +1109,24 @@ runs pre-P43 backend code:
   `docs/15_QA_NOTEBOOK.md`'s P43 entry for the full investigation,
   physical-device verification matrix, and the required packaged-rebuild
   follow-up.
+* ~~**P43.1 — Device Name Collision & Re-Pairing Resolution.**~~ **Done.**
+  Resolved the one lifecycle case P43 deliberately left open: a genuine
+  Android reinstall (correctly) gets a new `device_identifier`, but if
+  Desktop's old row for that phone isn't removed first, re-pairing
+  collides on name alone. `GET /pairing/pending/{token}` now reports a
+  live name collision (`PairingService.get_pending_request`); Desktop
+  shows a Replace/Make-it-a-new-device dialog instead of silently
+  duplicating the row; `PairingService.approve_pairing` re-checks live
+  state at commit time and dispatches to `DeviceService.replace_device`
+  or `generate_unique_name` + `register_device` accordingly. Device
+  identifier match still always takes precedence over a name collision.
+  Verified live on RMX3997: the collision dialog, Replace, Make-new (with
+  the backend-assigned suffixed name correctly reaching Android's own
+  Settings screen), and the no-dialog same-identifier path all confirmed
+  against the real backend, Desktop, and Android app. See "Device Name
+  Collision & Re-Pairing Resolution (P43.1)" below and
+  `docs/15_QA_NOTEBOOK.md`'s P43.1 entry for full detail — including the
+  same packaged-rebuild follow-up P43 already left required.
 
 ## Packaged End-to-End Release Validation (P41)
 
@@ -1205,6 +1229,73 @@ against the stale packaged binary still produced the old 409) and is not
 yet done; rebuild via `pyinstaller relay-backend.spec` (clean venv) then
 `npm run dist` in `desktop/` before the next release, same rule P38/P39
 already established for any backend change.
+
+Do not begin P44 automatically — it remains its own milestone, reviewed
+before starting, per this file's Git Workflow rules.
+
+## Device Name Collision & Re-Pairing Resolution (P43.1)
+
+**A genuine Android reinstall followed by re-pairing, without first
+removing the old Desktop row, collides on name (not identifier) — this is
+the one lifecycle case P43 deliberately left unsolved, not a P43 defect.**
+Android's default device name is the phone model, so a reinstalled phone
+naturally resubmits the same name it had before, under a brand-new
+`device_identifier` (P43's own correct behavior for a genuine reinstall —
+see "Device Lifecycle & Re-Pairing Correctness (P43)" above). Desktop's
+old row for that phone has no signal telling it the old install is gone
+for good (P43 §4 Q7 already ruled out heuristic staleness detection), so
+without this milestone the result was two rows with the same name. Device
+names are **not** a cryptographically reliable physical-device identity —
+two genuinely different phones can share one — so this is resolved as a
+V1 user-assisted decision at pairing time, not a stronger identity
+mechanism.
+
+**Identity precedence is strict and must not be reordered:** a matching
+`device_identifier` is *always* a P43 reconciliation, checked first and
+regardless of whether the name also matches or differs. Only when the
+identifier is genuinely new is a name collision even considered. A
+different identifier with a different name is always plain new-device
+pairing. Any future change to the pairing approval flow must preserve
+this exact order — do not show the collision dialog for what is actually
+a P43 re-pair, and do not silently reconcile onto a same-named-but-
+different-identifier row.
+
+**The collision check is always against live state, never a cached
+snapshot.** `DeviceService.find_name_collision_or_none` (normalizes:
+trim + case-insensitive; display casing is always preserved on storage)
+is called fresh both when `GET /pairing/pending/{token}` is polled (so
+Desktop knows to show the collision dialog at all) and again inside
+`PairingService.approve_pairing` at the moment of commit (so a state
+change between the poll and the user's click can't create a duplicate).
+If a collision is found at commit time with no `name_conflict_action`
+supplied, the pairing attempt is **not** discarded —
+`PairingManager.restore_awaiting_approval` puts it back as
+`AWAITING_APPROVAL` and `NameConflictError` (409) is raised instead — any
+future abort-and-retry path added to pairing should follow this same
+"restore before raising" shape rather than losing the attempt.
+
+**`DeviceService.generate_unique_name` finds the smallest available
+`"{name} (N)"` gap against the live device list — it never counts
+existing rows.** `{Thomas, Thomas (1), Thomas (3)}` + a new `Thomas`
+correctly yields `Thomas (2)`, not `Thomas (4)`. The backend is the sole
+authority for this name; a Desktop-side preview must never be trusted as
+final. Any future per-name uniqueness logic in this codebase should reuse
+this helper rather than reimplementing suffix allocation.
+
+**`PairingResultResponse`/`ApprovedResult` now carry `device_name`** —
+the backend's actual final name, which "Make it a new device" can set to
+something Android never submitted (e.g. `"Thomas (1)"`). Android's
+`PairingWaitingScreen.tsx` builds `Session.device_name` from this field,
+not from what it originally sent — any future pairing-result consumer on
+either platform must treat the backend's returned name as authoritative,
+never the locally-submitted one.
+
+**No database-level uniqueness constraint exists on `device_name`, by
+deliberate choice.** P43 never defined names as globally unique (a
+Desktop rename already permits duplicates), and P43.1's service-level
+live check is sufficient for its actual job — catching a collision at
+pairing time. Do not add a `UNIQUE` constraint without a concrete new
+requirement beyond what P43.1 already solves.
 
 Do not begin P44 automatically — it remains its own milestone, reviewed
 before starting, per this file's Git Workflow rules.

@@ -175,3 +175,92 @@ def test_submit_request_reconciles_already_paired_device_instead_of_conflicting(
 
     devices_response = client.get("/api/v1/devices")
     assert len(devices_response.json()["data"]) == 1
+
+
+# --- P43.1: device name collision & re-pairing resolution -------------------
+
+
+def test_pending_reports_name_conflict_for_new_identifier_same_name(client: TestClient) -> None:
+    first_token = _start(client)
+    _submit(client, first_token, identifier="device-uuid-1", name="Thomas")
+    approve_response = client.post("/api/v1/pairing/approve", json={"pairing_token": first_token})
+    existing_device_id = approve_response.json()["data"]["id"]
+
+    second_token = _start(client)
+    _submit(client, second_token, identifier="device-uuid-2", name="Thomas")
+
+    pending_response = client.get(f"/api/v1/pairing/pending/{second_token}")
+    conflict = pending_response.json()["data"]["name_conflict"]
+
+    assert conflict is not None
+    assert conflict["existing_device_id"] == existing_device_id
+    assert conflict["existing_device_name"] == "Thomas"
+
+
+def test_approve_without_decision_returns_409_and_creates_no_device(client: TestClient) -> None:
+    first_token = _start(client)
+    _submit(client, first_token, identifier="device-uuid-1", name="Thomas")
+    client.post("/api/v1/pairing/approve", json={"pairing_token": first_token})
+
+    second_token = _start(client)
+    _submit(client, second_token, identifier="device-uuid-2", name="Thomas")
+
+    response = client.post("/api/v1/pairing/approve", json={"pairing_token": second_token})
+
+    assert response.status_code == 409
+    assert response.json()["data"]["existing_device_name"] == "Thomas"
+    assert len(client.get("/api/v1/devices").json()["data"]) == 1
+
+
+def test_approve_replace_leaves_exactly_one_device_with_the_new_identity(client: TestClient) -> None:
+    first_token = _start(client)
+    _submit(client, first_token, identifier="device-uuid-1", name="Thomas")
+    client.post("/api/v1/pairing/approve", json={"pairing_token": first_token})
+
+    second_token = _start(client)
+    _submit(client, second_token, identifier="device-uuid-2", name="Thomas")
+    response = client.post(
+        "/api/v1/pairing/approve",
+        json={"pairing_token": second_token, "name_conflict_action": "replace"},
+    )
+
+    assert response.status_code == 200
+    devices = client.get("/api/v1/devices").json()["data"]
+    assert len(devices) == 1
+    assert devices[0]["device_identifier"] == "device-uuid-2"
+    assert devices[0]["device_name"] == "Thomas"
+
+
+def test_approve_make_new_produces_two_devices_with_distinct_names(client: TestClient) -> None:
+    first_token = _start(client)
+    _submit(client, first_token, identifier="device-uuid-1", name="Thomas")
+    client.post("/api/v1/pairing/approve", json={"pairing_token": first_token})
+
+    second_token = _start(client)
+    _submit(client, second_token, identifier="device-uuid-2", name="Thomas")
+    response = client.post(
+        "/api/v1/pairing/approve",
+        json={"pairing_token": second_token, "name_conflict_action": "make_new"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["device_name"] == "Thomas (1)"
+    devices = client.get("/api/v1/devices").json()["data"]
+    assert {d["device_name"] for d in devices} == {"Thomas", "Thomas (1)"}
+
+
+def test_pairing_result_returns_the_final_assigned_device_name(client: TestClient) -> None:
+    first_token = _start(client)
+    _submit(client, first_token, identifier="device-uuid-1", name="Thomas")
+    client.post("/api/v1/pairing/approve", json={"pairing_token": first_token})
+
+    second_token = _start(client)
+    _submit(client, second_token, identifier="device-uuid-2", name="Thomas")
+    client.post(
+        "/api/v1/pairing/approve",
+        json={"pairing_token": second_token, "name_conflict_action": "make_new"},
+    )
+
+    result_response = client.get(f"/api/v1/pairing/result/{second_token}")
+
+    assert result_response.json()["data"]["device_name"] == "Thomas (1)"

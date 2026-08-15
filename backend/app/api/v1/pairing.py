@@ -15,6 +15,7 @@ from app.api.responses import success
 from app.schemas.common import ApiResponse
 from app.schemas.device import DeviceResponse
 from app.schemas.pairing import (
+    NameConflictResponse,
     PairingApproveRequest,
     PairingPendingRequestResponse,
     PairingRejectRequest,
@@ -37,9 +38,22 @@ def start_pairing(service: PairingServiceDep) -> ApiResponse:
 
 @router.get("/pending/{token}", response_model=ApiResponse)
 def get_pending_request(token: str, service: PairingServiceDep) -> ApiResponse:
-    """Return the requesting device's info for the desktop user to review."""
-    pending = service.get_pending_request(token)
-    response = PairingPendingRequestResponse.model_validate(pending)
+    """Return the requesting device's info for the desktop user to review,
+    plus a live P43.1 name-collision check (see PairingService.get_pending_request)."""
+    review = service.get_pending_request(token)
+    response = PairingPendingRequestResponse(
+        device_identifier=review.requesting_device.device_identifier,
+        device_name=review.requesting_device.device_name,
+        platform=review.requesting_device.platform,
+        name_conflict=(
+            NameConflictResponse(
+                existing_device_id=review.name_conflict.existing_device_id,
+                existing_device_name=review.name_conflict.existing_device_name,
+            )
+            if review.name_conflict is not None
+            else None
+        ),
+    )
     return success(response.model_dump(mode="json"))
 
 
@@ -60,10 +74,13 @@ def submit_pairing_request(body: PairingRequestSubmitRequest, service: PairingSe
 def approve_pairing(body: PairingApproveRequest, service: PairingServiceDep) -> ApiResponse:
     """Approve a pending pairing request.
 
-    Registers a new device, or — if this device_identifier is already
-    known — reconciles the existing one onto a fresh session (P43).
+    Registers a new device; reconciles the existing one onto a fresh session
+    if this device_identifier is already known (P43); or, for a genuinely new
+    identifier whose name collides with an already-paired device, applies
+    `name_conflict_action` ("replace"/"make_new", P43.1) — raising a 409
+    NameConflictError instead if no decision was supplied yet.
     """
-    device = service.approve_pairing(body.pairing_token)
+    device = service.approve_pairing(body.pairing_token, body.name_conflict_action)
     return success(
         DeviceResponse.model_validate(device).model_dump(mode="json"),
         message="Device paired successfully.",

@@ -35,10 +35,17 @@ physically verified (P43.1 — see "Device Name Collision & Re-Pairing
 Resolution (P43.1)" below); a separate Desktop defect where a received
 file/folder deleted outside Relay left a stale, broken Shared Files entry
 has also been fixed and physically verified (P44 — see "Desktop Stale
-Received-Item Handling (P44)" below).
-**The packaged Desktop backend and installer still need to be rebuilt
-with all three fixes (P43, P43.1, P44) before they reach an actual
-installed product.** What
+Received-Item Handling (P44)" below); and a set of Desktop/Android
+packaging and branding metadata issues (shortcut/Control Panel comment
+text, missing Publisher/Company, an installer progress-bar backward
+jump, and the Android launcher name) found in the same real-world
+validation pass has also been fixed and physically verified (P45 — see
+"Desktop Packaging & Branding Metadata (P45)" below).
+**The packaged Desktop backend and installer have been rebuilt with the
+P43/P43.1/P44/P45 fixes and physically verified on this machine as of
+P45** — the previously-open "still needs to be rebuilt" gap is closed;
+any future backend or Desktop packaging change must still follow the
+same rebuild-before-verify discipline P38/P39 established. What
 remains otherwise is the items listed under
 [Not Yet Implemented](#not-yet-implemented) (real production signing
 identities, Windows code signing) — see `README.md` for the project-level
@@ -1017,13 +1024,18 @@ cleanup) is also complete** (`docs/15_QA_NOTEBOOK.md`'s P42 entry), and
 `docs/15_QA_NOTEBOOK.md`'s P43 entry), and **P43.1 (device name collision
 & re-pairing resolution) is also complete** (see "Device Name Collision &
 Re-Pairing Resolution (P43.1)" below and `docs/15_QA_NOTEBOOK.md`'s
-P43.1 entry) — remaining work is only the still-open items P41 explicitly
-did not resolve (real production signing identities for both platforms,
-Windows code signing, the Android Clear History focus-refresh gap), plus
-**P43/P43.1's own required follow-up: the packaged backend bundle and
-Desktop installer must be rebuilt (`pyinstaller relay-backend.spec` +
-`npm run dist`) before end users receive either fix** — the
-currently-installed packaged product still runs pre-P43 backend code:
+P43.1 entry), **P44 (stale downloaded file/folder handling) is also
+complete** (see "Desktop Stale Received-Item Handling (P44)" below), and
+**P45 (Desktop/Android packaging & branding metadata) is also complete**
+(see "Desktop Packaging & Branding Metadata (P45)" below and
+`docs/15_QA_NOTEBOOK.md`'s P45 entry) — the packaged backend bundle,
+Desktop installer, and Android release APK have all been rebuilt with
+every fix through P45 and physically verified on this machine; remaining
+work is only the still-open items P41 explicitly did not resolve (real
+production signing identities for both platforms, Windows code signing,
+the Android Clear History focus-refresh gap), plus the Desktop/Android
+version-string drift P45 documented rather than resolved (see
+"Desktop Packaging & Branding Metadata (P45)" below):
 
 * ~~**P38 — Backend Production Bundle.**~~ **Done.** Pinned backend
   dependencies (three-way split: production/dev-test/build-only); added
@@ -1358,6 +1370,67 @@ fix scope. See `docs/15_QA_NOTEBOOK.md`'s P44 entry for the full
 investigation and live-verification detail.
 
 Do not begin P45 automatically — it remains its own milestone, reviewed
+before starting, per this file's Git Workflow rules.
+
+## Desktop Packaging & Branding Metadata (P45)
+
+**`desktop/package.json`'s `description` and `author` fields are not
+cosmetic — electron-builder reads them directly into user-visible Windows
+metadata.** `description` is written verbatim into both the Desktop and
+Start Menu shortcuts' `.lnk` Comment field and the Control Panel
+"Comments" value (`app-builder-lib`'s `installer.nsh`,
+`APP_DESCRIPTION`/`appInfo.description`) — it must stay empty (`""`),
+not be given a new descriptive string, and not be treated as ordinary npm
+metadata. `author` (must be the **object** form, `{ "name": "Relay
+Labs" }` — a bare string does not expose `.name` and silently fails to
+set anything) is the sole source of `Relay.exe`'s `CompanyName`, the NSIS
+`Publisher` registry value, and (as a side effect) the `LegalCopyright`
+fallback string — without it, electron-builder leaves `Relay.exe`'s
+Company as Electron's own prebuilt-binary default ("GitHub, Inc.") and
+Publisher blank. Any future change to either field must re-verify all of
+these downstream effects on a real rebuilt installer (`Get-ItemProperty`
+on the Control Panel entry, `.lnk` `Description`, and
+`(Get-Item Relay.exe).VersionInfo`), not just re-read the source config.
+
+**`desktop/package.json`'s `build.compression` must stay `"store"`.**
+NSIS's default solid-7z packaging runs installation as three
+independently-timed phases sharing one visible progress bar (extract the
+compressed blob out of the installer stub, decompress it into a temp
+folder via the `Nsis7z` plugin, then copy it into the final install
+directory) whose totals don't agree, producing a confusing backward jump
+partway through — reproduced and root-caused live in P45
+(`docs/15_QA_NOTEBOOK.md`'s P45 entry, §3/§10). `compression: "store"`
+removes the mismatch at its source (no decompression math, so the
+compressed-blob size and the real content size are the same number)
+rather than faking or smoothing the displayed percentage, at a measured
+~1 MB installer-size cost (not the 3-4x a naive guess would suggest,
+because this payload — Electron runtime DLLs, the PyInstaller-bundled
+Python backend — is already mostly incompressible binary data). Do not
+revert to `"normal"`/`"maximum"` compression, and do not attempt to fix
+this via `nsis.useZip` — P45 confirmed that option is unconditionally
+forced off whenever the build is differential-update-aware (produces a
+`.blockmap`, which this build always does), so it has no effect here.
+
+**Android's launcher/application name is `"Relay"`**
+(`android/android/app/src/main/res/values/strings.xml`'s `app_name`,
+referenced by both the `<application>` and `<activity>` manifest
+labels) — not `"RelayMobile"`. `applicationId`/`namespace`
+(`com.relay.mobile`) is a separate, deliberately-unchanged identifier;
+do not conflate the two or assume a future branding change to the
+display name requires touching package identity.
+
+**Desktop version (`package.json` `version`, currently `0.1.0`) and
+Android version (`build.gradle`'s `versionName`/`versionCode`, currently
+`"1.0"`/`1`) remain intentionally un-reconciled.** P45 confirmed
+Desktop's own packaging chain (`Relay.exe`'s `FileVersion`/
+`ProductVersion`, the installer's `VIProductVersion`, and Control Panel's
+`DisplayVersion`) is internally self-consistent — there is no packaging
+bug to fix there. The cross-platform mismatch is a deliberate,
+documented deferral (no shared version source exists between the two
+build systems) — do not invent a new version number or a shared-version
+mechanism without a dedicated milestone for that specific decision.
+
+Do not begin P46 automatically — it remains its own milestone, reviewed
 before starting, per this file's Git Workflow rules.
 
 ## Documentation

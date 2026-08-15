@@ -3,7 +3,10 @@
   "productName": "Relay",
   "version": "0.1.0",
   "private": true,
-  "description": "Relay desktop application: Electron shell hosting the FastAPI backend and the desktop UI.",
+  "description": "",
+  "author": {
+    "name": "Relay Labs"
+  },
   "main": "src/main/main.js",
   "scripts": {
     "start": "electron .",
@@ -43,6 +46,7 @@
       ],
       "icon": "assets/icons/icon.ico"
     },
+    "compression": "store",
     "nsis": {
       "oneClick": false,
       "perMachine": false,

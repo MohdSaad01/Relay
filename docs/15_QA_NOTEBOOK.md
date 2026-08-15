@@ -10411,3 +10411,436 @@ were confirmed live against the real Desktop app, a real backend, and the
 physical RMX3997 device, with Transfer History proven byte-for-byte
 unchanged after every removal. Nothing was committed, per this milestone's
 explicit instruction. P44 does not start P45.
+
+# Milestone P45 — Desktop Packaging & Installer UX / Branding Refinement
+
+**Scope:** `docs/Pre_Release_Issues.txt` §1 (1.1–1.6) and §2 (2.1).
+Windows packaging/branding metadata (shortcut comment, Publisher, Control
+Panel Comment, `Relay.exe` Company, version consistency), the Android
+launcher/application name, and the NSIS installer's confusing progress-bar
+backward jump. Desktop packaging config + one Android string resource
+only — no application source behavior changed.
+
+## 1. Requirements addressed
+
+1.1 shortcut comment removed; 1.2 Publisher = "Relay Labs"; 1.3 Control
+Panel Comment removed (Product Version/Size kept); 1.4 `Relay.exe`
+Company = "Relay Labs"; 1.5 version-consistency audit; 1.6 Android app
+label "RelayMobile" → "Relay"; 2.1 installer progress-bar backward jump.
+
+## 2. Baseline (real, pre-fix, this machine)
+
+This dev machine already had a real packaged Relay install from before
+P45 (`Relay-Setup-0.1.0.exe`, built 8/14, pre-P43/P43.1/P44). Inspected
+directly rather than assumed:
+
+- Desktop **and** Start Menu shortcut `.lnk` `Description`: `"Relay
+  desktop application: Electron shell hosting the FastAPI backend and the
+  desktop UI."` (verbatim, via `WScript.Shell.CreateShortcut`).
+- Control Panel entry (`HKCU\...\Uninstall\...` via `Get-ItemProperty`):
+  `DisplayName="Relay 0.1.0"`, `Publisher=""` (empty), `Comments=`
+  identical verbose string, `DisplayVersion="0.1.0"`, `EstimatedSize`
+  present and correct.
+- `Relay.exe` version info (`(Get-Item ...).VersionInfo`):
+  `CompanyName="GitHub, Inc."`, `ProductName="Relay"`,
+  `FileDescription="Relay"`, `ProductVersion="0.1.0.0"`,
+  `FileVersion="0.1.0"`, `Comments=` empty.
+- Android `strings.xml`: `app_name = "RelayMobile"`, referenced by both
+  the `<application>` and `<activity>` (`MainActivity`) manifest labels.
+  `applicationId`/`namespace` = `com.relay.mobile` (untouched by this
+  milestone; investigated and confirmed no reason to change it).
+- Installer progress bar: reproduced live (see §10) — climbs smoothly,
+  then drops sharply partway through, then climbs again to completion.
+  Matches the reported "25%→90%→75%→100%" shape.
+
+## 3. Investigation findings
+
+Traced every symptom to source in `app-builder-lib` (electron-builder
+26.15.3, vendored under `desktop/node_modules`) before changing anything:
+
+- **`AppInfo.description`** (`appInfo.js`) = `package.json`'s
+  `description` field, unconditionally. NSIS's `installer.nsh` writes it
+  verbatim to the uninstall registry key's `Comments` value (line ~137)
+  **and** passes it as the last parameter to every `CreateShortCut` call
+  for both the Start Menu and Desktop shortcuts (lines ~197/223/238) —
+  one field, both symptoms (1.1 and 1.3). `desktop/package.json`'s
+  `description` was the full internal one-liner from the top of this
+  file — never intended as user-facing shortcut/registry text.
+- **`AppInfo.companyName`** (`appInfo.js`) reads `package.json`'s
+  `author.name` — `desktop/package.json` had **no `author` field at
+  all**, so `companyName` was `null`. `winPackager.js`'s
+  `signAndEditResources` only sets `CompanyName` via `rcedit`
+  `if (appInfo.companyName != null)` — with no author, that `rcedit`
+  overwrite never happens, so `Relay.exe` keeps whatever `CompanyName` was
+  already baked into the prebuilt Electron binary stub ("GitHub, Inc.").
+  The NSIS `Publisher` registry value (`installer.nsh` line 133,
+  `${COMPANY_NAME}`) is populated by the same `defines.COMPANY_NAME`
+  (`NsisTarget.js`, only set `if (companyName != null)`), so the same gap
+  produced both 1.2 and 1.4. `packageMetadata.js` even logs
+  `"author is missed in the package.json"` — a pre-existing, previously
+  unnoticed build warning that named the exact root cause.
+  **Confirmed the object form matters**: `AppInfo.companyName` does
+  `author.name` — a bare string `"author": "Relay Labs"` would not expose
+  a `.name` property and would silently fail to set `CompanyName`; it
+  must be `{ "name": "Relay Labs" }`.
+  `FileDescription` is set separately, from `appInfo.productName`
+  ("Relay") — already correct, confirmed unaffected by either change.
+- **1.5 version audit**: `AppInfo.version` = `package.json`'s `version`
+  field is the *single* source for `Relay.exe`'s `FileVersion`/
+  `ProductVersion`, the installer's own `VIProductVersion`, and Control
+  Panel `DisplayVersion` — confirmed by reading `appInfo.js`,
+  `winPackager.js` (`signAndEditResources`), and `NsisTarget.js`
+  (`computeVersionKey`), and confirmed live: all three already read
+  `0.1.0`/`0.1.0.0` consistently on the baseline install (§2). **No
+  packaging-level version drift exists inside Desktop's own artifact
+  chain.** The only real drift is cross-platform (Desktop `0.1.0` vs.
+  Android `versionName "1.0"`/`versionCode 1`) — a separate,
+  out-of-scope architectural/versioning-strategy decision (§14).
+- **1.6**: `android/android/app/src/main/res/values/strings.xml`'s
+  `app_name` is the sole source for both `AndroidManifest.xml` label
+  attributes (`<application android:label="@string/app_name">` and
+  `<activity android:label="@string/app_name">`). `applicationId`/
+  `namespace` (`com.relay.mobile`) are separate manifest fields, entirely
+  unaffected by changing this one string.
+- **2.1 (installer progress)** — traced the actual NSIS install flow
+  (`installSection.nsh` → `extractAppPackage.nsh`): the whole app payload
+  (Electron runtime + `node_modules` + the P38 backend bundle) is packed
+  as **one solid 7z archive**. Installation runs three layered,
+  independently-timed phases sharing one visible bar: (1) NSIS's own
+  `File /oname=...` instruction extracts the compressed `app-64.7z` blob
+  out of the installer stub — tracked by NSIS's native declared-byte
+  progress, so it climbs smoothly against the one large `File`
+  instruction NSIS's compiler knows about; (2) the `Nsis7z::Extract`
+  plugin then decompresses that blob into a `$PLUGINSDIR\7z-out` temp
+  folder — a plugin-driven operation reporting against a *different*
+  total (the uncompressed payload size), not the compressed-blob size
+  phase (1) used; (3) `CopyFiles /SILENT` then atomically copies the
+  decompressed files from the temp folder into the real install
+  directory — a third, separately-timed filesystem operation. Checked the
+  one electron-builder knob that changes this shape entirely
+  (`nsis.useZip`, which swaps the whole flow for a single
+  `nsisunz::Unzip` straight into `$INSTDIR`, no temp+copy step): its own
+  source (`NsisTarget.js`) forces it off whenever the build is
+  differential-update-aware (`!isBuildDifferentialAware && useZip`) — our
+  build **is** differential-aware (it already produces a `.blockmap`
+  file, confirmed present from the original P39 build and every rebuild
+  this milestone), so `useZip` would have had zero effect. `common.nsh`
+  additionally hardcodes `ShowInstDetails nevershow` with no exposed
+  override, and none of electron-builder's supported customization
+  macros (`customHeader`/`preInit`/`customInit`/`customWelcomePage`/
+  `customInstall`) run *during* the extraction phase — only before or
+  after it — so there was no supported way to add phase-labeling status
+  text either. This left one real, officially-exposed lever:
+  `build.compression` (`"maximum"`/`"normal"`/`"store"`).
+
+## 4. Root causes (summary)
+
+| # | Symptom | Root cause |
+|---|---|---|
+| 1.1/1.3 | Shortcut + Control Panel Comment | `package.json` `description` used verbatim for both, unconditionally |
+| 1.2/1.4 | Empty Publisher / `GitHub, Inc.` Company | No `author` field → `companyName` null → `rcedit`/NSIS `Publisher` write skipped entirely |
+| 1.5 | (suspected) version drift | None found inside Desktop's own chain — already correct |
+| 1.6 | "RelayMobile" launcher name | `strings.xml`'s `app_name` value |
+| 2.1 | Progress bar jump | Solid-7z install = 3 layered phases (stub-extract → plugin-decompress-to-temp → copy-to-final) sharing one bar, each against a different total |
+
+## 5. Architecture / configuration decisions
+
+- **`desktop/package.json` `description` set to `""`** (not a shorter
+  replacement string) — the brief explicitly required no replacement
+  comment, and Windows renders an empty `Comments`/shortcut-description
+  value as blank rather than omitting the field, which satisfies both 1.1
+  and 1.3 without a second config surface. Produces one benign, expected
+  build warning (`description is missed in the package.json`) —
+  documented here, not suppressed.
+- **`desktop/package.json` gained `"author": { "name": "Relay Labs" }`**
+  — the object form is required (see §3). This is also the sole input to
+  `AppInfo.copyright`'s fallback (`Copyright © ${year} ${companyName ||
+  productName}`), so `LegalCopyright` changed as a side effect from
+  `"Copyright © 2026 Relay"` to `"Copyright © 2026 Relay Labs"` —
+  intentional and consistent with the Company/Publisher fix, not
+  separately requested but not a conflict either; noted here rather than
+  silently absorbed.
+- **1.5: no version number changed anywhere.** Per the brief's explicit
+  "do not arbitrarily invent a new version number" and the investigation
+  finding no actual drift inside Desktop's own chain, this item is
+  disposed as **already correct**, not fixed. The Desktop/Android
+  cross-platform version mismatch is documented as a deferred,
+  out-of-scope architectural decision (§14) rather than resolved here.
+- **`android/.../strings.xml`'s `app_name` changed to `"Relay"`.** No
+  `applicationId`/`namespace` change — investigated and confirmed
+  unnecessary (the brief's own instruction), and changing it would be a
+  real package-identity change with upgrade/Play-Store implications far
+  outside this milestone's scope.
+- **`desktop/package.json` build config gained `"compression": "store"`.**
+  Chosen over three rejected alternatives: (a) `nsis.useZip` — confirmed
+  inert for this build (see §3); (b) patching the vendored `.nsh`
+  templates directly — non-durable (wiped on every `npm install`) and
+  explicitly out of bounds; (c) leaving it unfixed/documented-only — the
+  brief allows this ("where reasonably possible"), but `store` was tested
+  first and found to be a genuine, low-cost fix rather than a
+  cosmetic one (see §10), so it was adopted instead of deferred. `store`
+  does not fake or smooth a percentage — it removes the actual
+  architectural cause of the mismatch (LZMA decompression against a
+  different total than the outer blob's compressed size) by making the
+  blob's compressed size and its real content size the same number,
+  which is what makes phase (1)'s progress arithmetic already represent
+  the true total. Empirically measured cost: **+995 KB** (117,748,586 →
+  118,743,810 bytes, +0.85%), far smaller than the naive "3–4x bigger"
+  assumption, because the bulk of this payload (Electron runtime DLLs,
+  the PyInstaller-bundled Python backend's own DLLs/`.pyd` files) is
+  already-compiled binary data that LZMA barely shrinks further. This
+  trade (~1 MB) was judged clearly worth eliminating a jarring, literally
+  reported "is this broken?" install-time regression.
+
+## 6. Files changed
+
+- `desktop/package.json` — `description` → `""`; added `author`; added
+  `"compression": "store"` under `build`.
+- `android/android/app/src/main/res/values/strings.xml` — `app_name`
+  `"RelayMobile"` → `"Relay"`.
+- `docs/15_QA_NOTEBOOK.md` — this entry.
+
+No application source (`desktop/src/`, `backend/app/`, `android/src/`)
+changed. No architecture/layer boundaries touched.
+
+## 7. Build process
+
+Rebuilt both packaged artifacts from clean state, per P38/P39's
+established process (never `backend/.venv`, which carries unrelated
+packages):
+
+1. Backend: created a fresh venv (scratchpad, not `backend/.venv`),
+   `pip install -r requirements-build.txt`, then `pyinstaller
+   relay-backend.spec --noconfirm` from `backend/` →
+   `backend/dist/relay-backend/relay-backend.exe`. Build succeeded
+   cleanly (no new warnings beyond the pre-existing benign
+   `MySQLdb`/`psycopg2` optional-hidden-import notices).
+2. Desktop: `npm run dist` from `desktop/` (`electron-builder --win
+   --x64`) → `desktop/dist/Relay-Setup-0.1.0.exe`. Built **twice** this
+   milestone: once with the branding fixes only (baseline for §9), once
+   more after adding `compression: "store"` (final artifact, used for
+   all verification from §10 onward). `signing with signtool.exe` lines
+   appear in the build log for `relay-backend.exe`/`Relay.exe`/
+   `elevate.exe`/the installer/uninstaller — this is electron-builder's
+   standard unconditional signing *attempt*; confirmed via
+   `Get-AuthenticodeSignature` that the resulting artifacts are still
+   `NotSigned` (no certificate is configured), matching P39's documented,
+   deliberately-unsigned V1 state exactly — not a regression, not new
+   behavior.
+3. Android: `cd android/android && ./gradlew.bat :app:assembleRelease`,
+   using the P40 local-verification keystore
+   (`android/android/keystore.properties`, gitignored, still present
+   from P40) → `android/android/app/build/outputs/apk/release/
+   app-release.apk` (~90.4 MB). Build succeeded in 2m48s (warm Gradle
+   cache; P40's first build took ~35 min cold).
+
+## 8. Actual generated artifact details
+
+- `backend/dist/relay-backend/relay-backend.exe` — rebuilt, includes
+  P43/P43.1/P44's backend fixes (this repo's most recent commits before
+  P45), superseding the stale pre-P43 binary CLAUDE.md flagged as still
+  needing a rebuild.
+- `desktop/dist/Relay-Setup-0.1.0.exe` — **final** artifact:
+  118,743,810 bytes, `compression: "store"`, blockmap present
+  (`Relay-Setup-0.1.0.exe.blockmap`, differential-update metadata still
+  generated, confirmed unaffected by the compression change).
+- `android/android/app/build/outputs/apk/release/app-release.apk` —
+  94,830,542 bytes, `versionCode=1`, `versionName="1.0"` (unchanged, per
+  scope), signed with the P40 local-verification keystore (not a
+  production identity — unchanged, out of scope).
+
+## 9. Windows metadata verification (real installed app, this machine)
+
+Installed the final artifact (upgrade over the pre-existing baseline
+install, `%LOCALAPPDATA%\Programs\Relay`) and inspected the **actual
+installed application**, not just source config:
+
+| Field | Before (baseline, §2) | After (verified) |
+|---|---|---|
+| Desktop shortcut `Description` | verbose internal string | `""` (blank) |
+| Start Menu shortcut `Description` | verbose internal string | `""` (blank) |
+| Control Panel `Publisher` | (empty) | `Relay Labs` |
+| Control Panel `Comments` | verbose internal string | (blank) |
+| Control Panel `DisplayVersion` | `0.1.0` | `0.1.0` (unchanged, confirmed consistent) |
+| Control Panel `EstimatedSize` | present | present, unchanged in kind |
+| `Relay.exe` `CompanyName` | `GitHub, Inc.` | `Relay Labs` |
+| `Relay.exe` `ProductName` | `Relay` | `Relay` (unchanged) |
+| `Relay.exe` `FileDescription` | `Relay` | `Relay` (unchanged, confirmed not affected by the description fix) |
+| `Relay.exe` `ProductVersion`/`FileVersion` | `0.1.0.0`/`0.1.0` | `0.1.0.0`/`0.1.0` (unchanged, confirmed consistent) |
+| `Relay.exe` `LegalCopyright` | `Copyright © 2026 Relay` | `Copyright © 2026 Relay Labs` (side effect, §5) |
+| `Relay.exe` signature | Not signed | Not signed (unchanged, expected) |
+
+All values read directly via `Get-ItemProperty` on the real uninstall
+registry key, `WScript.Shell.CreateShortcut(...).Description` on the real
+`.lnk` files, and `(Get-Item Relay.exe).VersionInfo` on the real
+installed executable — not inferred from source.
+
+## 10. Installer progress verification
+
+Used Windows UI Automation + timed screenshot capture (not guesswork) to
+observe the real installer twice: once against the branding-only build
+(7z/default compression, to confirm the reported defect reproduces on a
+freshly-built installer) and once against the final `compression:
+"store"` build.
+
+**Before (default 7z compression):** captured 60 frames at 400 ms
+intervals through the file-copy phase. Bar climbed steadily from ~25% (t≈0s)
+to ~70% (t≈13.6s), then **dropped sharply to ~8% at t≈14.1s**, then
+climbed again to ~90% (t≈19.2s) before completing (t≈21–23s). This is the
+same climb→drop→climb shape as the originally reported "25%→90%→75%→100%"
+(exact numbers vary run to run with disk-cache warmth, but the
+architecture-driven backward-jump shape is the same and reproduced
+twice independently on this machine).
+
+**After (`compression: "store"`):** captured 40 frames at 200 ms
+intervals. Bar was already at ~68% when capture started, climbed
+smoothly to ~70%, then went **directly to the "Completing Relay Setup"**
+finish page within ~1.8 s — no backward movement observed at any sampled
+frame. Re-ran a second full end-to-end install (this is also the "upgrade
+test," §11) with the same result.
+
+Screenshot evidence retained in this session's scratchpad
+(`crop_0*.png`/`storecrop_0*.png`) for the duration of this conversation;
+not committed to the repo (not project deliverables).
+
+## 11. Android physical-device verification (RMX3997)
+
+Device connected throughout via ADB (`69DADENFONAIOZS4`), never
+disconnected or lost pairing during this milestone — no stop-and-ask
+condition was hit.
+
+- `adb install -r app-release.apk` succeeded (upgrade install over the
+  existing P40/P41 install, not a fresh reinstall — deliberately, to
+  avoid disturbing the real paired-device identity per P43's documented
+  "reinstall creates a new identity" behavior, which was out of scope to
+  re-trigger here).
+- App drawer, real device screenshot (`adb shell input tap` to the "R"
+  alphabetical index, `adb shell screencap`): confirmed the launcher tile
+  reads **"Relay"** (not "RelayMobile"), with the correct blue
+  two-arrows icon.
+- Launched the app (`adb shell am start`): opened directly to the
+  `Shared Files` tab (no re-pairing prompt), confirming the existing
+  session/pairing survived the release-APK upgrade install, as expected
+  for an upgrade (not a full uninstall, which is the P43-documented case
+  that legitimately creates a new identity).
+- Settings tab: `Device display name = RMX3997` still shown, download
+  folder setting intact — confirms normal app operation post-upgrade, no
+  crash, no regression from the manifest/string-resource change.
+- Did not attempt a live file transfer this pass (this dev machine and
+  the phone were not confirmed on the same LAN during this test window —
+  phone showed cellular/5G in the status bar); not required for this
+  milestone's scope (a string-resource/label change), and P41 already
+  established live transfer correctness independent of this change.
+
+## 12. Regression verification
+
+- **Desktop, real app, both post-fix installs** (branding-only build and
+  final store-compression build): launched `Relay.exe` for real after
+  each install and clicked through **Devices** (RMX3997 still shown
+  "Paired", same original `Paired 8/15/2026, 9:58:33 PM` timestamp both
+  times — proves `%APPDATA%\Relay\relay.db` was never touched by either
+  upgrade install, byte-identical `Length`/`LastWriteTime` before and
+  after), **Shared Files** (empty-state renders correctly, P44/P21
+  conventions intact), **Settings** (device name "Thomas", download
+  directory, discoverable toggle all preserved), and **Transfers**
+  (existing transfer history rows render correctly, unaffected). All
+  screenshotted directly from the real running app, not assumed.
+- **Packaged backend communication**: all of the above required the
+  Electron app's `backend-manager.js` to spawn the freshly-rebuilt
+  `relay-backend.exe` and the renderer to successfully call it over HTTP
+  — implicitly re-verifies P38/P39's core packaged-communication path
+  end-to-end, no separate test needed.
+- **Upgrade data preservation**: `relay.db` confirmed byte-identical
+  (`Length`/`LastWriteTime`) across two separate upgrade installs this
+  milestone — the strongest form of this check available short of a
+  full uninstall/reinstall cycle.
+- **Uninstall**: *not* independently re-executed this pass (would have
+  required removing and redoing the real paired install on this dev
+  machine for marginal additional evidence). `NsisTarget.js`'s
+  `computeScriptAndSignUninstaller` builds the uninstaller from the same
+  shared `commands`/`defines` object as the installer, so the
+  `compression` change applies identically to both — no code path
+  diverges between install and uninstall for this specific change.
+  P39 already established uninstall's data-preservation behavior
+  structurally; this milestone did not touch NSIS uninstall logic.
+  Flagged here explicitly rather than silently assumed (§15).
+- **Android**: Devices/Files/Transfers/Settings tabs and pairing-session
+  persistence confirmed live post-upgrade (§11); did not re-run a full
+  pairing-from-scratch or live-transfer cycle (out of scope, unchanged
+  code paths).
+
+## 13. Problems discovered (during this milestone, not pre-existing)
+
+None. Every fix landed as investigated with no surprises during
+verification, other than the pleasant one in §5/§10 (the `store`
+compression size cost being ~1 MB, not the 3–4x initially estimated).
+
+## 14. Deferred issues (found, not fixed — outside P45's scope)
+
+- **Desktop/Android version-string drift** (`0.1.0` vs. `1.0`/`1`) —
+  confirmed still present, unchanged by this milestone per the explicit
+  "do not invent a version number" / "do not introduce a shared-version
+  system" scope boundary. A real fix would need a deliberate
+  single-source-of-truth versioning decision (e.g. a root version file
+  both `desktop/package.json` and `android/android/app/build.gradle`
+  read from) — an architectural change for a future milestone, not a
+  metadata bug for this one.
+- **Uninstall not independently re-verified this pass** (§12) — no code
+  path diverges from what P39 already validated, but flagged rather than
+  silently claimed.
+- Everything else already flagged as deferred by prior milestones
+  (production signing identities, Windows code signing, Windows Firewall
+  first-run prompt, Android's Transfers/Files Clear-History focus-refresh
+  gap) is unchanged and out of this milestone's scope, per CLAUDE.md's
+  "Not Yet Implemented" section.
+
+## 15. Remaining limitations
+
+- The NSIS installer's progress bar, even after the `store` fix, is
+  still not a single mathematically unified percentage across all three
+  install phases in the strictest sense — it is monotonic and visually
+  smooth in every observed run (§10), but this rests on `store`
+  compression making phase (1)'s and phase (2)'s totals coincide for
+  *this specific payload's* compression characteristics (mostly
+  incompressible binaries). A future payload with a much higher
+  proportion of highly-compressible content (e.g., large text/JSON
+  assets) could reintroduce a visible, if smaller, mismatch. Worth
+  re-verifying if the payload's composition changes substantially.
+- Uninstall was not independently re-run this pass (§12/§14).
+- Cross-platform version drift remains (§14).
+
+## 16. Suggested commit message
+
+```
+fix(desktop,android): correct packaging metadata and installer UX (P45)
+
+Desktop: package.json's internal "description" (previously echoed
+verbatim into both shortcuts' Comment field and the Control Panel
+Comments field) is now empty; adds a proper "author" so electron-builder
+stops leaving Relay.exe's CompanyName/Publisher as Electron's own
+"GitHub, Inc." default. Switches NSIS packaging to store (uncompressed)
+compression, which removes the install-time progress bar's backward
+jump (extract-blob → decompress-to-temp → copy-to-final phases no
+longer disagree on total bytes) at a measured ~1 MB installer-size cost.
+
+Android: strings.xml's app_name corrected from "RelayMobile" to "Relay"
+(applicationId/namespace unchanged).
+
+Verified against real rebuilt artifacts: installed Relay.exe metadata,
+shortcuts, and Control Panel entry inspected directly; installer
+progress observed via UI Automation screenshot capture before/after;
+release APK installed and the launcher name confirmed on the physical
+RMX3997 device.
+```
+
+## 17. Final verdict
+
+**Fixed and physically verified** (real installed app / real installer /
+real device, not source-only): 1.1, 1.2, 1.3, 1.4, 1.6, 2.1.
+**Already correct, verified, no change made:** 1.5 (Desktop's own
+version chain was never actually inconsistent; documented rather than
+invented a fix). **Discovered but deferred, documented:** cross-platform
+version drift (§14), uninstall not independently re-run this pass (§12).
+**Unable to verify:** none — every in-scope item had a real artifact or
+real device available this session. Nothing was committed, per this
+milestone's instructions. **P45 does not start P46.**

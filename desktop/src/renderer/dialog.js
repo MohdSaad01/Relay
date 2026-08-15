@@ -66,3 +66,46 @@ export function confirmDialog({ title, message, confirmLabel, cancelLabel = "Can
     backdrop.querySelector(".dialog-cancel").focus();
   });
 }
+
+/**
+ * A single-button, non-confirmation variant of the above (P44) — for telling
+ * the user something that already happened (e.g. a received file/folder is
+ * no longer where Relay expects it) rather than asking them to approve an
+ * action. Reuses the exact same backdrop/card/button-row markup and classes
+ * as confirmDialog, just with one button instead of Cancel/Confirm. Resolves
+ * once acknowledged (OK, Escape, or a backdrop click) — there is no
+ * cancel/confirm distinction to report back to the caller.
+ */
+export function alertDialog({ title, message, okLabel = "OK" }) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement("div");
+    backdrop.className = "dialog-backdrop";
+    backdrop.innerHTML = `
+      <div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-message">
+        <h2 id="dialog-title">${escapeHtml(title)}</h2>
+        <p id="dialog-message">${escapeHtml(message)}</p>
+        <div class="button-row dialog-actions">
+          <button type="button" class="primary dialog-ok">${escapeHtml(okLabel)}</button>
+        </div>
+      </div>`;
+
+    function close() {
+      document.removeEventListener("keydown", onKeydown);
+      backdrop.remove();
+      resolve();
+    }
+
+    function onKeydown(event) {
+      if (event.key === "Escape" || event.key === "Enter") close();
+    }
+
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) close();
+    });
+    backdrop.querySelector(".dialog-ok").addEventListener("click", close);
+    document.addEventListener("keydown", onKeydown);
+
+    document.body.appendChild(backdrop);
+    backdrop.querySelector(".dialog-ok").focus();
+  });
+}

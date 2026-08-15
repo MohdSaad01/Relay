@@ -14,7 +14,7 @@ import {
 import { buildReceivedItems, markReceivedItemRemoved, resolveReceivedItemPath } from "../receivedFiles.js";
 import { applyHistoryReset, clearTransferHistory, getHistoryClearedAt } from "../transferHistory.js";
 import { folderIcon } from "../icons.js";
-import { confirmDialog } from "../dialog.js";
+import { alertDialog, confirmDialog } from "../dialog.js";
 
 export async function mount(container) {
   await refresh(container);
@@ -323,6 +323,29 @@ function clearRowError(row) {
   if (next && next.classList.contains("row-error")) next.remove();
 }
 
+/**
+ * If the received item's resolved on-disk path no longer exists (moved or
+ * deleted outside Relay - Pre_Release_Issues.txt §4), tells the user via the
+ * P30 dialog primitive and drops the stale entry from Shared Files, leaving
+ * its Transfer History record untouched (receivedFiles.js's own doc
+ * comment: a received item has no backing SharedFile/SharedFolder row to
+ * delete - "removing" it is always this same local-only marker). Returns
+ * true if the item was stale (and the caller should stop, having already
+ * handled it), false if the path is present and the caller's own
+ * open/show-in-folder action should proceed normally.
+ */
+async function handleIfReceivedItemMissing(container, item, path) {
+  if (await window.relay.pathExists(path)) return false;
+  const noun = item.kind === "received-folder" ? "folder" : "file";
+  await alertDialog({
+    title: `${noun === "folder" ? "Folder" : "File"} unavailable`,
+    message: `This ${noun} was moved or deleted from its original download location.`,
+  });
+  markReceivedItemRemoved(item.key);
+  await refresh(container);
+  return true;
+}
+
 function wireReceivedRowActions(container, items, downloadDirectory) {
   const receivedByKey = new Map(
     items.filter((item) => item.kind.startsWith("received-")).map((item) => [item.key, item])
@@ -338,6 +361,7 @@ function wireReceivedRowActions(container, items, downloadDirectory) {
       openButton.addEventListener("click", async () => {
         try {
           const path = await resolveReceivedItemPath(downloadDirectory, item);
+          if (await handleIfReceivedItemMissing(container, item, path)) return;
           const error = await window.relay.openPath(path);
           if (error) throw new Error(error);
         } catch (err) {
@@ -348,6 +372,7 @@ function wireReceivedRowActions(container, items, downloadDirectory) {
 
     row.querySelector(".show-in-folder").addEventListener("click", async () => {
       const path = await resolveReceivedItemPath(downloadDirectory, item);
+      if (await handleIfReceivedItemMissing(container, item, path)) return;
       window.relay.showInFolder(path);
     });
 

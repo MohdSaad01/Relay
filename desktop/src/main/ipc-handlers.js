@@ -83,6 +83,14 @@ function registerIpcHandlers({ backendManager, getMainWindow, quitApp }) {
     return path.join(downloadDirectory, ...segments);
   });
 
+  // P44: lets the renderer detect a stale received file/folder entry (its
+  // resolved path deleted or moved outside Relay) before invoking an
+  // OS-level action (openPath/showInFolder) that's guaranteed to fail on a
+  // missing path. Mirrors the existsSync check shell:deleteItem already uses.
+  ipcMain.handle("fs:pathExists", (_event, targetPath) => {
+    return fs.existsSync(targetPath);
+  });
+
   ipcMain.handle("app:getVersion", () => app.getVersion());
 
   ipcMain.handle("app:getBackendBaseUrl", () => backendManager.baseUrl);

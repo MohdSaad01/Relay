@@ -10077,3 +10077,337 @@ pass; all four defining scenarios (Replace, Make-new, same-identifier
 no-dialog, and the identifier-precedence rule) were confirmed live on the
 physical device via real QR camera scans. Nothing was committed, per this
 milestone's explicit instruction. P43.1 does not start P44.
+
+---
+
+# Milestone P44 — Desktop Stale Downloaded File & Folder Handling
+
+**Scope:** `Pre_Release_Issues.txt` §4 (4.1–4.7). A received file/folder
+(desktop already has one) whose physical copy was later moved or deleted
+outside Relay left the Desktop app in a broken state: Open produced a raw
+`Failed to open path` whole-view error card, Show in Folder silently did
+nothing, and the stale row survived indefinitely, including across tab
+navigation and Refresh. Desktop-side only — no backend or Android change.
+
+## 1. Investigation
+
+Traced the full received-item flow before touching anything:
+
+- **A received item has no backing `SharedFile`/`SharedFolder` row.**
+  `TransferStreamService.receive_upload` only ever writes bytes and updates
+  the `Transfer` row (confirmed by reading that service) — there is no
+  backend "sharing" concept for something the desktop received. This was
+  already established at P21 and remains true; P44 changes nothing about
+  it.
+- **`desktop/src/renderer/receivedFiles.js`'s `buildReceivedItems`**
+  derives every received row from completed `receive` transfers (P21/P28),
+  keyed by `t:${transfer.id}` (file) or `b:${upload_batch_id}` (folder
+  batch) — never by filename. `resolveReceivedItemPath` resolves the
+  on-disk path by joining `app_settings.download_directory` with the
+  transfer's own `file_name` (file) or the batch's root folder name
+  (folder), matching exactly how `TransferStreamService._resolve_upload_
+  final_path` constructed that path on receipt (P26 already verified this
+  round-trip for folder structure).
+- **Neither Open nor Show in Folder ever checked existence.**
+  `desktop/src/renderer/views/files.js`'s `wireReceivedRowActions` called
+  `window.relay.openPath(path)` unconditionally; `ipc-handlers.js`'s
+  `shell:openPath` returns `shell.openPath`'s error string (`"Failed to
+  open path"` for a missing target) rather than throwing, and the renderer
+  fed that straight into `renderError(container, err)` — a *whole-view*
+  replacement (the same primitive P32 had already flagged as wrong for a
+  single-row failure, but P32 scoped its fix to Shared Files' Refresh
+  only, not Open). `shell:showInFolder` just called
+  `shell.showItemInFolder(filePath)` and returned nothing — Electron/
+  Windows silently no-ops on a missing path, so the button did nothing
+  with no signal to the renderer at all.
+- **Git history / prior-fix search:** P29 added exactly this kind of
+  missing-path tolerance, but only for `shell:deleteItem` (treats a
+  missing target as a no-op success) — confirmed Delete already handled a
+  since-deleted received item gracefully (no dialog, but no crash either);
+  it was never extended to Open/Show in Folder. P30 established
+  `confirmDialog` as the one Desktop dialog primitive but it is
+  confirm/cancel-shaped — no existing "just tell the user something"
+  variant existed. No prior milestone attempted an existence check before
+  Open/Show in Folder; this was a genuine unhandled gap, not a regression.
+
+## 2. Reproduction (baseline, pre-fix)
+
+Reproduced against the real Electron app (`electron . --remote-debugging-
+port`, driven over the real Chrome DevTools Protocol — real backend, real
+filesystem, real UI, automated clicks instead of a mouse) before writing
+any fix, using `git stash` to isolate the pre-fix source:
+
+1. Real upload from the physical device (RMX3997, via ADB — see §8) of a
+   disposable `relay_p44_test.txt`, landing in the real
+   `download_directory` and producing a real `receive`/`completed`
+   `Transfer` row.
+2. Confirmed Open worked normally while the file was present.
+3. Deleted the file externally (`rm`, equivalent to Explorer's Delete).
+4. Open →`#view-container` innerText was exactly **`Failed to open
+   path`** — the whole Shared Files view replaced by a bare error card,
+   confirmed both via CDP text inspection and a `Page.captureScreenshot`
+   image.
+5. Navigated away and back to Shared Files: the stale row was still
+   there, unchanged — matches the report's "user can switch tabs, return,
+   press Open again, same error."
+6. Show in Folder on the same missing file: no dialog, no error, row
+   count unchanged before/after — a genuine silent no-op.
+
+Both symptoms reproduced exactly as described. No simulation — real app,
+real deleted file, real click via CDP.
+
+## 3. Root cause
+
+Two Desktop IPC actions (`shell:openPath`, `shell:showInFolder`) were
+invoked with a received item's resolved path with no existence check
+first, and their failure modes were each wrong for a different reason:
+`openPath`'s error string was fed into the whole-view `renderError`
+(P32's "row error, not whole-view" lesson never applied here); `showInFolder`
+returns nothing at all, so Electron's own silent no-op propagated straight
+to the user with zero feedback. Neither ever removed the stale entry
+because neither knew the target was missing in the first place.
+
+## 4. Architecture decision — smallest correct fix, no new registry
+
+- **No new identity/registry mechanism.** `receivedFiles.js`'s existing
+  `key`s (transfer-id/batch-id, not filename) already correctly protect
+  removal from ever affecting an unrelated same-named item (verified live,
+  §6). `resolveReceivedItemPath` already derives the correct path from
+  data the backend already persists. P44 needed a new *check*, not new
+  *state*.
+- **New IPC channel `fs:pathExists`** (`ipc-handlers.js`, `preload.js`) —
+  a thin `fs.existsSync` wrapper, mirroring the pattern `shell:deleteItem`
+  (P29) already established for the same kind of check, exposed as
+  `window.relay.pathExists(path)`.
+- **New dialog primitive `alertDialog`** (`desktop/src/renderer/dialog.js`)
+  — a single-button, non-confirmation sibling of P30's `confirmDialog`,
+  reusing the exact same backdrop/card/button-row markup and CSS classes
+  (no new CSS). Needed because telling the user "this file is gone" is not
+  a yes/no confirmation — `confirmDialog` always renders a Cancel button,
+  which has no meaning here.
+- **`files.js`'s new `handleIfReceivedItemMissing(container, item, path)`**
+  is the one place both Open and Show in Folder now route through: checks
+  `pathExists`, and if false, shows `alertDialog` with item-type-aware
+  wording ("File unavailable" / "Folder unavailable"), calls the existing
+  `markReceivedItemRemoved(item.key)` (P21's local-only removal marker —
+  unchanged, reused as-is), and calls the existing `refresh(container)`.
+  Returns a boolean so each caller can bail out before doing its own
+  normal-path action. Present-path behavior (the overwhelming majority of
+  clicks) is byte-for-byte the same as before — one extra `await
+  window.relay.pathExists(path)` that resolves `false`→proceed unchanged.
+- **Currently-shared source files/folders (`file`/`folder` kind,
+  `wireSharedRowActions`) were not touched at all** — P32's existing
+  scoped-row-error Refresh handling remains the sole missing-source
+  mechanism for that entirely separate case, confirmed still firing
+  unchanged (§6).
+
+## 5. Files changed
+
+- `desktop/src/main/ipc-handlers.js` — added `fs:pathExists` handler.
+- `desktop/src/preload/preload.js` — exposed `pathExists`.
+- `desktop/src/renderer/dialog.js` — added `alertDialog`.
+- `desktop/src/renderer/views/files.js` — added
+  `handleIfReceivedItemMissing`; Open and Show in Folder handlers in
+  `wireReceivedRowActions` now call it before their normal action.
+
+No backend or Android change. No change to `receivedFiles.js`,
+`transferHistory.js`, `transferGrouping.js`, or `wireSharedRowActions`.
+
+## 6. Automated / static checks
+
+No Electron UI test framework exists in this repo (confirmed by search —
+consistent with `CLAUDE.md`'s standing note that Desktop has no
+established test suite). Ran what the project's own conventions call for:
+
+- `node --check` (main-process files) / `node --input-type=module
+  --check` (ES modules) on all four modified files — all pass.
+- Backend test suite untouched and not re-run in full (no backend code
+  changed); a live backend was used throughout for real API traffic (see
+  §7).
+
+## 7. Physical / live verification — RMX3997
+
+All of the following used the real physical Android device (RMX3997, USB/
+ADB — reachable over the same phone-hotspot LAN topology P39/P41 already
+established: phone hosting the hotspot at `10.93.152.58`, this machine at
+`10.93.152.233`), the real dev backend (`uvicorn`, not mocked), and the
+real Electron app, driven via CDP (`Runtime.evaluate`/`Page.captureScreenshot`
+over the DevTools Protocol — real clicks dispatched into the real running
+renderer, not a simulation) since no human was present to operate a mouse
+during this session. Screenshots for every step below were captured via
+`Page.captureScreenshot` (CDP-driven; OS-level `PrintWindow` capture was
+tried first and produced stale/incorrect frames against this GPU-composited
+Chromium window, so it was abandoned in favor of asking Chromium to render
+its own screenshot).
+
+- **Real upload from RMX3997** (Transfers tab → Upload a File → system
+  picker → the P26 upload-confirm sheet → Upload) of a disposable file,
+  confirmed as a real `receive`/`completed` `Transfer` row and a real file
+  on disk in `C:\Users\Saad\Downloads`.
+- **Present-file Open**: no dialog, no error, file opens normally (existing
+  behavior byte-for-byte unchanged).
+- **Present-file Show in Folder**: no dialog, no error (existing behavior
+  unchanged).
+- **Missing-file Open** (file deleted externally, matching the report's
+  "user manually deletes... from Windows/File Explorer"): dialog reads
+  **"File unavailable — This file was moved or deleted from its original
+  download location."**, single OK button, styled with the exact P30
+  card/button language. Confirming OK removed the stale row (Shared Files
+  fell back to its empty state) without any other row being touched.
+- **Missing-file Show in Folder** (second disposable upload, deleted
+  externally): same dialog, same clean removal — confirms the fix covers
+  both actions independently, not just Open.
+- **Missing-folder Show in Folder**: rather than fight an unrelated Android
+  SAF folder-picker flake hit mid-session (`android/`'s system folder
+  picker returned "Could not open the folder picker" across several
+  ADB-driven attempts — a picker/automation issue, not a Desktop or P44
+  regression; not pursued further since it's out of this milestone's
+  scope), reused a **real, already-existing stale folder** from prior
+  milestones' own physical-device verification (batch
+  `0ed83953-bc8f-47c7-8092-a676d0ef3f3d`, root folder `RelayTest`,
+  genuinely uploaded from RMX3997 during earlier testing, its physical
+  directory since removed from this dev machine's Downloads folder) —
+  temporarily reverting the local `historyClearedAt` marker to surface it,
+  then restoring the marker's original value afterward. Dialog correctly
+  read **"Folder unavailable — This folder was moved or deleted from its
+  original download location."**; confirming OK removed only that one row
+  (18 → 17 received rows, every other row unaffected).
+- **Duplicate-name edge case** (`Pre_Release_Issues.txt` §13's own ask,
+  built deliberately since no natural duplicate existed in the dev data):
+  uploaded `relay_p44_dup.txt` (transfer A), deleted it externally,
+  uploaded a second `relay_p44_dup.txt` (transfer B) — confirmed the
+  backend's `resolve_available_path` collision check is disk-state-based,
+  not history-based, so B legitimately reused A's exact former filename
+  and path once A's file was gone. Deleted B via the UI (its Delete
+  dialog, its own local-removal marker) — confirmed A's separate row
+  was untouched by B's removal. Then clicked Open on A: correctly showed
+  the missing-file dialog (the shared path really was empty by that
+  point) and removed only A's row (18 → 17), leaving every other
+  unrelated row alone.
+- **Regression sweep**: Devices, Pairing, Settings, Transfers, and Shared
+  Files views all loaded cleanly after the fix (no console exceptions,
+  confirmed via CDP `Runtime.exceptionThrown` monitoring during the whole
+  session).
+- **P32 boundary check** (currently-shared source file, not received): a
+  disposable file shared via a direct `POST /files` call (equivalent to
+  Add Files...) — Show in Folder and Refresh both worked normally while
+  present; after deleting the source externally, Refresh correctly showed
+  P32's own pre-existing row-scoped error ("This item's source could not
+  be found...") — confirming P44's new dialog path is never taken for this
+  entirely separate, already-correct case.
+
+One test-tooling artifact worth noting for anyone repeating this style of
+verification: a couple of earlier CDP round-trips that appeared to report
+"no dialog" (a race between separate short-lived WebSocket connections)
+had in fact each opened one `alertDialog` instance that was never
+dismissed, since dialogs are appended to `document.body` and survive view
+navigation — they became visible again on a later screenshot. Not an app
+defect (a real user only ever triggers one dialog per click); resolved by
+switching to a single long-lived CDP connection per verification step and
+explicitly clearing any stray `.dialog-backdrop` elements before
+continuing.
+
+## 8. Transfer History preservation (mandatory verification)
+
+Checked directly against `backend/relay.db` after every removal above —
+in every case, the `Transfer` row (`id`, `status`, `file_name`, `file_size`,
+`completed_at`) was **byte-for-byte unchanged**, confirming the fix only
+ever touches the Desktop-local `removedReceivedKeys` marker, never backend
+state:
+
+```
+(1381, 'completed', 'relay_p44_test.txt')   -- missing-file Open case
+(1382, 'completed', 'relay_p44_test2.txt')  -- missing-file Show-in-Folder case
+(1383, 'completed', 'relay_p44_dup.txt')    -- duplicate-name case, item A
+(1384, 'completed', 'relay_p44_dup.txt')    -- duplicate-name case, item B
+```
+
+The Transfers tab was also visually confirmed still showing the
+`relay_p44_test.txt` row as `Completed`/100% after its Shared Files entry
+had already been removed — the two views are genuinely independent, as
+designed since P21.
+
+## 9. Cleanup
+
+- All disposable device-side files/folders removed via ADB
+  (`relay_p44_test.txt`, `relay_p44_test2.txt`, `relay_p44_dup.txt`,
+  `relay_p44_folder/`).
+- All disposable Desktop-side downloaded copies removed from the real
+  `C:\Users\Saad\Downloads` — confirmed the folder now contains only the
+  user's pre-existing real files (`Aadhar_appointment.PNG`,
+  `Acknowledgement - ....pdf`, `Khalid/`, `desktop.ini`), nothing added by
+  this session.
+- The disposable shared-source-file test (`relay_p44_shared_source.txt`,
+  §7's P32 boundary check) was unshared via `DELETE /files/1`; its
+  `shared_files` table is empty again.
+- The `historyClearedAt` localStorage marker (a pre-existing dev-only
+  convenience value from earlier milestones' manual testing, unrelated to
+  any real user) was restored to its original value after the missing-
+  folder test needed it temporarily cleared.
+- The four `Transfer` rows created by this session's real uploads
+  (1381–1384) were **not** deleted — `TransferRepository` has no delete
+  method by design (`docs/13_Database_Design.md` §7/§10), and this is the
+  same precedent every prior milestone's live-verification session has
+  already left in this dev database (e.g. P26/P28/P41's own test
+  transfers, still present).
+- Backend and Electron dev processes stopped; no orphaned processes or
+  port listeners remained afterward (`netstat`/`tasklist` confirmed).
+
+## 10. Limitations / deferred (explicitly, not silently)
+
+- **Two received items can legitimately share one on-disk path if the
+  same filename is uploaded twice with a deletion in between** (§7's
+  duplicate-name test made this concrete). This is a pre-existing
+  characteristic of how `resolve_available_path` resolves collisions
+  (disk-state-at-receipt-time, not full history) and how
+  `resolveReceivedItemPath` derives a path from `file_name` rather than a
+  stored unique path — it predates P44 and is unchanged by it. The
+  practical effect: if item A's file is deleted and item B (same name)
+  is later received into the now-free path, clicking Open/Show in Folder
+  on the *stale* item A while B is still present will resolve `pathExists`
+  as true (B's file occupies that path) and open/reveal B's file under
+  A's row — no worse than the pre-P44 behavior (which had no existence
+  check at all and would do the same), but not something P44 fixes either.
+  Once B's file is actually gone too, A's row correctly resolves to
+  missing on its next interaction (verified live, §7). Fixing this
+  properly would require the backend to persist a stable per-transfer
+  physical path rather than deriving one from `file_name` — a real change
+  beyond this milestone's "smallest correct fix" scope; flagged here for a
+  future milestone rather than attempted now.
+- **The Android folder-upload SAF picker flaked during this session**
+  ("Could not open the folder picker", reproduced across several
+  ADB-driven attempts) — investigated only far enough to confirm it is an
+  Android system-picker/automation interaction issue, not a Desktop or
+  backend regression (folder uploads have been re-verified working at
+  P26/P41 through the real UI). Not pursued further as it is unrelated to
+  P44's Desktop-only scope; worth a note for whoever next drives Android
+  uploads via ADB automation.
+- Everything else P44 set out to fix (4.1–4.5) is fully resolved and
+  live-verified; no other gaps identified.
+
+## 11. Suggested commit message
+
+```
+fix(desktop): handle missing received files/folders in Shared Files (P44)
+
+Open and Show in Folder on a received item now check the resolved path's
+existence before invoking shell.openPath/showItemInFolder. A missing
+path shows a new alertDialog ("File/Folder unavailable...") instead of a
+raw "Failed to open path" whole-view error or a silent no-op, and marks
+the stale entry removed via the existing P21 local-removal marker —
+Transfer History is never touched. Adds fs:pathExists (ipc-handlers.js/
+preload.js) and alertDialog (dialog.js, a single-button P30 sibling).
+Verified live on RMX3997 against real uploads, deletions, and a
+deliberately constructed duplicate-filename case.
+```
+
+**P44 — FIX COMPLETE AND LIVE-VERIFIED.** Root cause (no existence check
+before two Desktop IPC actions) addressed with the smallest correct fix —
+one new IPC channel, one new dialog variant, one shared helper function —
+reusing every existing identity/removal/history mechanism unchanged. All
+four required scenarios (missing-file Open, missing-file Show in Folder,
+missing-folder Show in Folder, and the constructed duplicate-name case)
+were confirmed live against the real Desktop app, a real backend, and the
+physical RMX3997 device, with Transfer History proven byte-for-byte
+unchanged after every removal. Nothing was committed, per this milestone's
+explicit instruction. P44 does not start P45.

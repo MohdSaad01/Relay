@@ -32,9 +32,13 @@ first real-world validation pass has been fixed and physically verified
 a follow-up UX gap it deliberately left open — a stale Desktop device row
 colliding by name with a freshly reinstalled phone — also resolved and
 physically verified (P43.1 — see "Device Name Collision & Re-Pairing
-Resolution (P43.1)" below);
-**the packaged Desktop backend and installer still need to be rebuilt
-with both fixes before they reach an actual installed product.** What
+Resolution (P43.1)" below); a separate Desktop defect where a received
+file/folder deleted outside Relay left a stale, broken Shared Files entry
+has also been fixed and physically verified (P44 — see "Desktop Stale
+Received-Item Handling (P44)" below).
+**The packaged Desktop backend and installer still need to be rebuilt
+with all three fixes (P43, P43.1, P44) before they reach an actual
+installed product.** What
 remains otherwise is the items listed under
 [Not Yet Implemented](#not-yet-implemented) (real production signing
 identities, Windows code signing) — see `README.md` for the project-level
@@ -1298,6 +1302,62 @@ pairing time. Do not add a `UNIQUE` constraint without a concrete new
 requirement beyond what P43.1 already solves.
 
 Do not begin P44 automatically — it remains its own milestone, reviewed
+before starting, per this file's Git Workflow rules.
+
+## Desktop Stale Received-Item Handling (P44)
+
+**A received file/folder shown in Shared Files is derived state (P21),
+never authoritative state — its physical path can go stale (moved or
+deleted outside Relay) independently of the `Transfer` row it was derived
+from, and any Desktop action that touches that physical path must check
+it exists before acting, not after failing.** `desktop/src/renderer/views/
+files.js`'s `handleIfReceivedItemMissing(container, item, path)` is the
+one place Open and Show in Folder both route through: it calls the new
+`window.relay.pathExists(path)` IPC channel (`fs:pathExists`,
+`ipc-handlers.js`/`preload.js`, a thin `fs.existsSync` wrapper mirroring
+the check `shell:deleteItem` already used for the same purpose since P29)
+before invoking `shell.openPath`/`shell.showItemInFolder`. A missing path
+shows the new `alertDialog` (below) and marks the item removed via the
+existing P21 `markReceivedItemRemoved` marker — never the backend
+`Transfer` row, which is permanent history by design and was verified
+byte-for-byte unchanged after every removal. Any future Desktop action
+that opens/reveals/reads a received item's physical path must route
+through this same existence-check-first shape rather than reacting to the
+OS call's own failure mode after the fact.
+
+**`desktop/src/renderer/dialog.js`'s `alertDialog({ title, message,
+okLabel })` is a new sibling to P30's `confirmDialog` — a single-button,
+non-confirmation dialog for telling the user something that already
+happened, rather than asking them to approve an action.** It reuses
+`confirmDialog`'s exact backdrop/card/button-row markup and CSS classes
+(no new CSS), resolving once acknowledged (OK, Escape, or a backdrop
+click). `confirmDialog` always renders a Cancel button and is the wrong
+shape for a pure notice — any future Desktop "just tell the user" moment
+(as opposed to a yes/no confirmation) should use `alertDialog`, not stretch
+`confirmDialog` to fit or reach for a raw `window.alert()` (unimplemented
+in this Electron build in any case, per P29).
+
+**A received item's stale-vs-present identity was already fully solved by
+P21's transfer-id/batch-id keys (`t:${id}`/`b:${upload_batch_id}`) —
+P44 needed a new existence *check*, not a new identity *registry*.**
+Verified live (including a deliberately constructed case: two received
+files uploaded with the identical name, the first deleted before the
+second arrived) that removing one stale entry never affects an unrelated
+entry, even one sharing the same display name. One real architectural
+edge case was found and deliberately left unfixed, documented rather than
+silently accepted: because `resolveReceivedItemPath` derives a received
+item's path from its `file_name` (not a stored unique path), two received
+items can legitimately resolve to the *same* physical path if a filename
+is reused after its original file was deleted — in that narrow window, the
+older (stale) item's row will resolve as "present" against the newer
+item's file. This predates P44 and is not worsened by it (there was no
+existence check at all before); fixing it properly would require the
+backend to persist a stable per-transfer physical path rather than
+deriving one from `file_name`, which is out of this milestone's smallest-
+fix scope. See `docs/15_QA_NOTEBOOK.md`'s P44 entry for the full
+investigation and live-verification detail.
+
+Do not begin P45 automatically — it remains its own milestone, reviewed
 before starting, per this file's Git Workflow rules.
 
 ## Documentation

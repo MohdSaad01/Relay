@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("relay", {
   deleteItem: (targetPath) => ipcRenderer.invoke("shell:deleteItem", targetPath),
   resolveDownloadPath: (downloadDirectory, segments) =>
     ipcRenderer.invoke("fs:resolveDownloadPath", downloadDirectory, segments),
+  pathExists: (targetPath) => ipcRenderer.invoke("fs:pathExists", targetPath),
 
   getVersion: () => ipcRenderer.invoke("app:getVersion"),
   getBackendBaseUrl: () => ipcRenderer.invoke("app:getBackendBaseUrl"),

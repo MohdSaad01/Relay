@@ -32,19 +32,24 @@ a feature-complete system, plus final packaging.
 
 # 3. Current Status Snapshot
 
-- **Relay V1 is feature-complete** and was declared a Release Candidate at T9.
-- **Backend:** 343 tests passed, 2 skipped (`pytest`); `ruff check` clean.
-- **Android:** 365 tests / 42 suites passed (`npx jest`); `tsc --noEmit`
-  clean; `eslint` clean (4 pre-existing, unrelated warnings — see P35).
+- **Relay V1 is feature-complete** and was declared a Release Candidate at
+  T9; the product-polish/UI-UX pass (P19–P36), further defect fixes
+  (P29/P37), and packaging/release (P38–P45) that followed are all
+  complete too — see §5a.
+- **Backend:** 376 tests passed, 2 skipped (`pytest`, as of P43.1);
+  `ruff check` clean.
+- **Android:** 367 tests passed (`npx jest`, as of P43.1); `tsc --noEmit`
+  clean; `eslint` clean (a handful of pre-existing, unrelated warnings —
+  see P35).
 - **Desktop:** no automated test suite exists for the plain-JS renderer
   (unchanged since T1) — verified throughout by manual/live testing and
   `node --check`.
-- **Packaging (T8) is now complete** — a PyInstaller backend bundle (P38),
-  an NSIS Electron installer (P39), and a release APK (P40) all exist and
-  were verified together end-to-end (P41). Neither artifact is
-  code-signed, and Android's release signing identity is still a local
-  verification keystore rather than a final production one — see
-  `docs/12_Packaging_Deployment.md`.
+- **Packaging is complete** — a PyInstaller backend bundle (P38), an NSIS
+  Electron installer (P39), and a release APK (P40) all exist and were
+  verified together end-to-end (P41), then rebuilt with every fix through
+  P45 and re-verified. Neither artifact is code-signed, and Android's
+  release signing identity is still a local verification keystore rather
+  than a final production one — see `docs/12_Packaging_Deployment.md`.
 - **Outstanding:** a handful of accepted V1-scope limitations — see §6.
 
 All live-device verification in this document and in the QA notebook was
@@ -161,13 +166,16 @@ feature-complete / a Release Candidate.** Result: 293 passed, 2 skipped.
 
 ---
 
-# 5. Product-Polish & Reliability Milestones (P1–P17)
+# 5. Product-Polish & Reliability Milestones (P1–P18)
 
 Scoped, targeted passes after T9 — mostly Android UX/reliability, some
 backend-only. Sub-milestones (`P8.1`, `P9.1`, `P13.1`–`P13.3` + its
 correction, `P14.1`–`P14.4`) are numbered continuations of their parent and
 are tracked with full detail only in the QA notebook; outcomes are
-summarized here. All are **Completed** unless noted.
+summarized here. All are **Completed** unless noted. P18 closes this phase
+(a stabilization checkpoint, not a further defect pass); §5a below
+continues the numbering through the UI/UX and packaging milestones that
+followed.
 
 #### P1 — Upload auto-accept (backend/Android/desktop)
 
@@ -472,24 +480,223 @@ overlay). Full detail in `docs/15_QA_NOTEBOOK.md`'s P18 entry.
 
 ---
 
+# 5a. Product-Polish, UI/UX & Packaging Milestones (P19–P45)
+
+P18 closed stabilization; everything from here on is UI/UX finishing work
+(`docs/issues/New_Issues.txt`, implemented across P19–P36), a further
+defect-fix pass (P29/P37), and packaging/release (P38–P45,
+`docs/12_Packaging_Deployment.md`). All are **Completed**. Full
+investigation/verification detail lives in `docs/15_QA_NOTEBOOK.md`'s
+same-numbered entry; these are outcome summaries only.
+
+#### P19 — Desktop foundation & navigation
+Reworked Desktop's visual foundation (`New_Issues.txt` §1.1–1.5): shared
+`pageHeader()`/`emptyState()` primitives, a CSS design-token set, open-text
+nav with a hover/active underline, and pairing-state-aware startup routing
+(Pairing tab when unpaired, Devices otherwise).
+
+#### P20 — Desktop pairing & QR UX
+Redesigned every Pairing-tab state (idle/waiting/review/decided) with icon
+badges, a two-column QR layout, a live pulsing waiting indicator with a
+client-side Cancel, and outcome-aware success/rejected styling
+(`New_Issues.txt` §1.4, §1.6). No pairing-protocol change.
+
+#### P21 — Desktop Files & Transfers UX
+Added Clear History (client-side marker — the backend has no transfer-delete
+route by design), human-readable file-type/folder-count display (replacing
+raw MIME types), a received-file/folder view inside Shared Files (derived
+from completed `receive` transfers, never a new backend row), and Delete
+(trash + unshare for sent items; trash + local marker for received items).
+
+#### P21.1 — Android folder download flicker & transfer grouping
+Fixed a folder's Files-screen status briefly regressing to "Download" right
+before "Open" (a reconciliation-timing race), and added folder-level
+grouping to Android's Transfers tab (one row per folder operation,
+mirroring Desktop's existing grouping).
+
+#### P21.2 — Folder download button state regression
+At 100-file folder scale, the per-child startup gap in
+`TransferStreamManager.start()` made the folder button flicker between
+"Downloading..." and "Queued" continuously. Fixed by treating a folder as
+"underway" from its first completed/active child onward.
+
+#### P22 — Android Files screen & file actions UX
+Added per-state long-press actions (Open/Share/Delete for a completed item;
+Remove/Details otherwise), a new `react-native-share` dependency for real
+`ACTION_SEND` sharing, and a shared `metadataFormat.ts` fixing the
+file/folder meta-line's MIME-type/ordering inconsistency (`New_Issues.txt`
+§5, §12).
+
+#### P23 — Android Settings, navigation & app identity
+Added an editable device display name (`PATCH /devices/{id}`, the one
+dual-audience `/devices` route — a device may rename only itself),
+hand-drawn SVG bottom-nav icons, a real launcher icon, and moved Clear
+History into the native header (`New_Issues.txt` §3, §13–§15).
+
+#### P24 — Android device discovery & QR pairing UX
+Made a discovered-device row tappable (jumps into the existing QR scanner,
+with a best-effort IP/port match check) and added a camera-permission
+state machine with an "Open Settings" path for a permanently-blocked
+permission.
+
+#### P25 — Desktop Settings & application chrome
+Removed the user-facing session-token-lifetime control (the backend
+setting itself is unchanged), added a matching Desktop app icon, and
+removed Electron's default File/Edit/View/Window menu bar outright.
+
+#### P26 — Upload & file/folder selection UX
+Added a bottom-sheet upload-confirmation step between picking a file/folder
+and actually proposing the transfer. Re-verified (no defect found) that
+folder-upload structure is already preserved end-to-end.
+
+#### P27 — Desktop navigation, devices & overall UX
+Re-verified several items an older issue list described as broken were
+already fixed by P19–P21. Added icon-led empty states across
+Devices/Files/Transfers and an inline icon-badge variant for a device
+card's title.
+
+#### P28 — History & listing semantics
+Extended Shared Files' and Android Files' own "Clear History" to reuse the
+exact same marker/cutoff as each platform's Transfers "Clear History,"
+rather than a second history concept.
+
+#### P29 — Desktop Shared Files lifecycle & device rename
+Issue A: `shell:deleteItem` now treats an already-missing target as a
+no-op success instead of propagating a raw failure. Issue B: added inline
+device rename — discovered along the way that `window.prompt()` is
+unimplemented in this Electron build and that the `hidden` attribute loses
+to an existing CSS `display` rule.
+
+#### P29.1 — Desktop device rename edit-state lifecycle fix
+P29's rename fix used `element.style.display`, which the renderer's CSP
+(`style-src 'self'`) silently ignores — the form stayed visible regardless
+of state. Fixed with a CSS class toggle; the identical bug was found
+pre-existing in Transfers' progress bar (fixed later in P33).
+
+#### P30 — Application-wide dialog & confirmation UX
+Added `confirmDialog()` (Desktop) and `AppDialog`/`useAppDialog()`
+(Android) as the one path for every confirmation prompt on each platform,
+replacing `window.confirm()`/`Alert.alert()`.
+
+#### P31 — Product UI/UX audit & finishing backlog
+A full audit (not a fix pass) against `New_Issues.txt`, producing the
+prioritized P32–P36 backlog below — most items were already implemented.
+
+#### P31.1 — Android `[QR-DEBUG]` console error cleanup
+Removed the last of the `[QR-DEBUG]` debug logging (flagged since P8.1)
+after it surfaced as a React Native Console Error overlay on an
+already-handled network failure.
+
+#### P32 — Desktop table hardening
+Fixed an unbounded-width table column with `table-layout: fixed` plus
+explicit column widths/truncation, and made a single row's action failure
+fail into a row-scoped error instead of blanking the whole view.
+
+#### P33 — Desktop transfer progress & feedback
+Replaced the transfer progress bar's CSP-blocked `style="width:...%"`
+(same bug class as P29.1) with a native `<progress>` element.
+
+#### P34 — Cross-platform visual consistency
+Replaced a raw folder emoji in Desktop's Shared Files rows with the app's
+SVG folder icon, and made Desktop's Clear History trigger button
+red/destructive to match Android's existing treatment.
+
+#### P35 — Android visual polish & consistency
+Replaced folder-row emoji literals with the app's SVG folder icon across
+Files/Transfers/FileActionMenu, and standardized Android's one
+destructive/error color to `#dc2626` everywhere.
+
+#### P36 — App icon geometry refinement
+Widened the gap between the two-opposing-arrows glyph's closest chevron
+tips (previously exactly tangent) across every icon asset.
+
+#### P37 — Production readiness & packaging audit
+Audit-only, no code changed. Found two real packaging blockers: Android's
+release build silently blocks cleartext LAN traffic unless explicitly
+permitted, and signs with the debug keystore. Recommended PyInstaller
+`--onedir` (backend) and `electron-builder`/NSIS (Desktop).
+
+#### P38 — Backend production bundle
+Built a real, verified, self-contained `relay-backend.exe` (PyInstaller
+`--onedir`) — confirmed running with no Python/pip/venv present. Pinned
+all backend dependencies into a three-way split (production/dev-test/
+build-only).
+
+#### P39 — Windows desktop installer
+Added `electron-builder` (NSIS, per-user install, no admin rights). Wired
+P38's backend bundle in via `extraResources`. Fixed a real latent bug:
+`Settings.PORT` never reflected the port Electron actually passed the
+backend.
+
+#### P40 — Android release APK & production build
+Fixed two real, confirmed-live release blockers: cleartext LAN traffic
+silently blocked by Android's release-build network security defaults, and
+release signing falling back to the debug keystore. The signing identity
+used is explicitly a local verification keystore, not a production one.
+
+#### P41 — Packaged end-to-end release validation
+Verified the real packaged installer, its bundled backend, and the Android
+release APK together over a genuine phone-hotspot LAN. No release blockers
+found. One non-blocking defect found and left unfixed by design: Android's
+Transfers screen doesn't re-read the shared Clear History marker on focus.
+
+#### P42 — Repository, product & documentation cleanup
+Repository/documentation hygiene pass — no application behavior changed.
+Removed two files proven obsolete via git history; archived (not deleted)
+`New_Issues.txt`, since dozens of live citations reference it by section
+number; corrected stale "packaging not yet done" language elsewhere in
+`docs/`.
+
+#### P43 — Device lifecycle & re-pairing correctness
+Fixed the root cause of Desktop's Devices tab accumulating duplicate rows
+for the same phone: Android was regenerating `device_identifier` on every
+pairing attempt instead of persisting it once per install. The backend now
+reconciles a matching identifier onto the existing `Device` row instead of
+rejecting or duplicating it.
+
+#### P43.1 — Device name collision & re-pairing resolution
+Resolved the one case P43 left open: a genuine Android reinstall
+(correctly, a new identity) resubmitting the same device name collides
+with Desktop's stale old row. Desktop now shows a Replace/Make-new choice;
+identifier match still always takes precedence over a name collision.
+
+#### P44 — Desktop stale downloaded file & folder handling
+Fixed Open/Show in Folder on a received item whose physical copy was
+deleted outside Relay — both now check existence first and show a clear
+dialog plus remove the stale row. Transfer history (backend-permanent) is
+never touched.
+
+#### P45 — Desktop packaging & branding metadata
+Fixed six real packaging/branding defects: shortcut/Control Panel comment
+text, missing Publisher/Company metadata, the Android launcher name
+("RelayMobile" → "Relay"), and an installer progress-bar backward jump
+(root-caused to NSIS's default solid-7z packaging; fixed via
+`compression: "store"`).
+
+---
+
 # 6. Current Known Open Items
 
-As of P18, the following are the genuinely unresolved or accepted items —
-everything else found during T1–P18 has been fixed and verified. See the
-named milestone in `docs/15_QA_NOTEBOOK.md` for full detail on any entry.
+As of P45, the following are the genuinely unresolved or deliberately
+accepted items — everything else found during T1–P45 has been fixed and
+verified. See the named milestone in `docs/15_QA_NOTEBOOK.md` for full
+detail on any entry.
 
+- **Neither the Windows installer nor the Android APK is code-signed**
+  (out of scope for V1), and Android's release signing identity is a local
+  verification keystore, not a final production one (P40).
+- **Windows Firewall's first-run consent prompt has never appeared** in
+  this development environment (P39, P41) — unconfirmed on a genuinely
+  fresh end-user machine, not known to be broken.
+- **Android's Files and Transfers screens share one Clear History marker
+  but don't live-sync it** — clearing history from Files doesn't
+  retroactively filter an already-mounted Transfers screen until it's
+  cleared there too or the app restarts (P41).
 - **`fileIdentity.ts` has the same `shared_files.id` reuse gap P17 just
   fixed for `folderIdentity.ts`.** `shared_files.shared_at` is already
   available as the same independent signal; not yet wired in. Reachable
   only via an unshare-to-empty-then-reshare sequence, not normal use —
   technical debt, not a blocker (P18).
-- ~~Packaging is unimplemented (T8)~~ — **resolved P38–P41**: a PyInstaller
-  backend bundle, an NSIS Electron installer, and a release APK all exist
-  and were verified together end-to-end. See
-  `docs/12_Packaging_Deployment.md`. Still open: code signing for either
-  platform, and a final (non-verification) Android production keystore.
-- **"Share" (`ACTION_SEND`) is not implemented** on Android (P4, P6) —
-  would require a new native dependency; deliberately out of scope so far.
 - **Byte-identical-size content edits inside a shared folder are
   undetectable** by P13.2's change-detection (no checksum verification —
   explicitly deferred for all of V1, not just folders).
@@ -510,6 +717,19 @@ named milestone in `docs/15_QA_NOTEBOOK.md` for full detail on any entry.
 - Mixed file+folder concurrent queueing was verified functionally but not
   separately re-run live end-to-end (P13.3) — low-risk, same underlying
   queue for both.
+- **Backend/Desktop/Android version strings are not unified** (`0.1.0` /
+  `0.1.0` / `1.0`+`1`) — confirmed cosmetic only, no packaging bug behind
+  it (P45); no shared-version mechanism exists between the two build
+  systems.
+- **A future payload with substantially more compressible content could
+  reintroduce a smaller installer progress-bar mismatch** (P45) — worth
+  re-checking if the packaged payload's composition changes materially.
+
+**Resolved since the P18 snapshot of this section, not to be
+re-investigated:** packaging (P38–P41, see
+`docs/12_Packaging_Deployment.md`); Android `ACTION_SEND` sharing (P22,
+via `react-native-share`); device lifecycle/re-pairing duplication (P43,
+P43.1); stale received-item handling on Desktop (P44).
 
 ---
 

@@ -7,7 +7,9 @@
 > number (e.g. "New_Issues.txt §12") as the rationale for a design
 > decision — deleting it would make those citations unresolvable. Moved
 > from the repository root to `docs/` in P42 as part of repository
-> cleanup; the filename was kept unchanged so existing citations still
+> cleanup, then relocated again to `docs/issues/` during a later
+> documentation cleanup pass to group it with `Pre_Release_Issues.txt`;
+> the filename was kept unchanged both times so existing citations still
 > resolve with a repo-wide search.
 
 # Relay — UI/UX Issues and Required Changes

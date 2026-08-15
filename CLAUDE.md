@@ -1096,9 +1096,11 @@ version-string drift P45 documented rather than resolved (see
   git history and reference search (`scripts/generate_tray_icon.js`, a
   superseded placeholder-icon generator; `android/src/components/
   PlaceholderScreen.tsx`, an unreferenced first-commit scaffold stub).
-  Archived (not deleted) `New_Issues.txt` to `docs/New_Issues.txt` — every
-  item in it is implemented, but 44 live source/QA-notebook citations
-  reference it by exact section number. No dependency was removed (all
+  Archived (not deleted) `New_Issues.txt` to `docs/New_Issues.txt` (later
+  relocated to `docs/issues/New_Issues.txt` during a subsequent
+  documentation cleanup pass) — every item in it is implemented, but 44
+  live source/QA-notebook citations reference it by exact section number.
+  No dependency was removed (all
   investigated, all in genuine use); `.gitignore` confirmed already
   correct; no application source behavior changed. Corrected stale
   "packaging not yet done" language in `docs/12`/`docs/14` and stale test-
@@ -1181,13 +1183,20 @@ methodology, git-history evidence per deletion, dependency audit, doc
 corrections): `docs/15_QA_NOTEBOOK.md`'s P42 entry. Two durable notes for
 future work in this area:
 
-* **`New_Issues.txt` (now `docs/New_Issues.txt`) is archived, not a
-  current requirements source.** Every item in it was implemented across
-  P19–P36. It was moved rather than deleted specifically because dozens
-  of source comments and QA notebook entries cite it by exact section
-  number (`New_Issues.txt §N`) as the rationale for a design decision —
-  any future reference to it should use the new `docs/` path; do not
-  recreate a root-level copy.
+* **`New_Issues.txt` (now `docs/issues/New_Issues.txt`) and
+  `Pre_Release_Issues.txt` (now `docs/issues/Pre_Release_Issues.txt`) are
+  both archived, not current requirements sources.** Every item in
+  `New_Issues.txt` was implemented across P19–P36; every substantive item
+  in `Pre_Release_Issues.txt` (its §1-4; §5 is process guidance, not an
+  issue) was implemented across P43-P45. Both are kept, unedited, rather
+  than deleted, specifically because dozens of source comments and QA
+  notebook entries cite them by exact section number (e.g.
+  `New_Issues.txt §N`, `Pre_Release_Issues.txt §N.N`) as the rationale for
+  a design decision — those citations are bare filenames with no path, so
+  they still resolve with a repo-wide search regardless of which `docs/`
+  subdirectory the file lives in. Any future reference to either file's
+  path should use `docs/issues/`; do not recreate a root-level or
+  `docs/`-root copy.
 * **Before deleting any file that looks unused, search for it by name
   across the whole repo, not just for code imports.** P42's one process
   near-miss was an initial outright deletion of `New_Issues.txt` that had

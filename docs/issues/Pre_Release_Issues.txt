@@ -1,8 +1,20 @@
 # Relay — Pre-Release Issues
 
+> Archived (P45). This was the source requirements document for
+> Milestones P43, P43.1, P44, and P45 (see docs/15_QA_NOTEBOOK.md). Every
+> issue below (sections 1-4) has been implemented and physically
+> verified; nothing here describes current or pending work. Kept, unedited,
+> because source comments and QA notebook entries across desktop/,
+> android/, and backend/ cite it by exact section number (e.g.
+> "Pre_Release_Issues.txt Sec 3.2") as the rationale for a design decision.
+> Section 5 (process rules) was never issue content and remains accurate
+> as general investigation guidance.
+
 This document contains issues discovered during the first real-world validation of packaged Relay builds after clean installation.
 
-Treat this document as the current source of truth for these pre-release issues.
+(Originally: "Treat this document as the current source of truth for these
+pre-release issues" — true when written; superseded by the archival note
+above once P43-P45 closed every item.)
 
 IMPORTANT:
 - Do not implement all issues at once.

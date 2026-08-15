@@ -1,176 +1,52 @@
-# react-native-blob-util Okio Source Contract Violation
+# Upstream defect: react-native-blob-util violates Okio's Source contract
 
-## Background
+## Symptom
 
-Relay uses react-native-blob-util to download files from the backend.
+Relay uses `react-native-blob-util` to download files from the backend.
+During physical-device testing (Milestones P7–P10, see
+`docs/15_QA_NOTEBOOK.md`), downloads failed unpredictably: small files
+usually succeeded, large files often truncated with no exception anywhere
+(not in Java, JS, or OkHttp). The failing file types changed between test
+runs, ruling out MIME type, extension, or backend logic as the cause.
 
-During physical-device testing (P7–P10), downloads appeared to fail randomly.
+## Root cause
 
-Small files usually succeeded.
+The download path traces: FastAPI `StreamingResponse` → OkHttp →
+`ReactNativeBlobUtilFileResp` → `ProgressReportingSource.read()` → file
+output stream → MediaStore.
 
-Large files often truncated without any exception.
+`ProgressReportingSource.read(Buffer sink, long byteCount)` violates
+Okio's `Source` contract: it reads bytes from OkHttp and writes them
+directly to the destination file, then returns the byte count read — but
+never copies those bytes into the `sink` buffer Okio's contract requires.
+Okio expects that if `read()` returns N bytes, `sink` contains those N
+bytes; here `sink` stayed empty. Okio's buffered layer therefore saw an
+empty `sink` after the very first physical socket read and concluded
+end-of-stream — the download silently terminated after one read, with no
+exception thrown at any layer.
 
-The failing file types changed between test runs.
-
-This eliminated MIME type, file extension and backend logic as possible causes.
-
----
-
-## Investigation
-
-The download path was traced end-to-end:
-
-FastAPI
-↓
-
-StreamingResponse
-
-↓
-
-OkHttp
-
-↓
-
-ReactNativeBlobUtilFileResp
-
-↓
-
-ProgressReportingSource.read()
-
-↓
-
-File output stream
-
-↓
-
-MediaStore
-
-Instrumentation showed:
-
-- backend always transmitted the complete file
-- socket stayed healthy
-- no Java exception
-- no JS exception
-- no OkHttp exception
-
-Yet downloads stopped after exactly one physical socket read.
-
----
-
-## Root Cause
-
-The implementation of
-
-ProgressReportingSource.read(Buffer sink, long byteCount)
-
-violated Okio's Source contract.
-
-The implementation:
-
-1. Read bytes from OkHttp.
-2. Wrote them directly to the destination file.
-3. Returned the number of bytes read.
-
-However, it never copied those bytes into the supplied Buffer (`sink`).
-
-Okio expects:
-
-> If read() returns N bytes,
-> the sink must contain those N bytes.
-
-Instead:
-
-returned bytes > 0
-
-sink remained empty
-
-
-Therefore the next buffered read immediately encountered an empty buffer and returned EOF.
-
-The stream terminated after the first socket read.
-
-No exception was thrown.
-
----
-
-## Why failures looked random
-
-Whether the download completed depended entirely on how many bytes happened to arrive during the first operating-system socket read.
-
-If the whole file arrived:
-
-success
-
-Otherwise:
-
-truncated download
-
-Therefore the observed failures correlated with transfer timing and socket behavior rather than file type.
-
----
+**Why failures looked random:** whether a download completed depended
+entirely on how many bytes arrived in that first OS socket read. If the
+whole file arrived in one read, it succeeded; otherwise it truncated. The
+failures correlated with transfer timing/socket behavior, not file type —
+which is why the symptom kept shifting between test runs.
 
 ## Fix
 
-Immediately after writing to the output stream:
+Add the missing `sink.write(bytes, 0, (int) read)` call immediately after
+writing to the output stream, keeping Okio's internal buffer consistent
+with the returned byte count. Applied via `patch-package`:
+`android/patches/react-native-blob-util+0.24.10.patch`, applied
+automatically on every `npm install`.
 
-```java
-sink.write(bytes, 0, (int) read);
-```
+## Verification
 
-This keeps Okio's internal buffer consistent with the returned byte count.
+Verified on RMX3997 (Android 16): 8 real file types (txt, pdf, docx,
+pptx, jpg, png, mp3, zip) and synthetic files from 64 KB–32 MB, multiple
+consecutive transfers, all byte-for-byte correct.
 
-The download loop then continues normally until the real end of the stream.
+## Upgrade note
 
-Persistence
-
-The fix is stored using patch-package.
-
-patches/
-react-native-blob-util+0.24.10.patch
-
-The patch is automatically applied after every npm install.
-
-Verification
-
-Verified on:
-
-RMX3997 (Android 16)
-
-Transfers verified:
-
-txt
-pdf
-docx
-pptx
-jpg
-png
-mp3
-zip
-
-Synthetic files:
-
-64 KB
-
-512 KB
-
-1 MB
-
-2 MB
-
-4 MB
-
-8 MB
-
-16 MB
-
-32 MB
-
-Multiple consecutive transfers completed successfully with byte-for-byte verification.
-
-Upgrade Note
-
-Whenever react-native-blob-util is upgraded:
-
-Check whether this upstream defect has been fixed.
-If fixed, remove the patch.
-Re-run the complete physical-device transfer matrix before deleting the patch.
+Whenever `react-native-blob-util` is upgraded: check whether this
+upstream defect has been fixed; if so, remove the patch — but only after
+re-running the full physical-device transfer matrix above.

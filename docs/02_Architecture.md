@@ -121,10 +121,10 @@ never duplicates a file's bytes unless required to perform a transfer. See
 # 6. API Layer
 
 All communication happens through the backend's REST API, versioned under
-`/api/v1`. See `docs/03_API_Design.md` for conventions and
+`/api/v1`. See `docs/05_API_Design.md` for conventions and
 `backend/README.md` for the full endpoint reference. There is no
 WebSocket layer in Version 1 — transfer progress is polled
-(`GET /transfers/{id}`); see `docs/03_API_Design.md` §11.
+(`GET /transfers/{id}`); see `docs/05_API_Design.md` §10.
 
 ---
 
@@ -178,9 +178,12 @@ Relay/
 ├── LICENSE
 ├── requirements.txt          Backend runtime dependencies
 ├── requirements-dev.txt      Backend dev/test/lint dependencies
+├── requirements-build.txt    Backend build-only dependencies (PyInstaller)
 │
 ├── docs/                    Project specification — source of truth for Version 1
-│   └── upstream/             Notes on upstream (third-party) defects encountered
+│   ├── upstream/             Notes on upstream (third-party) defects encountered
+│   └── issues/               Archived source-requirements documents, superseded but
+│                                cited by section number from source comments/QA notes
 │
 ├── backend/                 FastAPI application
 │   ├── app/
@@ -205,13 +208,11 @@ Relay/
 │   ├── assets/                 Icons (desktop + tray)
 │   └── styles/                 app.css (design tokens, shared components)
 │
-├── android/                 React Native (TypeScript) client
-│   └── src/                   api/, discovery/, pairing/, session/, files/, transfers/,
-│                                streaming/, screens/, navigation/, components/
-│   ├── __tests__/              Jest suite mirroring src/
-│   └── README.md               Android setup, native build notes
-│
-└── scripts/                 Development utilities (e.g. tray icon generation)
+└── android/                 React Native (TypeScript) client
+    ├── src/                   api/, discovery/, pairing/, session/, files/, transfers/,
+    │                            streaming/, screens/, navigation/, components/
+    ├── __tests__/              Jest suite mirroring src/
+    └── README.md               Android setup, native build notes
 ```
 
 `app/websocket/` and a top-level `shared/` directory were part of early

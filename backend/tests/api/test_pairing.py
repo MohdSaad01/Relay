@@ -147,13 +147,18 @@ def test_approved_result_still_collectible_after_new_pairing_started(client: Tes
     assert result_data["session_token"]
 
 
-def test_submit_request_conflicts_for_already_paired_device(client: TestClient) -> None:
+def test_submit_request_reconciles_already_paired_device_instead_of_conflicting(
+    client: TestClient,
+) -> None:
+    """P43: re-pairing with a known device_identifier is not a 409 — it's
+    reconciled onto the same Device row (docs/15_QA_NOTEBOOK.md's P43 entry)."""
     first_token = _start(client)
     _submit(client, first_token)
-    client.post("/api/v1/pairing/approve", json={"pairing_token": first_token})
+    approve_response = client.post("/api/v1/pairing/approve", json={"pairing_token": first_token})
+    first_device_id = approve_response.json()["data"]["id"]
 
     second_token = _start(client)
-    response = client.post(
+    request_response = client.post(
         "/api/v1/pairing/request",
         json={
             "pairing_token": second_token,
@@ -162,5 +167,11 @@ def test_submit_request_conflicts_for_already_paired_device(client: TestClient) 
             "platform": "android",
         },
     )
+    assert request_response.status_code == 200
 
-    assert response.status_code == 409
+    approve_response = client.post("/api/v1/pairing/approve", json={"pairing_token": second_token})
+    assert approve_response.status_code == 200
+    assert approve_response.json()["data"]["id"] == first_device_id
+
+    devices_response = client.get("/api/v1/devices")
+    assert len(devices_response.json()["data"]) == 1

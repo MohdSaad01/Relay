@@ -45,7 +45,11 @@ def get_pending_request(token: str, service: PairingServiceDep) -> ApiResponse:
 
 @router.post("/request", response_model=ApiResponse)
 def submit_pairing_request(body: PairingRequestSubmitRequest, service: PairingServiceDep) -> ApiResponse:
-    """Record an incoming pairing request from a scanning Android device."""
+    """Record an incoming pairing request from a scanning Android device.
+
+    An already-paired device_identifier is accepted here, not rejected
+    (P43) — see PairingService.submit_pairing_request's docstring.
+    """
     attempt = service.submit_pairing_request(
         body.pairing_token, body.device_identifier, body.device_name, body.platform
     )
@@ -54,7 +58,11 @@ def submit_pairing_request(body: PairingRequestSubmitRequest, service: PairingSe
 
 @router.post("/approve", response_model=ApiResponse)
 def approve_pairing(body: PairingApproveRequest, service: PairingServiceDep) -> ApiResponse:
-    """Approve a pending pairing request, registering the device and minting its first session."""
+    """Approve a pending pairing request.
+
+    Registers a new device, or — if this device_identifier is already
+    known — reconciles the existing one onto a fresh session (P43).
+    """
     device = service.approve_pairing(body.pairing_token)
     return success(
         DeviceResponse.model_validate(device).model_dump(mode="json"),

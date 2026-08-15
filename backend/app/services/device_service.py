@@ -55,6 +55,10 @@ class DeviceService:
         """Check whether a device with this identifier has already completed pairing."""
         return self.device_repository.get_by_identifier(device_identifier) is not None
 
+    def get_by_identifier_or_none(self, device_identifier: str) -> Device | None:
+        """Look up an already-paired device by its stable identifier, for re-pairing (P43)."""
+        return self.device_repository.get_by_identifier(device_identifier)
+
     def register_device(
         self,
         *,
@@ -79,3 +83,20 @@ class DeviceService:
             device_secret_hash=device_secret_hash,
         )
         return self.device_repository.create(device)
+
+    def reconcile_device(self, device: Device, *, device_secret_hash: str) -> Device:
+        """Re-pair an already-known device (matching device_identifier, P43).
+
+        Rotates only device_secret_hash — device_name (may have been
+        customized since the original pairing, e.g. via rename_device) and
+        every other field are left untouched, so a re-pair from the same
+        install (a session expiring, or the desktop user removing the
+        device and the same phone re-pairing) never silently reverts a
+        user's rename. The caller (PairingService.approve_pairing) is
+        responsible for invalidating this device's existing sessions in the
+        same transaction — this method only updates the Device row itself.
+
+        Does not commit, matching register_device's convention.
+        """
+        device.device_secret_hash = device_secret_hash
+        return self.device_repository.update(device)

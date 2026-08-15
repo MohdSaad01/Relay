@@ -25,7 +25,7 @@ from app.repositories.device_session_repository import DeviceSessionRepository
 from app.schemas.pairing import PairingQrPayload
 from app.services.app_settings_service import AppSettingsService
 from app.services.device_service import DeviceService
-from app.services.exceptions import ConflictError, NotFoundError, ValidationError
+from app.services.exceptions import NotFoundError, ValidationError
 from app.services.pairing_manager import (
     ApprovedResult,
     PairingAttempt,
@@ -77,13 +77,20 @@ class PairingService:
     def submit_pairing_request(
         self, token: str, device_identifier: str, device_name: str, platform: Platform
     ) -> PairingAttempt:
-        """Record an incoming pairing request from a scanning Android device."""
+        """Record an incoming pairing request from a scanning Android device.
+
+        An already-registered device_identifier is not rejected here (it
+        was, prior to P43) — it is a legitimate re-pair of a device this
+        desktop already trusts (e.g. its session expired, or the desktop
+        user removed it and the same phone is reconnecting), and still
+        requires the same explicit desktop-user approval as a brand new
+        device. approve_pairing decides whether to reconcile the existing
+        Device row or create a new one; see docs/15_QA_NOTEBOOK.md's P43
+        entry for the full reasoning.
+        """
         name = device_name.strip()
         if not name:
             raise ValidationError("Device name cannot be empty.")
-
-        if self.device_service.is_device_registered(device_identifier):
-            raise ConflictError(f"Device {device_identifier} is already paired.")
 
         requesting_device = RequestingDeviceInfo(
             device_identifier=device_identifier, device_name=name, platform=platform
@@ -108,19 +115,41 @@ class PairingService:
         return attempt.requesting_device
 
     def approve_pairing(self, token: str) -> Device:
-        """Approve a pending pairing request: register the device and mint its first session."""
+        """Approve a pending pairing request: register (or re-pair) the device and mint its session.
+
+        If device_identifier already belongs to a known Device (P43 — a
+        re-pair from the same Android install, not a fresh one: its
+        session expired, or the desktop user removed it and the same phone
+        reconnected), the existing row is reconciled in place
+        (DeviceService.reconcile_device — rotates device_secret_hash,
+        preserves device_name/id/paired_at) rather than creating a
+        duplicate. Every session previously issued to that device is
+        invalidated first, so old credentials stop authenticating the
+        moment the new pairing is approved. Otherwise this registers a
+        genuinely new Device, unchanged from before P43.
+        """
         attempt = self.pairing_manager.claim_for_approval(token)
         if attempt is None or attempt.requesting_device is None:
             raise NotFoundError("No pairing request awaiting approval for this token.")
 
         requesting_device = attempt.requesting_device
         device_secret = generate_token()
-        device = self.device_service.register_device(
-            device_identifier=requesting_device.device_identifier,
-            device_name=requesting_device.device_name,
-            platform=requesting_device.platform,
-            device_secret_hash=hash_token(device_secret),
+        existing_device = self.device_service.get_by_identifier_or_none(
+            requesting_device.device_identifier
         )
+        if existing_device is not None:
+            for old_session in self.device_session_repository.list_by_device(existing_device.id):
+                self.device_session_repository.delete(old_session)
+            device = self.device_service.reconcile_device(
+                existing_device, device_secret_hash=hash_token(device_secret)
+            )
+        else:
+            device = self.device_service.register_device(
+                device_identifier=requesting_device.device_identifier,
+                device_name=requesting_device.device_name,
+                platform=requesting_device.platform,
+                device_secret_hash=hash_token(device_secret),
+            )
 
         session_token = generate_token()
         app_settings = self.app_settings_service.get_settings()

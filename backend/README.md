@@ -459,7 +459,7 @@ business logic in this layer.
 |---|---|---|
 | `POST /pairing/start` | 201, 500 | Desktop |
 | `GET /pairing/pending/{token}` | 200, 404 | Desktop |
-| `POST /pairing/request` | 200, 400, 404, 409 | Android |
+| `POST /pairing/request` | 200, 400, 404 | Android |
 | `POST /pairing/approve` | 200, 404 | Desktop |
 | `POST /pairing/reject` | 200, 404 | Desktop |
 | `GET /pairing/result/{token}` | 200, 400, 404 | Android |
@@ -492,6 +492,24 @@ reads until a terminal state is reached.
 between requests the way the per-request `Session` is — `docs/13_Database_Design.md`
 §9 only requires one active pairing attempt at a time, which the manager
 already enforces (`start()` discards any prior attempt).
+
+**Re-pairing an already-known device (P43).** `POST /pairing/request`
+no longer rejects a `device_identifier` that's already paired with `409`
+— it's a legitimate re-pair (the device's session expired, or the desktop
+user removed it and the same phone is reconnecting), and still requires
+the same explicit desktop-user approval as a brand new device. The
+decision belongs to `PairingService.approve_pairing`: if the identifier
+matches an existing `Device` row, it reconciles onto that row
+(`DeviceService.reconcile_device` rotates `device_secret_hash`; every
+session previously issued to that device is deleted first, so old
+credentials stop authenticating the instant the new pairing is approved)
+instead of creating a duplicate. `device_name`/`id`/`paired_at` are left
+untouched by a reconciliation, so a prior rename survives it. A genuinely
+different `device_identifier` (a second physical phone, or the same phone
+reinstalled — Android has no stable identifier that survives an
+uninstall, so a reinstall is correctly a new identity) still registers as
+a new `Device`, unchanged from before P43. Full investigation and
+reasoning: `docs/15_QA_NOTEBOOK.md`'s P43 entry.
 
 ## Shared Files API
 

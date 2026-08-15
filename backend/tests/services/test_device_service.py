@@ -135,3 +135,32 @@ def test_register_device_raises_conflict_when_already_paired(db_session: Session
             platform=Platform.ANDROID,
             device_secret_hash="hashed-secret",
         )
+
+
+def test_get_by_identifier_or_none_returns_none_when_absent(db_session: Session) -> None:
+    service = DeviceService(db_session)
+
+    assert service.get_by_identifier_or_none("unknown-device") is None
+
+
+def test_get_by_identifier_or_none_returns_matching_device(db_session: Session) -> None:
+    service = DeviceService(db_session)
+    device = service.device_repository.create(make_device(identifier="device-1"))
+
+    found = service.get_by_identifier_or_none("device-1")
+
+    assert found is not None
+    assert found.id == device.id
+
+
+def test_reconcile_device_rotates_secret_hash_only(db_session: Session) -> None:
+    service = DeviceService(db_session)
+    device = service.device_repository.create(make_device(identifier="device-1", name="Thomas"))
+    db_session.commit()
+
+    reconciled = service.reconcile_device(device, device_secret_hash="new-hash")
+    db_session.commit()
+
+    assert reconciled.id == device.id
+    assert reconciled.device_name == "Thomas"
+    assert reconciled.device_secret_hash == "new-hash"

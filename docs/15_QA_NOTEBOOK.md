@@ -9378,3 +9378,374 @@ checks (pytest, ruff, tsc, eslint, jest, desktop syntax checks) pass.
 Nothing was committed — the working tree is left ready for review before
 any commit, per this milestone's explicit instruction not to commit
 automatically. P42 does not start P43.
+
+---
+
+# Milestone P43 — Device Lifecycle & Re-Pairing Correctness
+
+**Scope:** `docs/Pre_Release_Issues.txt` §3 (3.1–3.7) — a real, physically
+observed defect where the Desktop Devices list accumulates duplicate
+entries for what is logically the same Android phone across reinstalls
+and re-pairs. Investigation-first: trace the actual device-identity model
+end to end (backend + Android + Desktop), determine what's supposed to
+survive what lifecycle event, find the real root cause, implement the
+smallest correct fix, verify live on the physical device (RMX3997), and
+document. Explicitly out of scope per the brief: §1/§2/§4 of
+`Pre_Release_Issues.txt` (packaging metadata, installer progress UX, stale
+downloaded-file entries) — those are P44–P46.
+
+## 1. Original reproduction (as reported, before any investigation)
+
+Both Desktop and Android were completely uninstalled and reinstalled.
+Desktop's Devices tab still showed the previously paired device
+(`RMX3997-P41`) immediately on first launch, under its old (renamed) name.
+Pairing the fresh Android install without removing that stale entry
+produced a second entry (`RMX3997`). Repeating Android-only uninstall →
+reinstall → pair produced a third. The report explicitly warned against
+assuming the fix is "delete the previous device on every new pairing" and
+asked eight questions about the identity model before any implementation
+(reproduced in full in `docs/Pre_Release_Issues.txt` §3.5–3.8; answered in
+§4 below).
+
+## 2. Identity model as traced from source
+
+- **Backend** (`backend/app/models/device.py`, `docs/13_Database_Design.md`
+  §4): `devices.device_identifier` is a `UNIQUE`, immutable string — the
+  documented "stable external identity." `devices.id` is a plain internal
+  integer, never exposed as identity. A `Device` row is permanent history,
+  same philosophy as `Transfer` (`docs/13_Database_Design.md` §5's
+  "Device removal is a hard delete... approved for Version 1" — no
+  soft-delete/inactive flag exists).
+- **Pairing** (`backend/app/services/pairing_service.py`,
+  `PairingService.approve_pairing`, pre-P43): looked up
+  `device_identifier` via `DeviceService.is_device_registered`; if already
+  registered, `submit_pairing_request` raised `ConflictError` (409) at
+  submit time. If not, `DeviceService.register_device` always created a
+  brand new row. There was no third path — no reconciliation of any kind.
+- **Session** (`backend/app/models/device_session.py`): a `DeviceSession`
+  is short-lived (`app_settings.session_token_lifetime_minutes`, live DB
+  value found to be `1440` = 24h) and cascades on device delete. Nothing
+  auto-expires or auto-prunes a `Device` row itself when its sessions run
+  out — `GET /devices` returns every row unconditionally, and Desktop's
+  `devices.js` renders every one with a static green "Paired" badge
+  (`desktop/src/renderer/views/devices.js`) regardless of whether any
+  currently-valid session exists for it. A device whose only session has
+  quietly expired looks visually identical to one that's actively
+  connected.
+- **Android identity generation** (`android/src/pairing/deviceIdentifier.ts`,
+  pre-P43): `generateDeviceIdentifier()` returned a fresh
+  `generateUuidV4()` on *every call*, and was called from
+  `QrScanScreen.tsx`'s `handleReadCode` on *every pairing attempt* — not
+  once at first install. Its own doc comment already described this as
+  deliberate ("generated fresh per pairing attempt rather than persisted
+  independently of the Session"), reasoning that persisting it would force
+  a 409 + manual-removal step on re-pair, which the author considered
+  extra friction not worth taking on at the time.
+- **Android session storage** (`android/src/session/secureStorage.ts`):
+  `device_identifier` is persisted only as one field inside the whole
+  `Session` blob, stored in `react-native-keychain` (Android Keystore,
+  scoped to the app's UID). Both Keystore entries and any of the app's own
+  private-storage files are wiped unconditionally by the OS on uninstall
+  — confirmed, not assumed (§5 below performed a real `adb uninstall` and
+  observed a completely fresh pairing screen with zero residual state).
+- **Desktop**: no local device cache of its own — `devices.js` always
+  reads live from `GET /devices`. The stale-entry-survives-reinstall
+  symptom (3.1) is fully explained by `%APPDATA%\Relay\relay.db` itself
+  surviving a Desktop uninstall, which is NSIS's default behavior and was
+  already an explicit, documented P39 decision (`CLAUDE.md`'s "Windows
+  Desktop Installer (P39)" section: "NSIS's own defaults already satisfy
+  this project's data-preservation requirements... a reinstall after an
+  uninstall silently resurrects the old database"). Reversing that is an
+  installer-level product decision, not a device-identity bug, and is
+  explicitly out of this milestone's scope (`Pre_Release_Issues.txt` §5
+  groups it under P43 only because it's part of the same observed
+  symptom chain, not because the fix belongs at the installer layer).
+
+## 3. Git history
+
+`git log --oneline -- backend/app/services/pairing_service.py
+backend/app/services/device_service.py backend/app/models/device.py
+android/src/pairing/deviceIdentifier.ts android/src/session/` shows this
+logic has been untouched since its introduction (M7 `b476438`, Android
+pairing in `4e93dd6`/`2cfa82e`/`4eed4f0`) — no earlier bug fix or
+regression here. The per-attempt identifier generation was the original,
+intentional (if, per §4 below, ultimately mistaken) design from M7/Complete
+Phase1 onward, not something that broke later.
+
+## 4. The eight questions, answered
+
+1. **What uniquely identifies an Android installation?**
+   `device_identifier`, generated client-side. Per `docs/13_Database_Design.md`
+   it is supposed to be generated once, at first install, and stay stable
+   for the life of that install. The actual Android code did not do this
+   (§2/§6) — a real, provable spec-vs-implementation drift, not a design
+   choice to preserve.
+2. **Should uninstalling Android invalidate the old pairing?** Effectively
+   yes, and unavoidably: the OS wipes every piece of local proof of
+   identity (Keystore session, any private-storage file) on uninstall.
+   The backend has no uninstall signal and cannot do anything active here;
+   the old `Device`/`DeviceSession` rows simply become permanently
+   unreachable by that install.
+3. **Should reinstalling create a new identity?** Yes — correctly, and
+   necessarily. There is no stable, privacy-appropriate Android identifier
+   this app could read after a reinstall (nor should there be one — Rule 2
+   would require justifying a new permission/technology for it, and modern
+   Android deliberately makes hardware IDs unavailable for exactly this
+   privacy reason). Confirmed live in §5.
+4. **What happens to the old backend record?** It stays — permanently,
+   as designed (`docs/13_Database_Design.md` §4's hard-delete-only model,
+   same as `Transfer`). The desktop user's existing "Remove" action
+   (`DELETE /devices/{id}`, already implemented, unchanged by P43) is the
+   only intended way to prune it. P43 does not add any automatic deletion.
+5. **How can Relay know a re-pair is the same physical phone?** It
+   fundamentally cannot, with certainty, once local state has been wiped
+   by an uninstall — there is no cryptographic or protocol-level proof
+   available. Within a single install's lifetime (no uninstall), the
+   answer is yes: `device_identifier`, once actually made stable (§6),
+   *is* that proof — it is exactly the same signal `is_device_registered`
+   already trusted pre-P43 (it used it to reject a repeat, just not to
+   reconcile).
+6. **Is there already a stable mechanism we're failing to use?** Yes —
+   `device_identifier` itself, mis-implemented as attempt-scoped instead
+   of install-scoped. This is the actual, fixable root cause (§6).
+7. **Are duplicates always duplicates, or are multiple devices
+   intentional?** The architecture has always intentionally supported many
+   concurrent Android devices per desktop (`GET /devices` returns a list;
+   Desktop's Devices tab is plural by design). Two rows are structurally
+   indistinguishable whether they're two different phones or one phone
+   paired twice — this is exactly why name/IP/heuristic-based automatic
+   merging would be unsound and was correctly ruled out by the brief.
+8. **Device names after reinstall?** A fresh install submits its own
+   fresh default name (`getDefaultDeviceName()`, unchanged) for its own
+   new row; an old, un-removed row keeps whatever name it already had.
+   3.2 ("old name restored") is not a separate bug — it is a direct,
+   correct consequence of 3.1 (the stale old row was never removed, so it
+   is still being read and displayed as-is). No name-restoration code
+   exists or was needed.
+
+## 5. Root cause (final)
+
+Two independent, compounding causes:
+
+1. **A confirmed implementation bug** (not a design choice, despite its
+   own code comment claiming otherwise): `deviceIdentifier.ts` regenerated
+   `device_identifier` on *every* pairing attempt instead of once per
+   install, contradicting `docs/13_Database_Design.md`'s documented
+   contract. This meant *any* re-pair that wasn't preceded by a reinstall
+   — a session simply expiring (confirmed live: 24h default lifetime), or
+   the desktop user clicking Remove and the same phone reconnecting —
+   silently minted a new identity and therefore a new `Device` row, with
+   no way for the backend to ever recognize it as the same install.
+2. **A missing reconciliation path**, which is what made cause 1 visible
+   as duplication instead of a clean error: `PairingService` had exactly
+   two outcomes for a pairing request — reject (409, if the identifier was
+   already known) or create-new. There was no "this is a known identifier,
+   re-pair it" path, so even *with* cause 1 fixed, a legitimate re-pair of
+   the same known install (e.g. explicit re-scan while a session is still
+   technically live) would have started hard-failing instead of working.
+
+A genuine Android **reinstall** (§4 Q2/Q3) still, correctly and
+unavoidably, produces a new `device_identifier` and therefore a new
+`Device` row — this is not a bug and P43 does not change it. What P43
+eliminates is duplicate rows from re-pairing the *same* install.
+
+## 6. Implementation
+
+**Android** — `android/src/pairing/deviceIdentifier.ts`: replaced the
+synchronous `generateDeviceIdentifier()` with an async
+`getOrCreateDeviceIdentifier()` that persists the identifier as a small
+private JSON file (`relay-device-identity.json`) via
+`react-native-blob-util` (already a dependency), generating it once, on
+first read, and reusing it on every later call — mirroring
+`files/folderIdentity.ts`'s established pattern for exactly this reason
+(no AsyncStorage/MMKV dependency added; `CLAUDE.md` Rule 2). Deliberately
+no in-memory cache (only ever called once per pairing attempt, never a hot
+path). `screens/pairing/QrScanScreen.tsx` now awaits this instead of
+calling the old synchronous generator. Still lost on uninstall (private
+storage, OS-wiped) — intentional, per Q3.
+
+**Backend** — `app/services/device_service.py` gained
+`get_by_identifier_or_none` (thin lookup, mirrors `is_device_registered`)
+and `reconcile_device(device, *, device_secret_hash)` (rotates only
+`device_secret_hash`; `device_name`/`id`/`paired_at`/everything else is
+left untouched, so an existing rename survives a re-pair — verified by
+test and live). `app/services/pairing_service.py`:
+`submit_pairing_request` no longer rejects an already-registered
+identifier (removed the `is_device_registered` 409 check — it's a
+legitimate re-pair candidate now, still gated behind the same explicit
+desktop-user approval as any pairing). `approve_pairing` now looks up the
+identifier first: if it matches an existing `Device`, every session
+currently issued to that device is deleted
+(`DeviceSessionRepository.list_by_device` + `delete`, in the same
+transaction) before a fresh secret/session is minted onto the *same* row;
+otherwise it registers a new `Device`, unchanged from before. This is the
+"reconcile the existing pairing instead of creating another device
+record" direction `Pre_Release_Issues.txt` §3.5 explicitly flagged as one
+possible (not mandated) approach — adopted because it's the only path
+consistent with all of §4's answers.
+
+Security note (`Pre_Release_Issues.txt` §3.6/§10): reconciliation only
+ever triggers on an exact `device_identifier` match, which (a) can only
+be presented by an install that already possesses it (never guessed —
+it's a random UUID) and (b) still requires the same explicit desktop-user
+approval click as any brand-new device. No weakening of the approval gate;
+old credentials (session token) are provably dead the instant reconciliation
+runs (verified live, §7).
+
+`docs/13_Database_Design.md` §4 and `backend/README.md`'s Pairing API
+section updated to document the reconciliation behavior and the one
+exception to `device_secret_hash`'s immutability.
+
+## 7. Automated tests
+
+Backend (`tests/services/test_pairing_service.py`,
+`tests/services/test_device_service.py`, `tests/api/test_pairing.py`):
+replaced the now-obsolete "409 on already-paired" expectation with
+`test_submit_pairing_request_allows_already_paired_device_to_re_pair` /
+`test_submit_request_reconciles_already_paired_device_instead_of_conflicting`;
+added `test_approve_pairing_reconciles_known_identifier_instead_of_duplicating`
+(same `device.id`, one row in `DeviceRepository.list_all()`),
+`test_approve_pairing_reconciliation_preserves_existing_device_name`
+(a post-pairing rename survives a later reconcile),
+`test_approve_pairing_reconciliation_invalidates_old_session` (old
+session token hash no longer resolves after reconciliation; new one
+does), `test_approve_pairing_creates_new_device_for_unknown_identifier`
+(two distinct identifiers legitimately produce two rows — Q7), and
+`DeviceService`-level `get_by_identifier_or_none`/`reconcile_device`
+coverage. **350 backend tests pass** (up from 343; 2 skipped, unrelated).
+`ruff check` clean on every touched file.
+
+Android (`__tests__/pairing/deviceIdentifier.test.ts`, rewritten):
+generates-and-persists, reuses-persisted-value, corrupted-file and
+empty-value fall back to a fresh generation. **367 Android tests pass**
+(full suite, no regressions).
+
+## 8. Physical verification — RMX3997
+
+Performed live against the real installed Desktop app (`Relay.exe`, its
+real bundled backend and real `%APPDATA%\Relay\relay.db`) and the real
+Android device over `adb`, on the actual hotspot LAN both were already
+joined to (`10.93.152.0/24`). Two physical QR scans were performed by the
+user at the agent's request (camera-to-screen alignment is not something
+the agent can perform); everything else — build, install, DB inspection,
+API calls, screenshots — was done directly.
+
+**Starting state** (pre-existing, from the user's own original bug
+reproduction, untouched by P43 until this session): one stale row,
+`id=4`, `RMX3997`, `device_identifier=1d1c93b5-…`, paired 8/14.
+
+**Note on the packaged backend:** the Desktop app's bundled
+`relay-backend.exe` is a **PyInstaller binary built before P43** — editing
+`backend/app/` source has no effect on it until it's rebuilt
+(`pyinstaller relay-backend.spec` from a clean venv) and repackaged
+(`npm run dist` in `desktop/`). This was discovered mid-verification (the
+first live re-pair attempt still produced the old 409 "already paired"
+error from the stale binary) and worked around for testing purposes by
+running the backend directly from source
+(`DATABASE_URL=sqlite:///<the live relay.db path> python run.py`) against
+the same live database, then restoring the packaged app afterward. **The
+installed Desktop product does not yet contain this fix — rebuilding the
+backend bundle and the NSIS installer is a required follow-up before
+release**, unchanged in kind from P38/P39's existing "always rebuild
+before every dist" rule; full desktop repackaging was judged out of this
+milestone's scope (a distinct operational step, not a device-identity
+change) and was not performed here.
+
+| Step | Action | Result | Device rows after |
+|---|---|---|---|
+| 1 | `adb uninstall com.relay.mobile` (real uninstall of the previously-installed release APK) | Package removed, all private storage wiped | `id=4` only (untouched) |
+| 2 | Built + installed a **debug** APK containing the P43 fix (`gradlew :app:installDebug`) | Fresh launch → real Discovery/Pairing screen, "No Relay devices found yet" (screenshot captured) | `id=4` |
+| 3 | Real QR scan + Desktop approval (fresh install, so a genuinely new `device_identifier`) | Pairing succeeded | **New `id=5`** (`8b5292d2-…`) — correct, expected (§4 Q3): a genuine reinstall legitimately gets a new identity, so two rows for the same phone is not a bug at this point |
+| 4 | Directly expired `id=5`'s session row in the live DB (`expires_at` set to the past) — simulates ordinary 24h session expiry without any reinstall, then restarted Desktop | Every live authenticated call from the phone (Transfers/Files/Folders, mid-poll) got a real 401; `SessionManager.clearSession()` fired; app correctly fell back to the Discovery screen and re-discovered "Thomas" (screenshot captured) | `id=4`, `id=5` (session gone, row intact) |
+| 5 | First re-pair attempt against the **stale packaged backend** (see note above) | `"Device 8b5292d2-… is already paired"` — the old pre-P43 409, confirming the binary mismatch | `id=4`, `id=5` |
+| 6 | Restarted backend **from source** (P43 fix) against the same live `relay.db`; real QR scan + approval again | **Success, no error.** `GET /pairing/approve` returned `id: 5` — the *same* row, `paired_at` unchanged, `device_identifier` unchanged, only `updated_at` bumped | `id=4`, `id=5` (still 2 — no new row created) |
+| 7 | Checked `sessions` table for `device_id=5` | Old (forced-expired) session row gone; a brand-new one with a fresh 24h `expires_at` in its place | — |
+| 8 | Android UI after reconciliation | Files tab loaded normally ("No files are currently shared" — a real authenticated 200, not a 401); confirms the new session actually works end-to-end (screenshot captured) | — |
+| 9 | Cleanup: `DELETE /devices/4` (the original pre-existing stale row) | 204 | **`id=5` only** |
+| 10 | Restored the real packaged Desktop app; rebuilt a real **signed release APK** with the fix (`gradlew :app:assembleRelease`, using the existing `keystore.properties` verification identity) and installed it, replacing the debug build used for testing | Fresh install (release APK ≠ debug APK signature, so this was itself another real uninstall/reinstall) → Discovery screen again | `id=5` |
+| 11 | Final real QR scan + approval on the restored release build | Success | **New `id=6`** (`a2f7ae36-…`) — again correct/expected: a genuine reinstall, genuinely new identity, no reconciliation expected or attempted | `id=5`, `id=6` |
+| 12 | Cleanup: `DELETE /devices/5` (now-orphaned from the debug-build test) | 204 | **`id=6` only — final state** |
+
+Step 6→7→8 is the direct, physical confirmation of the actual fix: a
+real re-pair of the same install, without any reinstall, reconciled onto
+the existing row instead of creating a duplicate, and old credentials
+were verifiably dead afterward. Steps 3 and 11 are equally important
+negative controls, confirming a *genuine* reinstall still (correctly)
+gets a new identity rather than being silently/unsafely merged into an
+existing row.
+
+**Other existing functionality re-verified live in the same session, per
+the milestone's checklist** (not a full P41-style release matrix):
+Discovery (phone auto-found "Thomas" twice via UDP broadcast, unchanged),
+QR pairing (two full real scans), Remove (`DELETE /devices/{id}`, used
+twice for cleanup), authenticated API access and file listing (Files tab
+loaded real `GET /files`/`GET /folders`/`GET /transfers*` responses, no
+lingering 401s post-pairing). Rename and a live transfer request were not
+separately re-exercised on-device this session (unchanged code, already
+covered by the existing/updated automated suite) — noted as a limitation,
+not skipped without reason.
+
+## 9. Cleanup
+
+Removed: the two stale/orphaned device rows (`id=4`, `id=5` at their
+respective points, see table above), the temporary `qrcode`/`pillow` pip
+packages installed into `backend/.venv` only to render a scannable QR for
+manual testing (uninstalled afterward — `backend/.venv` must stay free of
+anything not in `requirements*.txt`, per the existing P38 rule), the
+`adb reverse tcp:8081` binding used for the debug build's Metro
+connection, and the Metro dev server itself. The debug APK used mid-testing
+was fully replaced by a proper signed release build (§8 step 10) rather
+than left installed. **One known side effect:** stopping Metro was done
+via `taskkill /F /IM node.exe`, which — since it matches by image name,
+not PID — would have also terminated any *other* unrelated Node process
+that happened to be running on the machine at that moment (e.g. an editor
+extension host). None were observed to be running, but this is flagged
+rather than silently assumed harmless.
+
+**Not restored:** the packaged Desktop backend/installer, as documented
+in §8 — this is a required follow-up, not an oversight.
+
+## 10. Limitations / deferred (explicitly, not silently)
+
+- The packaged Windows installer and its bundled `relay-backend.exe`
+  still contain pre-P43 code. **Must be rebuilt
+  (`pyinstaller relay-backend.spec` from a clean venv, then `npm run dist`
+  in `desktop/`) before end users receive this fix.**
+- A genuine Android reinstall still, correctly, produces a new `Device`
+  row every time (§4 Q3, §8 steps 3/11) — this is not a defect and is not
+  "fixed" by P43; only same-install re-pairing duplication is fixed. A
+  user who repeatedly uninstalls/reinstalls Android will still need to
+  manually `Remove` old rows from Desktop, exactly as before.
+- No Desktop UI change was made to hint "this pairing request looks like
+  a device you already have" during approval — the fix operates correctly
+  without it (reconciliation happens automatically for a genuine
+  same-install re-pair; a true reinstall has no signal to hint from
+  anyway). A possible future UX nicety, not a correctness gap.
+- Rename and a live file transfer were not separately re-verified
+  on-device this session (§8's "other functionality" note) — both are
+  unchanged code paths already covered by the existing automated suite.
+
+## 11. Suggested commit message
+
+```
+fix(pairing): reconcile re-pairing device instead of duplicating (P43)
+
+Android's device_identifier was regenerated on every pairing attempt
+instead of once per install, so any re-pair that wasn't a fresh
+reinstall (a session expiring, or Desktop's Remove followed by the same
+phone reconnecting) silently created a duplicate backend Device row.
+Persist the identifier per-install (android/src/pairing/deviceIdentifier.ts)
+and reconcile a matching identifier onto its existing Device row instead
+of rejecting or duplicating it (backend PairingService.approve_pairing),
+rotating credentials and invalidating prior sessions. A genuine reinstall
+still correctly produces a new identity — verified live on RMX3997.
+```
+
+**P43 — FIX COMPLETE AND LIVE-VERIFIED, PACKAGED REBUILD STILL PENDING.**
+Root cause identified and fixed at the actual identity layer (not a UI
+workaround); 717 automated tests pass (350 backend + 367 Android); the
+core reconciliation behavior and the "genuine reinstall gets a new
+identity" negative control were both confirmed on the physical device,
+against the real Desktop app and a real signed release APK. Nothing was
+committed, per this milestone's explicit instruction. P43 does not start
+P44.

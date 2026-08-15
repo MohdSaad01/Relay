@@ -26,7 +26,12 @@ Electron desktop application`, `Complete Phase1` (Android client),
 is also done and validated end-to-end (P38–P41): a real Windows installer,
 a real bundled backend, and a real Android release APK have been verified
 working together as one product. Repository/documentation cleanup (P42)
-is also complete. What remains is the items listed under
+is also complete, and a device-identity/re-pairing defect found in the
+first real-world validation pass has been fixed and physically verified
+(P43 — see "Device Lifecycle & Re-Pairing Correctness (P43)" below);
+**the packaged Desktop backend and installer still need to be rebuilt
+with this fix before it reaches an actual installed product.** What
+remains otherwise is the items listed under
 [Not Yet Implemented](#not-yet-implemented) (real production signing
 identities, Windows code signing) — see `README.md` for the project-level
 overview and setup instructions for all three components.
@@ -997,11 +1002,18 @@ audit-only milestone) broke this into a concrete four-milestone sequence;
 Bundle (P38)" / "Windows Desktop Installer (P39)" / "Android Release Build
 (P40)" / "Packaged End-to-End Release Validation (P41)" above and
 `docs/15_QA_NOTEBOOK.md`'s P38–P41 entries for full detail). P41's
-validation found no release blockers, and **P42 (repository/documentation
-cleanup) is also now complete** (`docs/15_QA_NOTEBOOK.md`'s P42 entry) —
-remaining work is only the still-open items P41 explicitly did not
-resolve (real production signing identities for both platforms, Windows
-code signing, the Android Clear History focus-refresh gap):
+validation found no release blockers, **P42 (repository/documentation
+cleanup) is also complete** (`docs/15_QA_NOTEBOOK.md`'s P42 entry), and
+**P43 (device lifecycle & re-pairing correctness) is also complete** (see
+"Device Lifecycle & Re-Pairing Correctness (P43)" below and
+`docs/15_QA_NOTEBOOK.md`'s P43 entry) — remaining work is only the
+still-open items P41 explicitly did not resolve (real production signing
+identities for both platforms, Windows code signing, the Android Clear
+History focus-refresh gap), plus **P43's own required follow-up: the
+packaged backend bundle and Desktop installer must be rebuilt
+(`pyinstaller relay-backend.spec` + `npm run dist`) before end users
+receive the P43 fix** — the currently-installed packaged product still
+runs pre-P43 backend code:
 
 * ~~**P38 — Backend Production Bundle.**~~ **Done.** Pinned backend
   dependencies (three-way split: production/dev-test/build-only); added
@@ -1071,6 +1083,26 @@ code signing, the Android Clear History focus-refresh gap):
   count figures, and backfilled this file's own missing documentation for
   P32–P36 (real, already-committed work that had never been written up).
   Full detail: `docs/15_QA_NOTEBOOK.md`'s P42 entry.
+* ~~**P43 — Device Lifecycle & Re-Pairing Correctness.**~~ **Done.** Fixed
+  the root cause of Desktop's Devices tab accumulating duplicate entries
+  for the same physical Android phone: `device_identifier` was regenerated
+  on every pairing *attempt* instead of once per install (a confirmed
+  drift from `docs/13_Database_Design.md`'s documented contract), so any
+  re-pair that wasn't a fresh reinstall — a session simply expiring, or
+  the desktop user clicking Remove and the same phone reconnecting —
+  silently minted a new identity and a new `Device` row. Android now
+  persists the identifier per-install
+  (`android/src/pairing/deviceIdentifier.ts`); the backend now reconciles
+  a matching identifier onto its existing `Device` row instead of
+  rejecting (409) or duplicating it (`PairingService.approve_pairing`),
+  rotating credentials and invalidating every prior session for that
+  device in the same transaction. A genuine Android reinstall still,
+  correctly, produces a new identity (there is no reliable signal that
+  survives one) — verified live on RMX3997 as a negative control. See
+  "Device Lifecycle & Re-Pairing Correctness (P43)" below and
+  `docs/15_QA_NOTEBOOK.md`'s P43 entry for the full investigation,
+  physical-device verification matrix, and the required packaged-rebuild
+  follow-up.
 
 ## Packaged End-to-End Release Validation (P41)
 
@@ -1123,6 +1155,58 @@ future work in this area:
   docs) that a plain "who imports this" search would have missed.
 
 Do not begin P43 automatically — it remains its own milestone, reviewed
+before starting, per this file's Git Workflow rules.
+
+## Device Lifecycle & Re-Pairing Correctness (P43)
+
+**`device_identifier` is Android-install-scoped, generated once and
+persisted independently of the paired `Session`, not attempt-scoped.**
+`android/src/pairing/deviceIdentifier.ts`'s `getOrCreateDeviceIdentifier()`
+persists it as a small private JSON file via `react-native-blob-util`
+(same pattern as `files/folderIdentity.ts` — no AsyncStorage/MMKV
+dependency added), generated once on first use and reused for every later
+pairing attempt from that install. It is still lost on app uninstall
+(private storage, OS-wiped along with everything else the app owns) —
+that is intentional: Android has no stable, privacy-appropriate hardware
+identifier that survives a reinstall, so a reinstall correctly produces a
+new identity. Any future Android identity-related code must persist
+through this same mechanism rather than reintroducing a per-call/per-attempt
+generator.
+
+**A pairing request presenting an already-known `device_identifier` is a
+legitimate re-pair, not an error.** `PairingService.submit_pairing_request`
+no longer rejects it with `409` — it still requires the same explicit
+desktop-user approval as any pairing, but `approve_pairing` now
+reconciles: if `device_identifier` matches an existing `Device` row, every
+session previously issued to that device is deleted and a fresh
+secret/session is minted onto the *same* row (`DeviceService.reconcile_device`
+rotates only `device_secret_hash`; `id`/`device_name`/`paired_at` are
+left untouched, so an existing rename survives a re-pair) — instead of
+creating a duplicate. A genuinely different `device_identifier` (a second
+physical phone, or the same phone reinstalled) still registers as a new
+`Device`, unchanged. Any future change to the pairing approval flow must
+preserve this reconciliation branch rather than reintroducing a blind
+create-or-reject.
+
+**A stale `Device` row (one whose Android install was genuinely
+uninstalled) is not detectable or auto-prunable by the backend** — there
+is no uninstall signal, and no reliable way to distinguish "this row's
+install is gone for good" from "a second legitimate phone." It remains
+"Paired" in the Desktop UI until the desktop user explicitly clicks
+Remove, exactly as before P43. Do not add automatic staleness detection
+or deletion based on name/IP/last-seen heuristics — this was explicitly
+investigated and ruled out (`docs/15_QA_NOTEBOOK.md`'s P43 entry, §4 Q7).
+
+**The packaged Desktop backend (`relay-backend.exe`) and installer must be
+rebuilt before this fix reaches an actual installed product** — editing
+`backend/app/` source has no effect on an already-built PyInstaller
+binary. This was discovered mid-verification (a live re-pair attempt
+against the stale packaged binary still produced the old 409) and is not
+yet done; rebuild via `pyinstaller relay-backend.spec` (clean venv) then
+`npm run dist` in `desktop/` before the next release, same rule P38/P39
+already established for any backend change.
+
+Do not begin P44 automatically — it remains its own milestone, reviewed
 before starting, per this file's Git Workflow rules.
 
 ## Documentation

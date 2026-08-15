@@ -6,7 +6,7 @@ import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RouteProp } from '@react-navigation/native';
 import { PairingStackParamList } from '../../navigation/types';
 import { buildDesktopBaseUrl, matchesSelectedDesktop, parsePairingQrPayload } from '../../pairing/qrPayload';
-import { generateDeviceIdentifier } from '../../pairing/deviceIdentifier';
+import { getOrCreateDeviceIdentifier } from '../../pairing/deviceIdentifier';
 import { getDefaultDeviceName } from '../../pairing/deviceName';
 import { submitPairingRequest } from '../../api/endpoints/pairing';
 import { ApiError } from '../../api/client';
@@ -110,7 +110,7 @@ export function QrScanScreen() {
       try {
         await submitPairingRequest(desktopBaseUrl, {
           pairing_token: pairingToken,
-          device_identifier: generateDeviceIdentifier(),
+          device_identifier: await getOrCreateDeviceIdentifier(),
           device_name: deviceName,
           platform: 'android',
         });

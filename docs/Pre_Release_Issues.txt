@@ -1,0 +1,790 @@
+# Relay — Pre-Release Issues
+
+This document contains issues discovered during the first real-world validation of packaged Relay builds after clean installation.
+
+Treat this document as the current source of truth for these pre-release issues.
+
+IMPORTANT:
+- Do not implement all issues at once.
+- Before implementation, inspect the existing implementation and determine the actual root cause of each issue.
+- Related issues should be grouped into logical milestones.
+- Complete one milestone at a time.
+- Each milestone must follow an investigation-first approach:
+  1. Inspect the relevant existing implementation.
+  2. Identify the root cause.
+  3. Explain the proposed fix before implementation.
+  4. Implement the smallest coherent fix.
+  5. Verify the behavior on the actual packaged application.
+  6. Run relevant tests.
+  7. Document any architectural or behavioral decision that should persist.
+- Do not assume that an observed symptom is the root cause.
+- Preserve existing behavior that is already correct.
+- Do not introduce unrelated refactors.
+
+For Android/device lifecycle testing:
+- The physical Android device will be connected through USB/ADB.
+- Use the actual Android device for verification where installation, pairing, persistence, or device identity is involved.
+- If the Android device becomes disconnected or unpaired during testing, stop and ask the user to reconnect/re-pair it before continuing.
+- Do not assume a simulated result is equivalent to real-device verification.
+
+
+============================================================
+1. DESKTOP PACKAGING / BRANDING METADATA
+============================================================
+
+Priority: HIGH
+Category: Packaging / Release Metadata
+Scope: Windows Desktop application and Android application branding
+
+
+------------------------------------------------------------
+1.1 Desktop Shortcut — Remove Comment
+------------------------------------------------------------
+
+Observed behavior:
+
+When hovering over the Relay Desktop shortcut, Windows displays the following comment:
+
+"Relay desktop application: Electron shell hosting the FastAPI backend and the desktop UI."
+
+Current behavior is not desired.
+
+Expected behavior:
+
+- Remove this comment/description from the Desktop shortcut.
+- The shortcut should instead show the normal application name and location/path information provided by Windows.
+- Do not replace the comment with another descriptive comment.
+
+Important:
+
+Investigate which packaging/shortcut metadata field is responsible for this value before changing it.
+
+
+------------------------------------------------------------
+1.2 Windows Control Panel / Installed Apps — Publisher
+------------------------------------------------------------
+
+Observed behavior:
+
+Inside Windows Control Panel / installed application information, the Publisher field is currently empty for Relay.
+
+Expected behavior:
+
+Publisher should be:
+
+"Relay Labs"
+
+Important:
+
+Identify the authoritative Electron/electron-builder/installer metadata field responsible for Publisher.
+
+
+------------------------------------------------------------
+1.3 Windows Control Panel / Installed Apps — Remove Comment
+------------------------------------------------------------
+
+Observed behavior:
+
+When viewing the Relay application in Windows Control Panel / installed application information, the displayed information includes:
+
+- Product Version
+- Size
+- Comment
+
+Product Version and Size are currently acceptable.
+
+Expected behavior:
+
+Keep:
+
+- Product Version
+- Size
+
+Remove:
+
+- Comment
+
+Do not remove Product Version or Size.
+
+Investigate which installer/product metadata field is creating the Comment entry.
+
+
+------------------------------------------------------------
+1.4 Relay.exe — Company Metadata
+------------------------------------------------------------
+
+Observed behavior:
+
+When viewing the Properties/Details information for Relay.exe, Windows currently shows:
+
+Company: GitHub, Inc.
+
+Expected behavior:
+
+Company should be:
+
+Company: Relay Labs
+
+
+------------------------------------------------------------
+1.5 Relay.exe — Version Metadata
+------------------------------------------------------------
+
+Observed behavior:
+
+The executable version information may not be synchronized with the current Relay release version.
+
+Expected behavior:
+
+- Relay.exe should report the current/up-to-date Relay product version.
+- The version shown by Relay.exe should also be consistent with the version shown in the Windows Control Panel / installed application information.
+
+Important:
+
+Before changing anything, identify where the current authoritative application version comes from and whether multiple version sources are currently drifting apart.
+
+Do not simply hardcode another version into one packaging field without understanding the existing versioning flow.
+
+
+------------------------------------------------------------
+1.6 Android Application Name
+------------------------------------------------------------
+
+Observed behavior:
+
+The Android application currently appears as:
+
+"RelayMobile"
+
+Expected behavior:
+
+The Android application name shown to the user should simply be:
+
+"Relay"
+
+Do not change unrelated package/application identifiers unless required.
+
+Investigate the Android application label/display-name configuration first.
+
+
+============================================================
+2. WINDOWS INSTALLER PROGRESS UX
+============================================================
+
+Priority: MEDIUM
+Category: Packaging / UX
+Scope: Windows installer
+
+
+------------------------------------------------------------
+2.1 Installer Progress Bar Jumps Backward
+------------------------------------------------------------
+
+Observed behavior:
+
+The initial setup/download screen behaves acceptably.
+
+However, when the actual installation screen containing the progress bar appears, the progress behavior feels incorrect.
+
+Observed approximate progression:
+
+- Starts around 25%
+- Increases to around 90%
+- Drops back to around 75%
+- Then progresses to 100%
+
+Example:
+
+25% → 90% → 75% → 100%
+
+This does not feel like reliable installation progress to the user.
+
+Expected behavior:
+
+The installer progress indicator should provide a stable and understandable sense of progress.
+
+Ideally:
+
+- Progress should not visibly move backward.
+- The percentage should represent meaningful installation progress.
+- The installer should not appear to complete most of the work and then suddenly regress.
+
+Important:
+
+Do not simply fake a smooth percentage.
+
+First investigate what currently drives the progress bar:
+
+- NSIS/electron-builder configuration
+- installation sections
+- file extraction
+- backend extraction
+- application installation
+- shortcut creation
+- other installer stages
+
+Determine whether the current backward movement is caused by the installer's progress calculation or by Relay's packaging configuration.
+
+Only then implement an appropriate fix.
+
+
+============================================================
+3. DEVICE LIFECYCLE / REINSTALL / RE-PAIRING
+============================================================
+
+Priority: CRITICAL / HIGH
+Category: Device identity, pairing, persistence, lifecycle correctness
+Scope: Desktop + Android + backend/device persistence
+
+This section contains several related observations.
+
+They should NOT initially be treated as independent bugs.
+
+Investigate them together because they may share a common underlying device-identity or persistence problem.
+
+
+------------------------------------------------------------
+3.1 Paired Device Survives Complete Reinstallation
+------------------------------------------------------------
+
+Observed test:
+
+1. Desktop application was completely uninstalled.
+2. Android APK was completely uninstalled.
+3. A new Desktop application build was installed.
+4. A fresh Android APK was installed.
+5. Desktop application was opened for the first time.
+
+Expected behavior:
+
+Because both applications had been completely uninstalled and reinstalled, the Desktop application should behave as a fresh installation with no previously paired Android device.
+
+Actual behavior:
+
+The Desktop application's Devices tab still showed a previously paired device immediately on first launch.
+
+Example:
+
+RMX3997-P41
+Paired
+android
+Paired 8/14/2026, 5:19:45 PM
+Last seen 8/14/2026, 5:44:49 PM
+Rename
+Remove
+
+This is unexpected.
+
+Additional observation:
+
+This has happened before.
+
+Even when both applications are completely rebuilt/reinstalled, the Desktop application can still show the old paired device if it had not been disconnected/unpaired before uninstalling.
+
+Expected first-install state:
+
+Desktop:
+- No previously paired Android device should be shown if the application data/state was actually intended to be removed by the uninstall.
+
+Android:
+- The Android application correctly starts in an unpaired state and asks the user to connect/pair a device.
+
+The Android behavior appears correct.
+
+The Desktop behavior requires investigation.
+
+
+------------------------------------------------------------
+3.2 Old Device Name Is Restored After Reinstallation
+------------------------------------------------------------
+
+Related observation from the same test:
+
+The Android device name was restored to its previous value instead of behaving like a newly installed device.
+
+Example:
+
+Expected/new device name:
+
+"Thomas"
+
+Previously stored device name:
+
+"Thomas-41"
+
+Actual behavior:
+
+The Desktop application showed the old name:
+
+"Thomas-41"
+
+Expected behavior:
+
+Determine whether the old device identity/name should survive the particular uninstall/reinstall scenario.
+
+If the Android application has been completely uninstalled and is therefore a new installation/device identity, the Desktop should not incorrectly associate it with stale previous device state.
+
+Do not fix this by merely resetting the displayed name.
+
+Investigate why the previous identity/name is being restored.
+
+
+------------------------------------------------------------
+3.3 Re-Pairing Creates Duplicate Device Entries
+------------------------------------------------------------
+
+Observed test:
+
+After the fresh Desktop installation opened, the previously paired device was already visible in the Devices tab.
+
+Without removing the existing device entry, the Android application was paired again.
+
+Expected behavior:
+
+Relay should recognize that this pairing corresponds to an already-known device identity if that is how the device identity model is intended to work.
+
+There should not be duplicate records representing the same logical device/pairing.
+
+Actual behavior:
+
+Two entries appeared.
+
+Previous entry:
+
+RMX3997-P41
+Paired
+android
+Paired 8/14/2026, 5:19:45 PM
+Last seen 8/14/2026, 5:44:49 PM
+Rename
+Remove
+
+New entry:
+
+RMX3997
+Paired
+android
+Paired 8/14/2026, 9:24:58 PM
+Last seen -
+Rename
+Remove
+
+Expected behavior:
+
+The pairing system should prevent an unintended duplicate device record.
+
+IMPORTANT:
+
+Do not immediately implement "delete the previous device whenever a new device pairs."
+
+First investigate:
+
+- What identifies an Android device?
+- What is `device_identifier`?
+- What is `device_id`?
+- What survives Android uninstall/reinstall?
+- What survives Desktop uninstall/reinstall?
+- Where is device identity persisted?
+- Where is pairing state persisted?
+- How are sessions associated with devices?
+- How does PairingService currently handle an already-paired device?
+- What uniqueness constraints exist in the database?
+- Whether the Android reinstall is supposed to create a new identity or recover the old identity.
+
+The correct fix must follow the actual device identity model.
+
+
+------------------------------------------------------------
+3.4 Reinstalling Android Again Creates a Third Entry
+------------------------------------------------------------
+
+Follow-up test:
+
+The question was:
+
+"What happens if I keep the Desktop application installed, uninstall the Android application, reinstall the Android application, and pair it again?"
+
+Actual result:
+
+A third device entry was created.
+
+Sequence:
+
+1. Desktop remains installed.
+2. Android APK is uninstalled.
+3. Android APK is reinstalled.
+4. Android correctly asks the user to pair/connect again.
+5. Pairing is performed.
+6. A new device entry is created instead of reconciling with the previous device state.
+
+This resulted in three entries.
+
+This confirms that duplicate device creation is reproducible across Android uninstall/reinstall + re-pairing.
+
+
+------------------------------------------------------------
+3.5 Desired Re-Pairing Behavior
+------------------------------------------------------------
+
+Potential expected behavior:
+
+If a device that is logically the same Android device is attempting to pair again, Relay should determine whether an existing pairing/device record corresponds to that device.
+
+If the device is already paired, Relay should not blindly create another duplicate device record.
+
+Possible implementation direction:
+
+- Detect whether the incoming pairing corresponds to an existing device.
+- Reconcile the existing pairing instead of creating another device record.
+- Potentially invalidate/remove the previous pairing/session before establishing the new pairing.
+
+However:
+
+This is only a possible direction, NOT an implementation requirement.
+
+The actual solution must be determined after investigating the current device identity and pairing architecture.
+
+Do not use device display name as the identity key.
+
+Do not assume that:
+
+"RMX3997"
+
+or
+
+"Thomas"
+
+is sufficient to uniquely identify an Android installation/device.
+
+
+------------------------------------------------------------
+3.6 Security / Lifecycle Considerations
+------------------------------------------------------------
+
+When investigating the duplicate/re-pairing behavior, explicitly inspect:
+
+- device identifier generation
+- persistence
+- uniqueness constraints
+- device secret handling
+- session token handling
+- pairing token handling
+- device removal
+- Android app reinstall behavior
+- Desktop app data persistence
+- database persistence
+- database location
+- whether uninstall actually removes Relay's persistent application data
+- whether old database state is intentionally retained
+
+Do not weaken the existing pairing/security model simply to eliminate duplicate UI entries.
+
+
+------------------------------------------------------------
+3.7 Required Real-Device Verification
+------------------------------------------------------------
+
+Use the physical Android device through USB/ADB.
+
+At minimum reproduce:
+
+A. Fresh Desktop + fresh Android
+B. Desktop reinstall + Android reinstall
+C. Android reinstall while Desktop remains installed
+D. Re-pair without manually removing old device
+E. Multiple Android reinstall/re-pair cycles
+
+For every scenario record:
+
+- device_identifier
+- device_id
+- displayed device name
+- pairing timestamp
+- session state
+- database device records
+- whether a duplicate record was created
+
+If the Android device becomes disconnected or unpaired during the test:
+
+STOP.
+
+Ask the user to reconnect/re-pair the device before continuing.
+
+Do not assume the result.
+
+
+============================================================
+4. STALE DOWNLOADED FILE / FOLDER ENTRIES
+============================================================
+
+Priority: HIGH
+Category: File lifecycle / UI consistency / stale filesystem state
+Scope: Desktop Shared Files / downloaded files and folders
+
+This issue was believed to be fixed previously, but real-world testing shows that it is still present.
+
+IMPORTANT:
+
+Do not confuse:
+
+- transfer history
+- shared-file metadata
+- downloaded filesystem entries
+
+They are separate concepts and existing correct transfer-history behavior must be preserved.
+
+
+------------------------------------------------------------
+4.1 Downloaded File Deleted Externally — Open
+------------------------------------------------------------
+
+Observed test:
+
+1. An Android device transfers/downloads a file to the Desktop.
+2. The downloaded file exists in the Desktop Downloads folder.
+3. The user manually deletes the downloaded file from Windows/File Explorer.
+4. The corresponding entry still exists in the Relay Shared Files tab.
+5. The user presses Open.
+
+Actual behavior:
+
+Relay shows an error similar to:
+
+"Failed to open path"
+
+The stale entry remains.
+
+The user can switch tabs, return to Shared Files, and press Open again, producing the same error.
+
+This is not the desired UX.
+
+
+------------------------------------------------------------
+4.2 Expected Behavior — Missing Downloaded File
+------------------------------------------------------------
+
+If Relay attempts to open a downloaded file whose physical path no longer exists:
+
+Expected behavior:
+
+1. Detect that the file has been removed or moved.
+2. Display a clear user-facing dialog/message.
+
+Example wording:
+
+"This file has been removed or moved from its original location."
+
+3. Remove the stale file entry from the relevant Shared Files/downloaded-files listing.
+4. Do not continue showing an Open action for an entry that no longer exists.
+5. Do not leave the user repeatedly triggering the same filesystem error.
+
+The exact final wording should follow Relay's existing dialog/error UX conventions.
+
+
+------------------------------------------------------------
+4.3 Downloaded File Deleted Externally — Show in Folder
+------------------------------------------------------------
+
+Observed behavior:
+
+When the downloaded file has been deleted and the user presses:
+
+"Show in Folder"
+
+nothing useful happens / the action is blank.
+
+Expected behavior:
+
+1. Detect that the file no longer exists.
+2. Display the same or equivalent clear missing-file dialog.
+3. Remove the stale entry from the relevant listing.
+
+The user should not receive a silent no-op.
+
+
+------------------------------------------------------------
+4.4 Downloaded Folder Deleted Externally — Show in Folder
+------------------------------------------------------------
+
+Observed test:
+
+1. A folder is transferred/downloaded to the Desktop.
+2. The folder exists in the Downloads location.
+3. The user deletes the folder externally.
+4. The corresponding Relay entry remains.
+5. The user presses "Show in Folder."
+
+Actual behavior:
+
+Nothing happens.
+
+There is no Open button for the folder, which is correct.
+
+However, Show in Folder silently does nothing.
+
+Expected behavior:
+
+1. Detect that the folder no longer exists.
+2. Display a clear message/dialog explaining that the file/folder was removed or moved from its original location.
+3. Remove the stale entry from the relevant listing.
+
+
+------------------------------------------------------------
+4.5 Stale Entry Removal Rule
+------------------------------------------------------------
+
+General expected rule:
+
+If a downloaded file/folder entry points to a filesystem location that no longer exists:
+
+- Detect the missing/moved path.
+- Inform the user.
+- Remove the stale entry from the relevant active file listing.
+
+This should apply consistently to:
+
+- files
+- folders
+- Open
+- Show in Folder
+
+Do not silently ignore a missing path.
+
+Do not repeatedly expose an action that is guaranteed to fail.
+
+
+------------------------------------------------------------
+4.6 Preserve Transfer History
+------------------------------------------------------------
+
+IMPORTANT:
+
+Removing a stale downloaded-file/folder entry must NOT automatically delete the corresponding transfer history unless the existing architecture explicitly defines those as the same entity.
+
+The transfer history should remain available where it is intended to remain available.
+
+The fix should target the stale filesystem-backed entry, not unrelated historical transfer records.
+
+
+------------------------------------------------------------
+4.7 Investigation Requirements
+------------------------------------------------------------
+
+Before implementation, inspect:
+
+- how downloaded files/folders are registered;
+- how their filesystem paths are stored;
+- how Shared Files reconstructs downloaded entries;
+- Open action;
+- Show in Folder action;
+- file existence checks;
+- folder existence checks;
+- stale-entry cleanup;
+- refresh/reload behavior;
+- tab navigation behavior;
+- transfer-history persistence;
+- existing code from previous fixes intended to solve this issue.
+
+Determine why the stale entry survives after the physical file/folder is deleted.
+
+Do not add a second independent stale-file tracking mechanism if the existing architecture already has an appropriate source of truth.
+
+
+============================================================
+5. CROSS-ISSUE IMPLEMENTATION RULES
+============================================================
+
+1. Investigation before implementation.
+
+For every issue:
+- inspect the existing code;
+- trace the relevant flow;
+- identify the root cause;
+- propose the fix;
+- only then implement.
+
+
+2. One coherent milestone at a time.
+
+Do not mix unrelated fixes into one implementation step.
+
+Recommended grouping:
+
+P43 — Device Lifecycle & Re-Pairing Correctness
+    - 3.1
+    - 3.2
+    - 3.3
+    - 3.4
+    - 3.5
+    - 3.6
+    - 3.7
+
+P44 — Stale Downloaded File/Folder Handling
+    - 4.1
+    - 4.2
+    - 4.3
+    - 4.4
+    - 4.5
+    - 4.6
+    - 4.7
+
+P45 — Desktop & Android Product Metadata
+    - 1.1
+    - 1.2
+    - 1.3
+    - 1.4
+    - 1.5
+    - 1.6
+
+P46 — Windows Installer Progress UX
+    - 2.1
+
+P47 — Final Pre-Release Validation
+    - Full clean-install/uninstall/reinstall validation
+    - Packaging validation
+    - Device lifecycle validation
+    - Transfer/file lifecycle validation
+
+
+3. Do not assume the issue's suggested solution is correct.
+
+The observations in this document describe actual behavior.
+
+The implementation must determine the correct technical solution from the existing architecture.
+
+
+4. Preserve correct existing behavior.
+
+Do not break:
+
+- QR pairing
+- explicit pairing approval
+- device rename
+- device removal
+- transfer history
+- shared-file behavior
+- file/folder transfers
+- Android first-install pairing behavior
+- existing packaging functionality
+
+
+5. Real-world verification is required.
+
+A fix is not considered complete merely because:
+- the code compiles;
+- unit tests pass;
+- a simulated API request works.
+
+The relevant packaged application behavior must be tested.
+
+
+6. Documentation.
+
+If an investigation results in a durable architectural decision, update the appropriate project documentation/ADR according to the project's documentation rules.
+
+Do not make unrelated documentation changes.
+
+
+7. Release gate.
+
+All issues in this document must be resolved or explicitly dispositioned before the packaged Relay build is considered ready for release.

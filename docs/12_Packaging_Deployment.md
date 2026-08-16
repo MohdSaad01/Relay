@@ -5,9 +5,13 @@ milestone sequence (see `CLAUDE.md`); §3 (Desktop), §4 (Backend), and §5
 (Android) are implemented (P38–P40), and P41 has validated all three
 packaged artifacts together end-to-end over a real LAN with no release
 blockers found. See `docs/15_QA_NOTEBOOK.md`'s P38–P41 entries for the
-full verification record. What remains before public distribution is
-code signing (out of scope for V1) and real production signing
-identities for both platforms.
+full verification record. Production Android signing landed in P50, and
+**the release version has been finalized as `1.0.0` across all three
+components (P51)** — see §15 below for the current release-candidate
+artifact set. What remains before public distribution is Windows code
+signing (out of scope for V1, unsigned by deliberate choice — see
+`CLAUDE.md`'s P49 section) and the actual publish step (a future
+milestone, not yet started).
 
 ---
 
@@ -199,3 +203,59 @@ packaged backend from writing its database/logs inside its own,
 potentially unwritable or upgrade-destroyed, install directory —
 `backend-manager.js` sets it to Electron's `app.getPath("userData")` in a
 packaged build.
+
+---
+
+# 15. Release Version 1.0.0 (Milestone P51)
+
+**The public release version is `1.0.0`, unified across all three
+components** (Desktop `package.json`, Android `versionName`, backend
+`Settings.APP_VERSION`), per the convention P49 proposed and P51 applied.
+Android `versionCode` is `1` — the first public release — and is not
+incremented merely by rebuilding; it advances only for a genuinely new
+public release. This is a version-field-only change: no application
+behavior differs between the P50 and P51 builds.
+
+**Build commands to reproduce a release candidate from a clean checkout:**
+
+```
+# Backend (from repo root, clean venv — never the tracked backend/.venv)
+python -m venv <clean-venv>
+<clean-venv>/Scripts/activate
+pip install -r requirements-build.txt
+cd backend && pyinstaller relay-backend.spec
+# -> backend/dist/relay-backend/relay-backend.exe
+
+# Desktop (from desktop/, after the backend bundle above exists)
+npm run dist
+# -> desktop/dist/Relay-Setup-1.0.0.exe
+
+# Android (from android/android/, with keystore.properties configured per
+# keystore.properties.example and P50's production keystore)
+./gradlew.bat :app:assembleRelease
+# -> android/android/app/build/outputs/apk/release/app-release.apk
+```
+
+**Final distribution artifact names** (the Android build output is
+renamed/copied to this name for distribution — Gradle itself still
+produces `app-release.apk`):
+
+* `Relay-Setup-1.0.0.exe` (Windows installer, ~119 MB)
+* `Relay-1.0.0.apk` (Android release APK, ~90 MB)
+* `SHA256SUMS.txt` (SHA-256 of the two files above)
+
+**The PyInstaller backend bundle (`relay-backend.exe`) is not a
+standalone public distribution asset.** It is only ever consumed embedded
+inside the Windows installer (`extraResources` → `resources/backend/`,
+§3 above) — a user never downloads it directly, so it has no separate
+release filename or checksum entry. This is a deliberate distribution-
+architecture decision (matches `CLAUDE.md`'s P49 "GitHub Releases is the
+sole artifact host" section, which lists exactly three release assets),
+not an oversight.
+
+Full build/verification detail for the P51 release candidate — version
+consistency audit, signing verification, physical-device smoke test,
+upgrade/persistence checks, and exact artifact hashes — is in
+`docs/15_QA_NOTEBOOK.md`'s P51 entry. Publishing these artifacts (a
+GitHub Release, a tag, a website) is explicitly out of P51's scope; see
+`CLAUDE.md`'s P49 section for the planned P52–P54 sequence.

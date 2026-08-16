@@ -298,11 +298,11 @@ Deliberately out of scope for Version 1 (`docs/11_File_Transfer.md` §16,
 * No code-signed artifacts for public distribution — out of scope for
   Version 1. The desktop app has a real installer (P39) but it is
   unsigned, so Windows will show an "unrecognized publisher" warning on
-  first run. Android has a real release APK (P40) — `cd android/android
-  && ./gradlew.bat :app:assembleRelease` — but it's sideloaded (no store
-  listing) and currently signed with a local verification keystore rather
-  than a final production identity; see `android/android/keystore.properties.example`
-  to supply a real one.
+  first run. Android has a real release APK (P40), signed with a real
+  production keystore since P50 (`cd android/android
+  && ./gradlew.bat :app:assembleRelease`) — it's still sideloaded (no
+  store listing); see `android/android/keystore.properties.example` for
+  the signing-credential format if you need to build your own release.
 * Whether the always-unauthenticated routes (`/settings`, `/pairing`,
   `/discovery`, and most of `/devices`) should also require a
   paired-device session was raised during M9 and left open; in practice

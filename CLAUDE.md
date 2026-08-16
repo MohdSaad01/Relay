@@ -1026,7 +1026,7 @@ build/verification detail: `docs/15_QA_NOTEBOOK.md`'s P40 entry.
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)
 * WebSockets / real-time push (transfer progress is currently polled via `GET /transfers/{id}`)
-* Packaging & distribution (`docs/12_Packaging_Deployment.md`): the backend has a verified PyInstaller `--onedir` production bundle (P38), the desktop app has a real, verified NSIS installer (P39), Android has a real, physically-verified release APK (P40), and the three have now been verified together as one product over a real LAN (P41, re-verified fresh at P48) — the Windows installer is still not code-signed for public distribution (out of scope for V1), and Windows Firewall's first-run prompt behavior remains environmentally unconfirmed (P39, re-confirmed P41). **Android's release signing identity is no longer a local-verification keystore — P50 replaced it with a real production keystore**, see "Production Android Signing (P50)" below.
+* Packaging & distribution (`docs/12_Packaging_Deployment.md`): the backend has a verified PyInstaller `--onedir` production bundle (P38), the desktop app has a real, verified NSIS installer (P39), Android has a real, physically-verified release APK (P40), and the three have now been verified together as one product over a real LAN (P41, re-verified fresh at P48) — the Windows installer is still not code-signed for public distribution (out of scope for V1), and Windows Firewall's first-run prompt behavior remains environmentally unconfirmed (P39, re-confirmed P41). **Android's release signing identity is no longer a local-verification keystore — P50 replaced it with a real production keystore**, see "Production Android Signing (P50)" below. **The Desktop/Android/backend version-string drift is resolved — P51 unified all three at `1.0.0`** (Android `versionCode` remains `1`, the first public release); see "Release Artifact Finalization & Version 1.0.0 (P51)" below. Publishing the finalized artifacts (a GitHub Release, a tag, a website) has not happened yet — see P49's proposed P52–P54 sequence.
 * Whether `Devices`/`Settings`/`Pairing`/`Discovery` should also require a paired-device session was raised during M9 and left open — revisit if Android is ever expected to call those routes directly
 * Automatic Desktop address rediscovery/re-resolution when a paired session's stored `desktop_base_url` goes stale — P47 added a user-triggered local recovery ("Forget this desktop"), deliberately not automatic reconnection or network scanning; see "Android Session Recovery & 'Forget This Desktop' (P47)" below.
 * Android's `react-native-saf-x`-based folder picker (`android/src/streaming/folderPicker.ts`) intermittently fails with "Unsupported Uri" on some real devices (realme C65 5G, and RMX3997 as of P48) — self-recovers on retry, no data loss; a post-V1 candidate for a retry-with-backoff or a different SAF library, not a V1 blocker. See "Release Sign-Off (P48)" below.
@@ -1811,12 +1811,19 @@ rules):**
    `versionName` left unchanged (`1`/`"1.0"`) per this milestone's own
    boundary. See "Production Android Signing (P50)" below and
    `docs/15_QA_NOTEBOOK.md`'s P50 entry.
-2. **P51 — Release Artifact Finalization.** Apply the `1.0.0` versioning
-   convention across Desktop/Android/backend, rebuild all three
-   artifacts from the resulting tagged commit, generate `SHA256SUMS.txt`.
-   Depends on P50 (needs the real Android signing identity to build the
-   artifact that will actually ship). Does not touch application
-   behavior, only version fields and a rebuild.
+2. ~~**P51 — Release Artifact Finalization.**~~ **Done.** Applied the
+   `1.0.0` versioning convention across Desktop/Android/backend
+   (`versionCode` unchanged at `1`); rebuilt all three artifacts from the
+   resulting commit and re-verified each directly (backend isolation test,
+   Desktop installer metadata/signing status, Android signing fingerprint
+   match against P50's); generated `SHA256SUMS.txt`. Physically verified on
+   RMX3997 over a real hotspot LAN: a Desktop upgrade-in-place with
+   byte-identical `relay.db` before/after, a fresh QR pairing that
+   exercised P43.1's Replace path, and a byte-verified cross-platform
+   transfer smoke test in both directions (including a folder and a
+   Unicode filename). No application behavior changed — version fields and
+   a rebuild only. See "Release Artifact Finalization & Version 1.0.0
+   (P51)" below and `docs/15_QA_NOTEBOOK.md`'s P51 entry.
 3. **P52 — Free Relay Website.** Build the small GitHub Pages static
    site (overview, features, Windows/Android download, pairing/
    installation instructions, known limitations, GitHub link) — content
@@ -1922,6 +1929,71 @@ signing-only charter. See `docs/15_QA_NOTEBOOK.md`'s P50 entry, §7, for
 the full evidence trail.
 
 Do not begin P51 automatically — it remains its own milestone, reviewed
+before starting, per this file's Git Workflow rules.
+
+## Release Artifact Finalization & Version 1.0.0 (P51)
+
+**The public release version is now `1.0.0`, unified across all three
+components — an artifact-finalization milestone only, no application
+behavior changed.** `backend/app/core/config.py`'s `Settings.APP_VERSION`,
+`desktop/package.json`'s `version`, and `android/android/app/build.gradle`'s
+`versionName` were each updated from their prior values (`0.1.0`/`0.1.0`/
+`"1.0"`) to `"1.0.0"`. Android `versionCode` stays `1` — still the first
+public release; a rebuild alone never advances it. `android/package.json`'s
+own npm-metadata `version` (`"0.0.1"`, never surfaced to a user) was
+deliberately left untouched, matching this milestone's own instruction not
+to blindly replace every version-shaped string in the repository — only
+the three user-visible product versions were in scope. Every prior
+milestone's own historical prose (P37/P40/P45/P46/P48/P50, all correctly
+describing `0.1.0`/`1.0` as of when they ran) is unchanged, per this
+file's existing "historical records stay accurate" convention.
+
+**All three production artifacts were rebuilt from the version-bump commit
+and re-verified directly, not assumed correct from source alone** —
+backend (`backend/dist/relay-backend/relay-backend.exe`, isolation-tested
+exactly per P38's discipline: fresh clean venv, no dev `.venv`, no
+reachable `backend/.env`, confirmed `{"version":"1.0.0"}` from `/health`),
+Desktop installer (`Relay-Setup-1.0.0.exe`, `Relay.exe`'s `FileVersion`/
+`ProductVersion` confirmed `1.0.0`, `CompanyName`/`ProductName`/`Comments`
+all still correct per P45, confirmed still genuinely `NotSigned`, confirmed
+packaging the freshly-rebuilt backend and not a stale one), and Android
+(`app-release.apk`, `versionName 1.0.0`/`versionCode 1`, `apksigner`
+confirmed the exact same P50 production certificate fingerprint
+`59af725033dcb49e92964df01c8fa4d2493084cd97e5e6669f4b100d8ad564ba` signed
+it — no accidental re-signing or fallback). Full verification detail,
+including a real Desktop upgrade-in-place persistence check (`relay.db`
+byte-identical before/after) and a physical RMX3997 pairing + cross-
+platform transfer smoke test (Desktop↔Android, a folder, a Unicode
+filename, a zero-byte file, all byte-verified), is in
+`docs/15_QA_NOTEBOOK.md`'s P51 entry.
+
+**Final release-candidate artifact names and checksums are now
+established:** `Relay-Setup-1.0.0.exe`, `Relay-1.0.0.apk` (the Android
+build output, `app-release.apk`, copied to this name for distribution —
+Gradle's own task output filename is unchanged), and `SHA256SUMS.txt`
+covering both. `relay-backend.exe` deliberately has no separate release
+filename or checksum entry — it is only ever distributed embedded inside
+the Windows installer, never downloaded standalone (see
+`docs/12_Packaging_Deployment.md` §15 for the durable statement of this
+decision). This three-asset shape matches P49's own "GitHub Releases is
+the sole artifact host" plan exactly — P51 did not invent a new
+distribution shape, only produced the actual files for it.
+
+**A process note for any future milestone that automates screen
+interaction on this specific development machine:** it is a real,
+interactively-used Windows machine, not an isolated CI sandbox. A
+full-screen capture combined with a simulated mouse click risks landing on
+whatever the project owner actually has open — this happened once during
+P51 (harmlessly, but it did briefly expose an unrelated personal browser
+tab) and was corrected immediately by switching to a window-scoped capture
+(Win32 `PrintWindow` against a specific window handle) for the remainder of
+the milestone. Any future Desktop-app visual verification on this machine
+should default to that same window-scoped approach — or ask the project
+owner to drive the one physical interaction needed (as P51 did for the
+Android QR-camera pairing step, which cannot be automated via `adb` at
+all) — rather than a full-screen capture plus simulated clicks.
+
+Do not begin P52 automatically — it remains its own milestone, reviewed
 before starting, per this file's Git Workflow rules.
 
 ## Documentation

@@ -1996,6 +1996,60 @@ all) — rather than a full-screen capture plus simulated clicks.
 Do not begin P52 automatically — it remains its own milestone, reviewed
 before starting, per this file's Git Workflow rules.
 
+## Website — Download & Installation Section (P52.6)
+
+**`web/index.html`'s Download Relay section (`#download`) is real content,
+not a mockup — but it deliberately does not link to a release, because
+none has been published yet.** No git tag and no GitHub Release exist on
+`https://github.com/MohdSaad01/Relay` as of P52.6. Each platform card
+(`.download-platform`, `web/css/style.css`) shows the actual `v1.0.0`
+version and the actual final artifact filename (`Relay-Setup-1.0.0.exe`,
+`Relay-1.0.0.apk`, per P51's `docs/12_Packaging_Deployment.md` §15) but
+renders `.download-cta-status` as a plain "Release coming soon" status
+line rather than a disabled-looking button — there is nothing to click,
+so nothing pretends to be clickable. **Any future change to this section
+must preserve that same honesty-over-polish rule**: never fabricate a
+release URL, and never make an inert element look interactive.
+
+**P53 (the actual GitHub Release/tag/publish step) has a marked,
+structural swap point already waiting for it.** Each `.download-cta`
+block is preceded by an HTML comment identifying it as the thing P53
+replaces with a real download link — P53 should only need to swap that
+one block's contents for a real `<a class="btn ...">` per platform, not
+restructure either `.download-platform` card.
+
+**P52.1–P52.5 (the site's foundation/nav, hero, how-it-works, product
+visuals, and features sections) were implemented without ever writing a
+`docs/15_QA_NOTEBOOK.md` entry** — a pre-existing documentation gap this
+milestone did not have the charter to backfill. P52.6 is the first
+website milestone with a QA Notebook entry; any future website milestone
+should continue that practice rather than reproducing the gap.
+
+**A process note for verifying this site at narrow widths on this
+machine:** `chrome.exe --headless=new --window-size=<w>,<h> --screenshot=...`
+silently floors the effective layout viewport at roughly 500px in the
+Chrome build installed here — a requested width below that (e.g. 390px
+for a mobile check) still renders the page at ~500px and only crops the
+resulting image, which can look exactly like a real horizontal-overflow
+bug without being one (P52.6 hit this against the Hero section before
+realizing it was a tooling artifact, not a defect). Verify narrow-width
+rendering via the DevTools Protocol directly instead
+(`Emulation.setDeviceMetricsOverride` with an explicit `mobile: true`,
+over `--remote-debugging-port`) — the CLI screenshot flag alone is not
+trustworthy below ~500px.
+
+**A second process note, for any future cleanup of a background browser
+process launched for verification on this machine:** this is a real,
+interactively-used Windows machine, not an isolated CI sandbox — the same
+fact the P51 screen-capture incident (above) already established. P52.6
+hit the process-management equivalent: `taskkill /F /IM chrome.exe /T`,
+intended to stop only the one headless instance this session launched,
+force-closed every Chrome process on the machine, including any ordinary
+windows/tabs the project owner had open. Disclosed immediately; no harm
+resulted this time. Any future cleanup of a self-launched process on this
+machine must target the specific PID that process launched with, never an
+image-name-wide kill.
+
 ## Documentation
 
 The `docs/` directory contains the official project specification, including:

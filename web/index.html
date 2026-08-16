@@ -339,15 +339,88 @@
       </div>
     </section>
 
-    <section id="download" class="section" aria-label="Download Relay">
+    <section id="download" class="section download" aria-label="Download Relay">
       <div class="container">
-        <p class="section-placeholder">Download — built in P52.5</p>
-      </div>
-    </section>
+        <div class="section-heading">
+          <h2>Download Relay</h2>
+          <p>Relay <span class="badge badge-mono">v1.0.0</span> for Windows and Android.</p>
+        </div>
 
-    <section id="install" class="section" aria-label="Installation instructions">
-      <div class="container">
-        <p class="section-placeholder">Installation — built in P52.5</p>
+        <div class="download-grid">
+          <div class="download-platform card">
+            <div class="download-platform-header">
+              <span class="diagram-icon feature-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 5.5C4 4.67 4.67 4 5.5 4H18.5C19.33 4 20 4.67 20 5.5V13.5C20 14.33 19.33 15 18.5 15H5.5C4.67 15 4 14.33 4 13.5V5.5Z" />
+                  <line x1="9" y1="19" x2="15" y2="19" />
+                  <line x1="12" y1="15" x2="12" y2="19" />
+                </svg>
+              </span>
+              <div>
+                <h3>Relay for Windows <span class="badge badge-mono">v1.0.0</span></h3>
+                <p class="download-platform-sub">Windows desktop application &middot; installer</p>
+              </div>
+            </div>
+
+            <!-- P53 replaces this status block with a real download link to the published GitHub Release asset — no structural change needed. -->
+            <div class="download-cta">
+              <p class="download-cta-status">
+                <svg class="download-cta-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="9" />
+                  <polyline points="12 7 12 12 15 15" />
+                </svg>
+                Release coming soon
+              </p>
+              <p class="download-artifact"><code>Relay-Setup-1.0.0.exe</code></p>
+            </div>
+
+            <ol class="download-steps">
+              <li>Download the installer.</li>
+              <li>Run the installer.</li>
+              <li>Launch Relay.</li>
+              <li>Pair it with the Android app.</li>
+            </ol>
+          </div>
+
+          <div class="download-platform card">
+            <div class="download-platform-header">
+              <span class="diagram-icon feature-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="6" y="2" width="12" height="20" rx="2" />
+                  <line x1="11" y1="18" x2="13" y2="18" />
+                </svg>
+              </span>
+              <div>
+                <h3>Relay for Android <span class="badge badge-mono">v1.0.0</span></h3>
+                <p class="download-platform-sub">Direct APK download &middot; no Play Store listing</p>
+              </div>
+            </div>
+
+            <!-- P53 replaces this status block with a real download link to the published GitHub Release asset — no structural change needed. -->
+            <div class="download-cta">
+              <p class="download-cta-status">
+                <svg class="download-cta-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="9" />
+                  <polyline points="12 7 12 12 15 15" />
+                </svg>
+                Release coming soon
+              </p>
+              <p class="download-artifact"><code>Relay-1.0.0.apk</code></p>
+            </div>
+
+            <p class="download-note">
+              Android may ask you to allow installs from the source you used to download the
+              APK &mdash; a normal step for an app installed outside Google Play. Play Protect
+              may also scan the file before it installs.
+            </p>
+          </div>
+        </div>
+
+        <p class="download-footnote">
+          Windows and Android downloads are published together as a GitHub Release, alongside a
+          <code>SHA256SUMS.txt</code> checksum file for verifying what you downloaded.
+          <a href="https://github.com/MohdSaad01/Relay/releases" target="_blank" rel="noopener">Releases on GitHub &rarr;</a>
+        </p>
       </div>
     </section>
 

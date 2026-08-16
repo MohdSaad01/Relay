@@ -1026,11 +1026,18 @@ build/verification detail: `docs/15_QA_NOTEBOOK.md`'s P40 entry.
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)
 * WebSockets / real-time push (transfer progress is currently polled via `GET /transfers/{id}`)
-* Packaging & distribution (`docs/12_Packaging_Deployment.md`): the backend has a verified PyInstaller `--onedir` production bundle (P38), the desktop app has a real, verified NSIS installer (P39), Android has a real, physically-verified release APK (P40), and the three have now been verified together as one product over a real LAN (P41) — but none of the three is code-signed for public distribution (out of scope for V1), the Android release signing identity is still a local verification keystore rather than a final production one, and Windows Firewall's first-run prompt behavior remains environmentally unconfirmed (P39, re-confirmed P41)
+* Packaging & distribution (`docs/12_Packaging_Deployment.md`): the backend has a verified PyInstaller `--onedir` production bundle (P38), the desktop app has a real, verified NSIS installer (P39), Android has a real, physically-verified release APK (P40), and the three have now been verified together as one product over a real LAN (P41, re-verified fresh at P48) — but none of the three is code-signed for public distribution (out of scope for V1), the Android release signing identity is still a local verification keystore rather than a final production one, and Windows Firewall's first-run prompt behavior remains environmentally unconfirmed (P39, re-confirmed P41)
 * Whether `Devices`/`Settings`/`Pairing`/`Discovery` should also require a paired-device session was raised during M9 and left open — revisit if Android is ever expected to call those routes directly
 * Automatic Desktop address rediscovery/re-resolution when a paired session's stored `desktop_base_url` goes stale — P47 added a user-triggered local recovery ("Forget this desktop"), deliberately not automatic reconnection or network scanning; see "Android Session Recovery & 'Forget This Desktop' (P47)" below.
+* Android's `react-native-saf-x`-based folder picker (`android/src/streaming/folderPicker.ts`) intermittently fails with "Unsupported Uri" on some real devices (realme C65 5G, and RMX3997 as of P48) — self-recovers on retry, no data loss; a post-V1 candidate for a retry-with-backoff or a different SAF library, not a V1 blocker. See "Release Sign-Off (P48)" below.
 
-## Next Planned Milestone
+## Next Planned Milestone (Historical — V1 Shipped at P48)
+
+**Relay V1 was formally signed off as SHIP-ready at P48** (see "Release
+Sign-Off (P48)" below and `docs/15_QA_NOTEBOOK.md`'s P48 entry) — the
+section below is retained as the historical packaging-milestone record,
+not an active plan. Any further work is a new, separately-authorized
+milestone, not a continuation of this list.
 
 **Packaging & Deployment** (`docs/12_Packaging_Deployment.md`). P37 (an
 audit-only milestone) broke this into a concrete four-milestone sequence;
@@ -1583,8 +1590,52 @@ Full investigation, physical-verification detail (including the two live
 re-pair cycles above), and automated-test results:
 `docs/15_QA_NOTEBOOK.md`'s P47 entry.
 
-Do not begin further work automatically — the next milestone (if any) is
-the project owner's to authorize, per this file's Git Workflow rules.
+## Release Sign-Off (P48)
+
+**P48 was the final production rebuild and release sign-off milestone —
+audit/verification only, no application source changed.** It rebuilt all
+three production artifacts fresh from `main` (HEAD `8dddf6f`, the P47
+commit) — `backend/dist/relay-backend/relay-backend.exe` (clean venv,
+`requirements.txt` + `requirements-build.txt` only), `desktop/dist/
+Relay-Setup-0.1.0.exe`, and a fresh `app-release.apk` — and physically
+re-verified them, not just their source, on real hardware (this machine's
+installed Desktop app, RMX3997 over USB/ADB and a real hotspot LAN).
+**Verdict: SHIP.** Full detail: `docs/15_QA_NOTEBOOK.md`'s P48 entry.
+
+Two durable facts this pass established, for any future rebuild/testing
+work in this area:
+
+* **`pydantic-settings`' `env_file=".env"` (`backend/app/core/config.py`)
+  resolves relative to the *process's working directory*, not the
+  packaged exe's own folder or `RELAY_DATA_DIR`.** Launching an isolated
+  copy of `relay-backend.exe` without also setting its working directory
+  away from anywhere `backend/.env` is reachable will silently pick up
+  the dev database path from that `.env` and ignore `RELAY_DATA_DIR`
+  entirely — this is `.env`'s already-documented "always takes priority"
+  behavior working as designed, not a packaging defect, but it makes an
+  isolation test *look* like `RELAY_DATA_DIR` is broken when it isn't.
+  Any future from-scratch backend isolation test must set
+  `-WorkingDirectory` (or equivalent) to a location with no reachable
+  `backend/.env` before trusting its result.
+* **`android/src/streaming/folderPicker.ts`'s already-documented
+  `react-native-saf-x` "Unsupported Uri" intermittent failure (originally
+  observed on a realme C65 5G, P13) reproduces on RMX3997 too** — surfaced
+  in `TransferListScreen.tsx` as "Could not open the folder picker.",
+  self-recovers after a retry or two, no data loss. Confirmed via both
+  automated (`adb input tap`) and genuine physical touches, for two
+  different target folders, ruling out a folder-specific or
+  automation-only cause. Remains an accepted, pre-existing, environment/
+  library-level V1 limitation (unchanged code since long before P41) — a
+  reasonable post-V1 candidate (retry-with-backoff, or an alternative SAF
+  library) if it proves worse on other devices, not something to "fix" by
+  reflex the next time it's seen.
+
+**Relay V1 is signed off as ready to ship.** Any further product work
+(the post-V1 backlog items catalogued in P48's own entry, or a genuinely
+new defect) is a new milestone, reviewed and authorized by the project
+owner before starting, per this file's Git Workflow rules — this file's
+own scope-discipline rules (Rule 3 above) apply to any such request
+exactly as they did to every milestone before it.
 
 ## Documentation
 

@@ -2090,6 +2090,37 @@ of overflow was produced by headless Chrome's `--window-size` viewport
 floor, not the page itself. Do not re-open this as a suspected defect
 without new evidence.
 
+## Website — Final QA & Polish (P52.8)
+
+**`web/css/style.css`'s `--color-text-muted` is `#6c717a`, not the
+`#8a8f98` it was originally ported 1:1 from `desktop/styles/app.css`
+(P52.1) — this is a deliberate, permanent, website-only deviation, not
+drift to reconcile.** `#8a8f98` measures only ~3.0–3.25:1 against this
+site's surface colors, below WCAG AA's 4.5:1 threshold for normal text,
+and the token is used at small sizes for real content here (hero CTA
+note, diagram/showcase captions, footnotes) — a different situation from
+the Desktop app's own internal UI chrome, which was not shown to have the
+same problem and was not touched. `#6c717a` clears ~4.6–4.9:1 on both
+site surfaces while staying visibly lighter than `--color-text-secondary`,
+preserving the token's original three-tier hierarchy. **Do not "fix" this
+back to match `app.css` without re-deriving the contrast math** — see
+`docs/15_QA_NOTEBOOK.md`'s P52.8 entry for the full before/after ratios.
+
+**P52.8 was a QA/polish pass only — the P52.1–P52.7 visual system
+(palette, spacing, card/badge language, section hierarchy) is unchanged.**
+It found and fixed several small, objective content defects (missing
+punctuation between independent clauses in three places, one
+capitalization inconsistency, one confusing sentence, one image
+width/height mismatch causing a layout shift, one dead CSS rule) —
+full detail in `docs/15_QA_NOTEBOOK.md`'s P52.8 entry. Any future content
+edit to `web/index.html` should keep re-verifying claims against the
+actual source (config files, doc sections, or the running app) rather
+than against how a prior milestone phrased them, per P52.7's own
+precedent above.
+
+Do not begin P53 automatically — it remains its own milestone, reviewed
+before starting, per this file's Git Workflow rules.
+
 ## Documentation
 
 The `docs/` directory contains the official project specification, including:

@@ -12,7 +12,12 @@
   --color-border-strong: #cfd3da;
   --color-text: #1a1d23;
   --color-text-secondary: #565c66;
-  --color-text-muted: #8a8f98;
+  /* #8a8f98 (the app's own token) reads at only ~3.2:1 on this site's
+     surfaces — fine for the app's own UI chrome, not for public marketing
+     copy set at small sizes (footnotes, captions). Darkened here, website
+     only, to clear WCAG AA's 4.5:1 text threshold while staying visibly
+     lighter than --color-text-secondary. */
+  --color-text-muted: #6c717a;
   --color-primary: #2d6cdf;
   --color-primary-hover: #2559ba;
   --color-primary-bg: #eaf1fd;
@@ -314,8 +319,7 @@ p {
 }
 
 /* ---------------------------------------------------------------------
-   Sections — scaffolding only in P52.1. Each section anchor exists so
-   the nav resolves correctly; content lands in later stages (P52.2+).
+   Sections
    --------------------------------------------------------------------- */
 
 .section {
@@ -325,13 +329,6 @@ p {
 
 .section:last-of-type {
   border-bottom: none;
-}
-
-.section-placeholder {
-  padding: var(--space-7) 0;
-  text-align: center;
-  color: var(--color-text-muted);
-  font-size: 14px;
 }
 
 /* ---------------------------------------------------------------------

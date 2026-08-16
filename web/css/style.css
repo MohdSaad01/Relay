@@ -597,6 +597,102 @@ p {
 }
 
 /* ---------------------------------------------------------------------
+   Product Visuals (P52.4) — real, unedited screenshots of the actual
+   Desktop (Electron) and Android apps, captured from a live pairing and
+   a real Shared Files list (not staged/mocked data). A wide landscape
+   screenshot and a tall portrait one don't share an aspect ratio, so
+   this deliberately isn't a grid forcing equal columns/heights — each
+   figure gets its own realistic max-width (a typical desktop-screenshot
+   width, a typical phone-screenshot width) and the flex row centers them
+   together. .showcase-frame is a thin border + modest radius only (no
+   card padding, no shadow, no device/browser mockup chrome) — the
+   screenshots already carry their own real application/OS chrome, so
+   this stays the minimal frame the P52.4 brief calls for.
+   --------------------------------------------------------------------- */
+
+.showcase {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: var(--space-7);
+}
+
+.showcase-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  text-align: center;
+}
+
+.showcase-desktop {
+  width: 620px;
+  max-width: 100%;
+}
+
+.showcase-android {
+  width: 240px;
+  max-width: 100%;
+}
+
+.showcase-frame {
+  width: 100%;
+  overflow: hidden;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.showcase-frame img {
+  width: 100%;
+  height: auto;
+}
+
+.showcase-item figcaption {
+  margin-top: var(--space-4);
+  max-width: 42ch;
+  font-size: 14px;
+  color: var(--color-text-secondary);
+}
+
+.showcase-platform {
+  display: block;
+  margin-bottom: var(--space-1);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-primary);
+}
+
+@media (max-width: 900px) {
+  .showcase-desktop {
+    width: 460px;
+  }
+
+  .showcase-android {
+    width: 190px;
+  }
+}
+
+@media (max-width: 640px) {
+  .showcase {
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-6);
+  }
+
+  .showcase-desktop,
+  .showcase-android {
+    width: 340px;
+  }
+}
+
+/* ---------------------------------------------------------------------
    Buttons — same shape/variant language as app.css's button rules
    (primary / text-button), adapted for anchor-tag CTAs and a larger
    hero size the app itself never needs.

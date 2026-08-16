@@ -17,7 +17,7 @@ as "verified on this one device," not as multi-device coverage.
 
 ---
 
-# Current Status / Baseline (as of P47)
+# Current Status / Baseline (as of P50)
 
 This section is a short orientation pointer, not a replacement for the
 milestone entries below — it exists so a reader doesn't have to scan the
@@ -37,10 +37,11 @@ answer to one of these; do not expand it into a second changelog.
   against the real artifacts and found one new, physically-reproduced
   issue** — see below and this file's P46 entry.
 - **Known limitations, deliberately deferred (not defects):**
-  - Neither the Windows installer nor the Android APK is code-signed
-    (out of scope for V1); Android's release signing identity is a local
-    verification keystore, not a final production one (see this file's
-    P40 entry and `docs/12_Packaging_Deployment.md`).
+  - The Windows installer is not code-signed (out of scope for V1, see
+    `docs/12_Packaging_Deployment.md`). Android's release signing identity
+    was a local verification keystore through P48 — **P50 replaced it
+    with a real production keystore** (see this file's P50 entry); the
+    Android signing item from P37/P40 is resolved.
   - Windows Firewall's first-run consent prompt has never appeared in
     this development environment (P39, P41) — **P46 confirmed live that
     functional connectivity works regardless, even on a Public-categorized
@@ -58,6 +59,23 @@ answer to one of these; do not expand it into a second changelog.
     only a *user-triggered* local recovery ("Forget this desktop"), not
     automatic reconnection or network re-scanning; see this file's P47
     entry §10.
+- **P48 (final production rebuild & release sign-off) issued a SHIP
+  verdict** — all three artifacts rebuilt fresh from `main` and physically
+  re-verified end-to-end; Relay V1 is technically ready to ship (see this
+  file's P48 entry).
+- **P49 (zero-cost distribution architecture & release strategy)** is an
+  investigation-only milestone — no application source changed — that
+  decided *how* the already-shipped V1 reaches users: GitHub Releases as
+  the sole artifact host, GitHub Pages for a small static website, an
+  unsigned Windows installer for V1 (with SignPath Foundation flagged as
+  the $0 signed-release path for a later milestone), a new production
+  Android keystore required before public distribution (not generated in
+  P49), and a `1.0.0` versioning convention to be applied in a later
+  milestone. See this file's P49 entry for the full investigation and
+  `CLAUDE.md`'s "Zero-Cost Distribution Architecture & Release Strategy
+  (P49)" section for the durable decisions. **No public release has
+  happened yet** — no GitHub Release, no published website, no production
+  Android keystore.
 - **P46 (release candidate audit)** found one new release blocker: an
   Android device that pairs once and later can't reach the desktop at its
   originally-stored address (e.g. switching between local Wi-Fi and
@@ -69,9 +87,20 @@ answer to one of these; do not expand it into a second changelog.
   to the pairing flow. Physically verified on RMX3997, including two full
   re-pair cycles confirming P43's identity-reconciliation contract still
   holds (see this file's P47 entry). **The P46 blocker is resolved; no
-  milestone is currently HOLD.** P47 is the most recently completed
-  milestone; see its entry near the end of this file. No milestone after
-  P47 has begun.
+  milestone is currently HOLD.**
+- **P50 (Production Android Signing) is complete.** A real production
+  Android release keystore now exists (stored outside the repository,
+  never committed), and `app-release.apk` is now signed with it —
+  `CN=Relay Labs, OU=Relay` — replacing every prior build's local
+  verification identity (`CN=Relay Local Verification, OU=Relay P40`,
+  P40/P46/P48). Physically verified on RMX3997: install, launch, QR
+  pairing, an authenticated file share/download round trip, and a
+  same-key update-continuity test (a second production-signed build
+  installed in place over the first, session/pairing data preserved) all
+  passed. `versionName`/`versionCode` remain `1.0`/`1`, unchanged — P51
+  owns final versioning. See this file's P50 entry for full detail,
+  including one OEM-level anomaly discovered (not a signing defect, not
+  fixed, documented for the record). No milestone after P50 has begun.
 
 ---
 
@@ -2537,3 +2566,70 @@ No item in this list rises to release-blocker status.
 **14. Final verdict: SHIP.**
 
 Every fresh production artifact was built from current `main` and directly inspected (not assumed from source); P43's identity-reconciliation contract holds byte-for-byte across two full physical re-pair cycles on the actual rebuilt artifacts; P47's recovery flow is present and physically verified in the fresh APK; a real QR-camera pairing was performed twice against the real installed products over a real LAN; Desktop→Android and Android→Desktop transfers (files, zero-byte, Unicode, nested folders, duplicate names, folder uploads with confirmation sheet) are all byte-verified; transfer progress/cancellation/history/Clear History all behave correctly in the final packaged build; both stale-file regressions (P44, P32/P29) hold; persistence survives real restarts on both platforms and a real installer upgrade-in-place with the database byte-identical before and after; the repository is clean; and the one new finding from this pass (the SAF folder-picker intermittent failure) is a previously-documented, self-recovering, environment-level limitation, not a defect introduced by or newly exposed as blocking by this milestone. **Relay V1 is ready to ship.**
+
+---
+
+# Milestone P49 — Zero-Cost Distribution Architecture & Release Strategy
+
+**Purpose:** an investigation/architecture-only pass (no application source, no builds, no deployment) to decide exactly how the already-shipped V1 (P48: SHIP) reaches real users at genuine $0 recurring cost — website hosting, GitHub Release structure, versioning convention, Android sideload UX, Android/Windows signing posture, checksum strategy, update model, domain strategy, and a security audit of the proposed architecture. Full 20-section report delivered to the project owner in-conversation; this entry records the investigation evidence and decisions for the repository. See `CLAUDE.md`'s "Zero-Cost Distribution Architecture & Release Strategy (P49)" section for the condensed durable conventions future milestones must follow.
+
+**1. Current release state (inspected directly, not assumed):**
+- **Repository:** `https://github.com/MohdSaad01/Relay`, confirmed **public** (fetched the live page). MIT-licensed (`LICENSE`). One existing tag, `backend-v1-complete` (2026-08-02, a mid-project checkpoint, not a version tag) — **no `vX.Y.Z` tag exists yet, and no GitHub Release has ever been published.** No `.github/` directory — no CI/CD workflows exist.
+- **Desktop:** `desktop/package.json` — `version: "0.1.0"`, `productName: "Relay"`, `appId: "com.relay.desktop"`, `author: { "name": "Relay Labs" }`, `description: ""` (deliberately empty per P45), NSIS/`electron-builder` per-user installer, `compression: "store"` (P45). No auto-update mechanism (no `electron-updater` dependency, no update-check code anywhere in `desktop/src`). `Get-AuthenticodeSignature` on the built installer → `NotSigned` (P39/P45/P46/P48, unchanged). GitHub Releases can distribute the `.exe` directly — a plain binary asset, no special handling needed (confirmed against current GitHub Releases documentation, §2 below).
+- **Android:** `applicationId "com.relay.mobile"`, `versionName "1.0"`, `versionCode 1` (`android/android/app/build.gradle`). Release signing reads a gitignored `keystore.properties` (real file exists locally, confirmed untracked via `git ls-files`) or environment variables, fails fast if absent (P40) — never falls back to `debug.keystore`. The signing identity used for every release build so far is explicitly a **local verification keystore** (`CN=Relay Local Verification, OU=Relay P40`, confirmed via `apksigner` in P46/P48), not a final production identity. APK is directly sideloadable (a standard, non-Play-Store APK); no update mechanism exists beyond "download and install a newer APK," which only preserves app data if the new APK is signed with the *same* certificate as the installed one (confirmed live in P48 §4 — a signature mismatch forced an uninstall-equivalent reinstall path).
+- **Backend:** confirmed architecturally hosting-free by design — `desktop/src/main/backend-manager.js` spawns `relay-backend.exe` as a local child process of the Electron app (P38/P39); Android never talks to any server other than the paired desktop's own LAN address (`docs/09_Networking.md`, `docs/10_Security.md` §12). There is nothing to host for V1 distribution beyond the two static installer/APK files — confirmed by re-reading `docs/12_Packaging_Deployment.md` and `CLAUDE.md`'s own architecture section, not assumed.
+- **Checksums:** no systematic checksum process exists. A single SHA-256 was computed ad hoc for the APK during the P46 audit (`b4790f97c436495b7a9c3146ff409d14c9efe45bb6565f3515edc3323a70d9e5`) as a freshness-comparison aid, not as part of any release/publishing flow.
+- **Website:** does not exist in this repository in any form (no `website/`, `docs/site/`, or similar directory).
+
+**2. External facts verified against current sources (not assumed from training knowledge):**
+- **GitHub Releases:** no limit on total release size or download bandwidth; each individual asset must be ≤ 2 GiB (Relay's ~119 MB installer and ~95 MB APK are both far under this); up to 1000 assets per release. Old releases remain available indefinitely at no cost. [GitHub Releases docs](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases), [community discussion on asset limits](https://github.com/orgs/community/discussions/196657).
+- **GitHub Pages:** free for public repositories; ~1 GB recommended site size, ~100 GB/month bandwidth (soft, not a hard cutoff), ~10 builds/hour; custom domain + free HTTPS (Let's Encrypt) supported. [Devian guide](https://www.devian.in/blogs/github-pages-free-hosting), [Supadrop limits reference](https://supadrop.host/blog/github-pages-limits/).
+- **Cloudflare Pages:** free tier has no enforced bandwidth cap (fair-use only), up to 500 builds/month on the free plan, multiple custom domains per project, free HTTPS via Cloudflare's edge. Requires a separate Cloudflare account and its own deploy pipeline (Git integration or Wrangler CLI), distinct from GitHub's own repo settings. [DevToolReviews](https://www.devtoolreviews.com/reviews/cloudflare-pages-pricing-bandwidth-limits-2026), [Easton free-limits guide](https://eastondev.com/blog/en/posts/dev/20260526-cloudflare-free-limits/).
+- **Android sideload UX (Android 14/15):** the "Install unknown apps" permission is now granted **per source app** (the browser or file manager used to open the APK), not a single device-wide toggle — `Settings → Apps → Special app access → Install unknown apps`, select the app, allow. [AndroidInfotech](https://www.androidinfotech.com/unknown-sources-app-installation-android/), [Appaloosa IT admin guide](https://www.appaloosa.io/blog/guides/how-to-install-apps-from-unknown-sources-in-android). Google Play Protect independently scans sideloaded APKs on Play-Protect-certified devices and may show its own "unsafe app" style warning even for a legitimate, non-malicious APK — expected friction, not a Relay defect. [Google Play Protect dev guidance](https://developers.google.com/android/play-protect/warning-dev-guidance).
+- **Google Android Developer Verification (forward-looking, not a current blocker):** Google is rolling out a requirement that installing *any* app — including sideloaded ones — on a "certified" (Play-Protect) Android device requires the app's developer to have completed an identity-verification step, comparable to a free/low-friction "ID check," separate from any Play Store listing or the $25 Play Console fee. A free workflow exists for students/hobbyists. Enforcement begins **2026-09-30 in four countries only (Brazil, Indonesia, Singapore, Thailand)**; global rollout is planned for **2027**. An "advanced flow" for installing from unverified developers (and ADB) remains available. This does not block or cost anything for Relay's V1 release today, but is a real forward-looking item — see Part 13's milestone sequencing note. [9to5Google](https://9to5google.com/2025/08/25/android-apps-developer-verification/), [Android Developers Blog](https://android-developers.googleblog.com/2025/08/elevating-android-security.html).
+- **Free Windows code signing:** no genuinely free, no-strings production code-signing option exists that puts "Relay"/the project owner's own name on the certificate. **SignPath Foundation** (and the similar **OSSign**) sponsor free OV-level Authenticode signing for qualifying open-source projects, but the certificate's publisher identity shown to end users is the *foundation's* name (e.g. "SignPath Foundation"), not the project's, and integration requires wiring the project's build into SignPath's own CI-based signing pipeline (an added dependency/process, not a drop-in). Even a signed OV certificate does not grant instant Microsoft SmartScreen trust — that reputation still has to accumulate over time/downloads (Microsoft's old instant-trust EV-certificate exception is no longer a factor most small projects can access cheaply). Azure Trusted/Artifact Signing exists but is a paid service (~$9.99/mo Basic tier) restricted to certain business regions — excluded by the $0 constraint. [SignPath OSS program](https://signpath.io/solutions/open-source-community), [Microsoft code-signing options doc](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/code-signing-options), [comparecheapssl.com 2026 overview](https://comparecheapssl.com/free-code-signing-certificate-and-how-to-get-it/).
+- **Domain cost baseline:** a custom domain (e.g. via Cloudflare Registrar/Namecheap/Porkbun at at-cost pricing) runs roughly $10-15/year for a typical `.com`/`.dev`/`.app` TLD — not $0, and not purchased or assumed necessary during this investigation.
+
+**3. Security audit of the proposed architecture (Part 11 of the report):** no secrets are committed anywhere in the tracked repository (`android/android/keystore.properties`, the real local-verification credentials file, is confirmed present locally but untracked via `git ls-files`; only the non-secret RN-template `debug.keystore` and the `keystore.properties.example` template are tracked; `backend/.env` is likewise untracked, only `.env.example` is). A targeted grep for hardcoded API keys/secrets/passwords/private-key material across the whole tree returned no matches. The repository being public exposes no credentials, tokens, or production signing material — Relay's architecture never persists long-lived secrets in source (pairing tokens are runtime-only per `docs/13_Database_Design.md` §9, session tokens are hashed at rest). Publishing the source, the installer, and the APK publicly introduces no new exposure beyond what P37-P48 already accepted (unsigned binaries, a local-verification Android signing identity that must not be treated as production-grade — see Part 6/P50 below).
+
+**4. Decisions reached (see `CLAUDE.md` for the full durable record):**
+- **Website host:** GitHub Pages (primary) — same platform as the code, zero separate account/billing relationship, ample soft limits for a small mostly-text site whose actual file bandwidth is served by GitHub Releases (not Pages) anyway. Cloudflare Pages recorded as the credible fallback if a future need (custom analytics, edge functions, a stricter bandw' guarantee) arises.
+- **Artifact host:** GitHub Releases, one release per `vX.Y.Z` tag, assets `Relay-Setup-<version>.exe`, `Relay-<version>.apk`, `SHA256SUMS.txt`. Auto-generated source-archive zips are ignored/irrelevant (they can't be built without the full monorepo tooling and a real signing keystore).
+- **Versioning:** unify on product-level `1.0.0` for the V1 public release (git tag `v1.0.0`, Desktop `package.json` version, Android `versionName`, `versionCode` starting at 1 for this first public release, backend `APP_VERSION`) — proposed, **not applied** in P49.
+- **Windows signing for V1: unsigned.** SmartScreen's "unrecognized publisher" warning is accepted, matching the already-documented V1 limitation (`README.md`, `docs/12_Packaging_Deployment.md`). SignPath Foundation is the recommended $0 path for a *future* signed release, once a CI pipeline exists to integrate with it — explicitly deferred, not attempted in P49.
+- **Android signing for V1 public release: a new production keystore must be generated before the first public distribution** (not the existing local-verification one) — deferred to a dedicated milestone (P50) per the project owner's own signing-key-generation caution, not generated in P49.
+- **Checksums:** `SHA256SUMS.txt` generated at release-build time (`certutil -hashfile`/`sha256sum`), published as a release asset and displayed on the website; supplements, does not replace, code signing.
+- **Domain:** ship V1 on GitHub Pages' free `*.github.io` subdomain; a custom domain (~$10-15/yr) is a future, explicitly-owner-approved purchase, not assumed or recommended for V1.
+
+**5. Verdict: investigation complete, architecture decided, nothing deployed.** No GitHub Release was created, no website was built or published, no production Android keystore was generated, no domain was purchased, and no application source, build configuration, or dependency was changed. Milestone sequencing (P50-P54) proposed for project-owner authorization — see `CLAUDE.md`. Per this file's and `CLAUDE.md`'s own Git Workflow rule, no next milestone begins automatically.
+
+---
+
+# Milestone P50 — Production Android Signing
+
+**Purpose:** replace the local-verification Android signing identity used by every prior release build (P40/P46/P48) with a genuine production keystore, per P49's own conclusion that public distribution must not ship under a keystore explicitly labeled "not for production." Signing only — no website, no GitHub Release, no version-string changes (`CLAUDE.md`'s P51 boundary).
+
+**1. Baseline investigation (before any change):** `android/android/app/build.gradle` already implements the exact fail-fast, keystore-agnostic mechanism P40 documented — resolves `RELAY_RELEASE_STORE_FILE`/`_STORE_PASSWORD`/`_KEY_ALIAS`/`_KEY_PASSWORD` from a gitignored `keystore.properties` (checked first) or environment variables (fallback), and a `gradle.taskGraph.whenReady` guard throws a `GradleException` before `assembleRelease`/`bundleRelease` run at all if neither source supplies all four values — confirmed by direct inspection, not assumed correct because P40 previously passed. **No Gradle changes were needed** — swapping the signing identity is purely a `keystore.properties` content change, exactly as the mechanism was designed to allow. The pre-existing local-verification keystore (`android/android/relay-release-local-verification.keystore`, gitignored, `CN=Relay Local Verification, OU=Relay P40`) and its `keystore.properties` were left in place on disk (not deleted — still potentially useful for local dev builds) but are no longer referenced by the active `keystore.properties`.
+
+**2. Production keystore generation.** Per the project owner's explicit direction (asked before generating anything, matching P50's own "stop and confirm" instruction): stored at `C:\Users\Saad\ProjectSigning\RelaySigning\relay-release-production.keystore` — a dedicated folder **outside the repository entirely** (stricter than the P40 keystore's in-repo-but-gitignored location), to be backed up by the project owner into a password manager/encrypted vault. `keytool -genkeypair` (PKCS12, RSA 2048, 10000-day validity, alias `relay-release-production`, DN `CN=Relay Labs, OU=Relay, O=Relay Labs, L=Local, ST=Local, C=US` — matching `desktop/package.json`'s existing `author.name` for cross-platform identity consistency). The password was generated as a 32-character random string and written **only** to `android/android/keystore.properties` (gitignored) — never displayed in any tool output after generation, never logged, never placed in this document or `CLAUDE.md`.
+
+**3. Git/secret audit (run both before and after):** `git status`/`git diff` showed no unexpected tracked changes; `git ls-files | grep -i keystore` returned only `app/debug.keystore` (the standard RN-template debug keystore, intentionally tracked) and `keystore.properties.example` (the secret-free template) — the real `keystore.properties` and the production `.keystore` file (outside the repo tree) are both confirmed untracked; `git check-ignore -v android/android/keystore.properties` confirmed the gitignore rule still applies; a targeted `git grep` for the generated password across the whole tree returned no matches. Clean.
+
+**4. Build and artifact verification.** `./gradlew.bat :app:assembleRelease` succeeded (`versionCode 1`/`versionName "1.0"`, unchanged per this milestone's explicit boundary). `apksigner verify --print-certs` on the resulting `app-release.apk`:
+```
+Signer #1 certificate DN: CN=Relay Labs, OU=Relay, O=Relay Labs, L=Local, ST=Local, C=US
+Signer #1 certificate SHA-256 digest: 59af725033dcb49e92964df01c8fa4d2493084cd97e5e6669f4b100d8ad564ba
+```
+— confirmed distinct from both the P40/P46/P48 local-verification certificate (`CN=Relay Local Verification, OU=Relay P40`, SHA-256 `230fe66672f24068c9bd22f2c457bc0a993a74c4e0c9644cf7a7707a13b98907`) and the RN debug certificate. `aapt2 dump badging`/`dump xmltree` confirmed: `applicationId com.relay.mobile` unchanged, `application-label:'Relay'` unchanged, no `application-debuggable` flag present (release build genuinely non-debuggable — independently reconfirmed live on-device: `adb shell run-as com.relay.mobile` returned `run-as: package not debuggable`), Hermes native libraries and `assets/index.android.bundle` present, `network_security_config.xml`'s `cleartextTrafficPermitted="true"` intact (resource-renamed to `res/8G.xml` by resource shrinking, resolved and inspected directly). Zip listing confirmed no keystore/`.properties`/credential file anywhere inside the APK.
+
+**5. Physical-device verification (RMX3997, USB/ADB).** The device already had Relay installed under the old local-verification certificate — uninstalled it (a same-cert upgrade is architecturally impossible across a signing-identity change, exactly as P50's own instructions anticipated) and cleanly installed the production-signed APK. Confirmed live: app launches, package/version/signature match the built artifact (`pkgFlags` show no `DEBUGGABLE`), QR pairing to the real Desktop app succeeded, Files/Transfers/Settings all render correctly, P47's "Forget This Desktop" is present and correctly worded, and a full authenticated round trip (share a file from Desktop over loopback → appears on Android → Download → completes → row shows "Open") succeeded byte-correctly.
+
+**6. Same-key update-continuity test.** Per this milestone's Part 7 instruction, a version bump was the legitimate way to exercise a real update path: temporarily set `versionCode 2` (documented here, reverted immediately after), rebuilt (**vB**, same production keystore) — `apksigner` confirmed vB's certificate fingerprint is byte-identical to vA's. Installed vB via `adb install -r` **over the running vA install, without uninstalling** — succeeded (a certificate mismatch would have failed with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, the exact failure mode a signing-identity change like P40→P50 itself produces). Confirmed via `dumpsys package`: `firstInstallTime` unchanged, `lastUpdateTime` reflected the in-place update, and the app launched directly into the paired `MainTabs` state with zero re-pairing required — proving the production identity, once established, supports normal in-place updates with full data/session continuity. `versionCode` was then reverted to `1` and the project rebuilt clean (`git diff` on `build.gradle` confirmed a no-op net change); this final rebuild is the actual P50 deliverable artifact. The device itself was deliberately left on the vB test build after the continuity test (same production certificate, fully functional) rather than forcing a second disruptive uninstall/re-pair cycle purely for version-number cosmetics — noted here rather than silently left unexplained.
+
+**7. One anomaly discovered, investigated, and left unfixed (out of P50's signing-only scope).** During the initial clean-install pairing (step 5), the Desktop app reported a device-name collision and the project owner chose "Replace" — but backend log/DB inspection afterward showed the pairing actually settled through the plain P43 *reconciliation* path (matching `device_identifier`, `Device.paired_at` unchanged from an earlier-that-day timestamp), not a P43.1 *replace* (which would have produced a new row/new `paired_at`). This means the freshly-reinstalled Android app's `device_identifier` (`android/src/pairing/deviceIdentifier.ts`, persisted via `react-native-blob-util`'s `DocumentDir`, confirmed in source to map to `context.getFilesDir()` — genuine OS-guaranteed-private, uninstall-wiped storage) apparently survived an `adb uninstall` + `adb install` cycle on this specific device (RMX3997, ColorOS/RealmeUI) intact, when Android's own platform contract says it should not be possible. `adb shell run-as` could not directly inspect the file (non-debuggable release build, correctly), so this could not be conclusively root-caused within P50's scope. It contradicts CLAUDE.md's P43 assumption ("still lost on app uninstall... intentional") for at least this one OEM ROM, but does **not** indicate any defect in the production signing work itself — the pairing, reconciliation, and session all behaved correctly given whatever identifier was actually submitted, and this exact class of app-data-survives-uninstall behavior (if real) is a known category of ColorOS/RealmeUI "recently uninstalled apps" data-retention feature, not something fixable from Relay's own code. Recorded here for a future milestone to investigate if it recurs or is seen on another device — not fixed, not re-investigated further, per P50's explicit signing-only charter.
+
+**8. Automated regression checks (all clean, zero source changes required beyond the documented, reverted version bump):** `tsc --noEmit` — no output/no errors. `eslint .` — 4 pre-existing warnings (`react/no-unstable-nested-components` ×2, `no-void` ×2), 0 errors, identical to the pre-P50 baseline. `jest` — **42 suites / 367 tests, all passed**, matching P48's baseline exactly.
+
+**9. Key-management documentation.** `android/android/keystore.properties.example`'s existing guidance (generate via `keytool`, store outside the repo, back up securely, never commit) already matched what P50 executed — no changes needed there. `CLAUDE.md`'s P49 section already flagged the "must never lose this key" consequence (breaks the Android update chain permanently); P50 does not duplicate that warning, only fulfills it.
+
+**10. Verdict: production Android signing identity established and verified. P50 complete.** `app-release.apk` at `android/android/app/build/outputs/apk/release/` is now signed with the real `CN=Relay Labs` production certificate, `versionCode 1`/`versionName "1.0"` unchanged, ready for P51 (version finalization) to build on. Per `CLAUDE.md`'s Git Workflow rule, P51 does not begin automatically.

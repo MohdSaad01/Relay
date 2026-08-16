@@ -939,6 +939,89 @@ p {
 }
 
 /* ---------------------------------------------------------------------
+   Requirements & Compatibility (P52.7) — a compact specification-style
+   list, not a three-card checkmark grid: one bordered .card, one
+   definition-list row per requirement (term = Windows/Android/Network/
+   Pairing, wrapped .diagram-icon reusing .feature-icon exactly as
+   Download's platform headers do; definition = the verified requirement
+   plus one supporting detail line). Every fact here is checked against
+   the real project config (README's stated Windows 10/11 target,
+   android/android/build.gradle's minSdkVersion 26, docs/09_Networking.md,
+   docs/12_Packaging_Deployment.md) rather than invented — no RAM/CPU/
+   storage figures, no device-brand claims. The network and pairing icons
+   are reused verbatim from the Features and How It Works sections rather
+   than invented for this one.
+   --------------------------------------------------------------------- */
+
+.requirements-list {
+  padding: 0;
+}
+
+.requirement-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 200px) 1fr;
+  align-items: start;
+  gap: var(--space-5);
+  padding: var(--space-5);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.requirement-row:last-child {
+  border-bottom: none;
+}
+
+.requirement-row dt {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.requirement-icon {
+  width: 36px;
+  height: 36px;
+}
+
+.requirement-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.requirement-row dd {
+  margin: 0;
+}
+
+.requirement-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.requirement-detail {
+  margin-top: var(--space-2);
+  font-size: 14px;
+  color: var(--color-text-secondary);
+}
+
+.requirements-footnote {
+  max-width: 68ch;
+  margin: var(--space-6) auto 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+@media (max-width: 640px) {
+  .requirement-row {
+    grid-template-columns: 1fr;
+    gap: var(--space-2);
+    padding: var(--space-4);
+  }
+}
+
+/* ---------------------------------------------------------------------
    Buttons — same shape/variant language as app.css's button rules
    (primary / text-button), adapted for anchor-tag CTAs and a larger
    hero size the app itself never needs.

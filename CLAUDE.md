@@ -2050,6 +2050,46 @@ resulted this time. Any future cleanup of a self-launched process on this
 machine must target the specific PID that process launched with, never an
 image-name-wide kill.
 
+## Website — Requirements & Compatibility Section (P52.7)
+
+**`web/index.html`'s Requirements section (`#requirements`) states only
+requirements traceable to actual project configuration — every line was
+checked against source, not carried over from `CLAUDE.md`'s prose alone**:
+Windows 10/11 64-bit (`README.md`, `desktop/package.json`'s `win.target`
+arch, `docs/12_Packaging_Deployment.md` §3's "no ia32/arm64 builds"),
+Android 8.0+ (`android/android/build.gradle`'s `minSdkVersion = 26`), the
+local-network/no-cloud model (`docs/09_Networking.md` §1/§3/§6), and QR
+pairing with desktop approval. The two caveats in `.requirements-footnote`
+(unsigned Windows installer, manual updates on both platforms) are the
+only V1 limitations judged genuinely user-facing enough to include — the
+much longer P37–P51 engineering backlog (signing-identity history, QA-
+device-specific flakiness, dev-only tooling behavior, the 2026/2027
+Android Developer Verification rollout) was deliberately excluded. **Any
+future edit to this section must re-verify its claim against the same
+kind of source** (a config file, a doc section) before changing it, not
+just against how a prior milestone phrased it.
+
+**The Requirements section's `<dl>`-based spec-row pattern
+(`.requirements-list` → repeated `.requirement-row` divs, each an icon +
+term in `<dt>` and a bolded value + detail sentence in `<dd>`) is the
+reusable shape for any future "term: current fact" content on this site**
+— chosen over a card grid specifically because a definition list is the
+correct semantic element for that shape (per this milestone's own
+accessibility instruction) and reads as part of the product's own spec-
+style documentation rather than generic marketing tiles. Extend this
+pattern rather than inventing a new one for similar future content.
+
+**The P52.5 Hero mobile "text overflow" concern is now confirmed, in a
+real rendered environment (not just inferred from the P52.6 tooling
+post-mortem), to have never been a genuine defect.** P52.7's full-page
+regression pass re-checked Hero specifically at 390px using the same CDP
+technique documented in the P52.6 entry above and found clean text
+wrapping with zero horizontal overflow — consistent with, and now
+directly confirming, P52.6's own conclusion that the original appearance
+of overflow was produced by headless Chrome's `--window-size` viewport
+floor, not the page itself. Do not re-open this as a suspected defect
+without new evidence.
+
 ## Documentation
 
 The `docs/` directory contains the official project specification, including:

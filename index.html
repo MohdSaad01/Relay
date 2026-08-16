@@ -424,9 +424,110 @@
       </div>
     </section>
 
-    <section id="requirements" class="section" aria-label="Requirements and limitations">
+    <section id="requirements" class="section requirements" aria-label="Requirements and compatibility">
       <div class="container">
-        <p class="section-placeholder">Requirements &amp; limitations — built in P52.5</p>
+        <div class="section-heading">
+          <h2>Requirements &amp; compatibility</h2>
+          <p>What you need to install and use Relay: a Windows PC, an Android phone, and one shared local network.</p>
+        </div>
+
+        <dl class="requirements-list card">
+          <div class="requirement-row">
+            <dt>
+              <span class="diagram-icon feature-icon requirement-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 5.5C4 4.67 4.67 4 5.5 4H18.5C19.33 4 20 4.67 20 5.5V13.5C20 14.33 19.33 15 18.5 15H5.5C4.67 15 4 14.33 4 13.5V5.5Z" />
+                  <line x1="9" y1="19" x2="15" y2="19" />
+                  <line x1="12" y1="15" x2="12" y2="19" />
+                </svg>
+              </span>
+              Windows
+            </dt>
+            <dd>
+              <p class="requirement-value">Windows 10 or 11, 64-bit</p>
+              <p class="requirement-detail">
+                Installs per-user &mdash; no administrator rights required. Relay
+                uses your local network to reach your phone; allow access if
+                Windows Firewall asks.
+              </p>
+            </dd>
+          </div>
+
+          <div class="requirement-row">
+            <dt>
+              <span class="diagram-icon feature-icon requirement-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="6" y="2" width="12" height="20" rx="2" />
+                  <line x1="11" y1="18" x2="13" y2="18" />
+                </svg>
+              </span>
+              Android
+            </dt>
+            <dd>
+              <p class="requirement-value">Android 8.0 or later</p>
+              <p class="requirement-detail">
+                Installed directly from an APK, not from Google Play
+                you'll need to allow installs from the source you use to <br>
+                download it.
+              </p>
+            </dd>
+          </div>
+
+          <div class="requirement-row">
+            <dt>
+              <span class="diagram-icon feature-icon requirement-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="3" y1="6" x2="21" y2="6" />
+                  <circle cx="9" cy="6" r="2.5" />
+                  <line x1="3" y1="12" x2="21" y2="12" />
+                  <circle cx="15" cy="12" r="2.5" />
+                  <line x1="3" y1="18" x2="21" y2="18" />
+                  <circle cx="7" cy="18" r="2.5" />
+                </svg>
+              </span>
+              Network
+            </dt>
+            <dd>
+              <p class="requirement-value">Same Wi-Fi network or mobile hotspot</p>
+              <p class="requirement-detail">
+                Windows and Android connect directly to each other. No cloud
+                storage and no internet server sit in between.
+              </p>
+            </dd>
+          </div>
+
+          <div class="requirement-row">
+            <dt>
+              <span class="diagram-icon feature-icon requirement-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="3" width="6" height="6" rx="1"/>
+                  <rect x="15" y="3" width="6" height="6" rx="1"/>
+                  <rect x="3" y="15" width="6" height="6" rx="1"/>
+                  <rect x="15" y="15" width="2.5" height="2.5"/>
+                  <rect x="18.5" y="15" width="2.5" height="2.5"/>
+                  <rect x="15" y="18.5" width="2.5" height="2.5"/>
+                  <rect x="18.5" y="18.5" width="2.5" height="2.5"/>
+                </svg>
+              </span>
+              Pairing
+            </dt>
+            <dd>
+              <p class="requirement-value">QR code scan, approved on the desktop</p>
+              <p class="requirement-detail">
+                With both devices on the same network, Android scans a QR
+                code shown by the desktop app, and desktop approves the
+                connection before anything is trusted.
+              </p>
+            </dd>
+          </div>
+        </dl>
+
+        <p class="requirements-footnote">
+          The Windows installer isn't code-signed yet, so Windows may show an
+          "unrecognized publisher" warning the first time you run it. Relay
+          is updated manually on both platforms so download a newer
+          version from this site and install it over the old one.
+        </p>
       </div>
     </section>
   </main>

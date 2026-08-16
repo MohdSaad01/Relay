@@ -693,6 +693,129 @@ p {
 }
 
 /* ---------------------------------------------------------------------
+   Features (P52.5) — capability groups, not a generic feature-card grid.
+   Transfer leads with more visual weight (a wide card, icon + copy on the
+   left, a checklist of its three concrete capabilities on the right);
+   Devices/Network/History follow as three equal supporting cards below.
+   Every icon here is an existing glyph reused from desktop/icons.js or
+   android/icons.tsx (phone, folder/transfer, settings sliders, clock,
+   check) — none invented for the website. .feature-icon extends the
+   hero/workflow .diagram-icon box exactly (same bordered square), just
+   slightly smaller to suit a card header rather than a centered diagram
+   node.
+   --------------------------------------------------------------------- */
+
+.feature-icon {
+  width: 44px;
+  height: 44px;
+  color: var(--color-primary);
+  border-color: var(--color-border);
+}
+
+.feature-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.feature-eyebrow {
+  margin-top: var(--space-4);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+}
+
+.feature-lead {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-7);
+  padding: var(--space-6);
+}
+
+.feature-lead-text h3 {
+  margin-top: var(--space-2);
+  font-size: 24px;
+}
+
+.feature-lead-text p {
+  margin-top: var(--space-3);
+  font-size: 15px;
+  color: var(--color-text-secondary);
+}
+
+.feature-lead-items {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-5);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.feature-lead-items li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.feature-check {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  margin-top: 2px;
+  color: var(--color-success);
+}
+
+.feature-lead-items h4 {
+  font-size: 15px;
+}
+
+.feature-lead-items p {
+  margin-top: var(--space-1);
+  font-size: 14px;
+  color: var(--color-text-secondary);
+}
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-5);
+  margin: var(--space-5) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.feature-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.feature-card h3 {
+  margin-top: var(--space-2);
+  font-size: 18px;
+}
+
+.feature-card p {
+  margin-top: var(--space-2);
+  font-size: 14px;
+  color: var(--color-text-secondary);
+}
+
+@media (max-width: 900px) {
+  .feature-lead {
+    grid-template-columns: 1fr;
+    gap: var(--space-6);
+  }
+
+  .feature-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------------------------------------------------------------------
    Buttons — same shape/variant language as app.css's button rules
    (primary / text-button), adapted for anchor-tag CTAs and a larger
    hero size the app itself never needs.

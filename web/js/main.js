@@ -4,11 +4,13 @@ const header = document.getElementById("site-header");
 const navToggle = document.getElementById("nav-toggle");
 const nav = document.getElementById("site-nav");
 
+// Mobile navigation toggle
 navToggle.addEventListener("click", () => {
   const isOpen = header.classList.toggle("nav-open");
   navToggle.setAttribute("aria-expanded", String(isOpen));
 });
 
+// Close mobile navigation after clicking a link
 nav.querySelectorAll("a").forEach((link) => {
   link.addEventListener("click", () => {
     header.classList.remove("nav-open");
@@ -16,31 +18,65 @@ nav.querySelectorAll("a").forEach((link) => {
   });
 });
 
-// Highlights the nav link for whichever section is currently in view,
-// matching the app's own "active" underline state (app.css's #nav
-// button.active) instead of leaving nav state static during a scroll.
+// ------------------------------------------------------------
+// Active navigation underline
+// ------------------------------------------------------------
+
+const navLinks = nav.querySelectorAll("a[href^='#']");
 const sectionLinks = new Map();
-nav.querySelectorAll("a[href^='#']").forEach((link) => {
-  const section = document.querySelector(link.getAttribute("href"));
-  if (section) {
-    sectionLinks.set(section, link);
+
+navLinks.forEach((link) => {
+  const target = document.querySelector(link.getAttribute("href"));
+
+  if (target) {
+    sectionLinks.set(target, link);
   }
 });
 
+function setActiveLink(activeLink) {
+  nav.querySelectorAll("a.active").forEach((link) => {
+    link.classList.remove("active");
+  });
+
+  if (activeLink) {
+    activeLink.classList.add("active");
+  }
+}
+
+// Immediately activate the clicked navigation link
+navLinks.forEach((link) => {
+  link.addEventListener("click", () => {
+    setActiveLink(link);
+  });
+});
+
+// Update active link while scrolling
 if (sectionLinks.size > 0 && "IntersectionObserver" in window) {
   const observer = new IntersectionObserver(
     (entries) => {
-      entries.forEach((entry) => {
-        const link = sectionLinks.get(entry.target);
-        if (!link) return;
-        if (entry.isIntersecting) {
-          nav.querySelectorAll("a.active").forEach((a) => a.classList.remove("active"));
-          link.classList.add("active");
-        }
-      });
+      const visibleSections = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((a, b) => {
+          return b.intersectionRatio - a.intersectionRatio;
+        });
+
+      if (visibleSections.length === 0) {
+        return;
+      }
+
+      const activeLink = sectionLinks.get(visibleSections[0].target);
+
+      if (activeLink) {
+        setActiveLink(activeLink);
+      }
     },
-    { rootMargin: "-50% 0px -50% 0px" }
+    {
+      rootMargin: "-20% 0px -60% 0px",
+      threshold: [0, 0.1, 0.25, 0.5, 1],
+    }
   );
 
-  sectionLinks.forEach((_link, section) => observer.observe(section));
+  sectionLinks.forEach((_link, section) => {
+    observer.observe(section);
+  });
 }

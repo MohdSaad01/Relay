@@ -50,6 +50,26 @@ remains otherwise is the items listed under
 [Not Yet Implemented](#not-yet-implemented) (real production signing
 identities, Windows code signing) — see `README.md` for the project-level
 overview and setup instructions for all three components.
+**A release-candidate audit (P46) has since re-verified the packaged
+artifacts directly (signing, version metadata, manifest content, live
+process behavior) and found the packaging/branding work through P45 to
+be correctly reflected in the real, currently-shipped artifacts** — but
+also found one new, physically-reproduced issue not previously
+documented: an Android device that pairs once and later can't reach the
+desktop at its originally-stored address (e.g. switching between local
+Wi-Fi and mobile hotspot) has no in-app recovery path short of
+uninstalling and reinstalling the app — see
+"Release Candidate Audit (P46)" below and `docs/15_QA_NOTEBOOK.md`'s P46
+entry. P46's verdict was **HOLD** pending a scoping decision on that one
+item; it was deliberately not fixed unilaterally, per this file's Rule 3.
+**That scoping decision was made and the fix implemented in P47 (Android
+Session Recovery & "Forget This Desktop")** — a Settings action that lets
+the user locally forget a stale desktop connection and return to pairing
+without uninstalling the app — physically verified on RMX3997, including
+a real re-pair cycle proving P43's identity reconciliation still holds
+afterward. See "Android Session Recovery & 'Forget This Desktop' (P47)"
+below and `docs/15_QA_NOTEBOOK.md`'s P47 entry. **The P46 release blocker
+is resolved.**
 
 ## Completed Milestones
 
@@ -1008,6 +1028,7 @@ build/verification detail: `docs/15_QA_NOTEBOOK.md`'s P40 entry.
 * WebSockets / real-time push (transfer progress is currently polled via `GET /transfers/{id}`)
 * Packaging & distribution (`docs/12_Packaging_Deployment.md`): the backend has a verified PyInstaller `--onedir` production bundle (P38), the desktop app has a real, verified NSIS installer (P39), Android has a real, physically-verified release APK (P40), and the three have now been verified together as one product over a real LAN (P41) — but none of the three is code-signed for public distribution (out of scope for V1), the Android release signing identity is still a local verification keystore rather than a final production one, and Windows Firewall's first-run prompt behavior remains environmentally unconfirmed (P39, re-confirmed P41)
 * Whether `Devices`/`Settings`/`Pairing`/`Discovery` should also require a paired-device session was raised during M9 and left open — revisit if Android is ever expected to call those routes directly
+* Automatic Desktop address rediscovery/re-resolution when a paired session's stored `desktop_base_url` goes stale — P47 added a user-triggered local recovery ("Forget this desktop"), deliberately not automatic reconnection or network scanning; see "Android Session Recovery & 'Forget This Desktop' (P47)" below.
 
 ## Next Planned Milestone
 
@@ -1030,8 +1051,16 @@ complete** (see "Desktop Stale Received-Item Handling (P44)" below), and
 (see "Desktop Packaging & Branding Metadata (P45)" below and
 `docs/15_QA_NOTEBOOK.md`'s P45 entry) — the packaged backend bundle,
 Desktop installer, and Android release APK have all been rebuilt with
-every fix through P45 and physically verified on this machine; remaining
-work is only the still-open items P41 explicitly did not resolve (real
+every fix through P45 and physically verified on this machine. **P46
+(release candidate audit) is also complete** (see "Release Candidate
+Audit (P46)" below and `docs/15_QA_NOTEBOOK.md`'s P46 entry) — it found
+one new release blocker (no in-app recovery when a paired Android
+device's stored desktop address goes stale), deliberately left
+unimplemented pending a scoping decision. **P47 (Android Session
+Recovery & "Forget This Desktop") is also complete** and resolves that
+exact blocker (see "Android Session Recovery & 'Forget This Desktop'
+(P47)" below and `docs/15_QA_NOTEBOOK.md`'s P47 entry). Remaining work is
+only the still-open items P41 explicitly did not resolve (real
 production signing identities for both platforms, Windows code signing,
 the Android Clear History focus-refresh gap), plus the Desktop/Android
 version-string drift P45 documented rather than resolved (see
@@ -1441,6 +1470,121 @@ mechanism without a dedicated milestone for that specific decision.
 
 Do not begin P46 automatically — it remains its own milestone, reviewed
 before starting, per this file's Git Workflow rules.
+
+## Release Candidate Audit (P46)
+
+**P46 was an audit-only milestone** (`docs/15_QA_NOTEBOOK.md`'s P46 entry
+has the full detail) — no application source was changed; only
+`CLAUDE.md` and `docs/15_QA_NOTEBOOK.md` were updated. It re-verified the
+actual currently-packaged Desktop installer, bundled backend, and Android
+release APK directly (version metadata, signing, manifest content, and
+live process/API behavior on the real installed product) rather than
+trusting P37–P45's prose, and confirmed all of it holds up: `Relay.exe`'s
+version/publisher/company metadata, the Android APK's non-debug signing
+certificate and `Relay`-labeled launcher, and that every file touched by
+the P43–P45 commits predates the three build artifacts' own timestamps —
+i.e. the shipped artifacts genuinely reflect current `main`, not a stale
+build. `pytest` (376 passed, 2 skipped) and Android's Jest suite (367
+passed) both ran clean with zero source changes required.
+
+**One new issue was found and physically reproduced, not fixed.** While
+attempting a live physical E2E re-verification (this development machine
+happened to be connected to the RMX3997 test device's own mobile
+hotspot — a real instance of Relay's own target use case), the
+already-paired Android app showed "Unable to reach Relay Desktop" even
+though the network path was actually fine — confirmed via a raw TCP
+connect and by loading the desktop's own API directly in the phone's
+browser, both of which succeeded. The real cause:
+`android/src/session/types.ts`'s `Session.desktop_base_url` is captured
+once at pairing time and never re-resolved, and
+`android/src/session/SessionManager.ts`'s `clearSession()` — the only
+thing that routes `RootNavigator.tsx` back to the pairing flow — is only
+ever triggered by an HTTP `401`, never by a plain unreachable-address
+failure. **There is no "Forget this desktop" or equivalent re-pair
+control anywhere in the Android app.** A device that pairs once and later
+can't reach the desktop at that exact stored address — an entirely
+foreseeable outcome of switching between local Wi-Fi and mobile hotspot,
+not a contrived edge case — is permanently stuck short of uninstalling
+and reinstalling the app (which, per P43, also mints a new
+`device_identifier`). This was not previously documented anywhere in
+P37–P45, because none of those milestones' physical verification passes
+spanned two different networks between pairing and use.
+
+**This finding was deliberately not fixed in P46.** A correct minimal fix
+(a Settings action calling the already-existing `clearSession()`
+unconditionally) is small, but it is a real UI/behavior addition, not a
+packaging/config correction — implementing it unilaterally would have
+exceeded this milestone's audit-only charter. It is recorded under
+[Not Yet Implemented](#not-yet-implemented) pending a scoping decision on
+whether to fold it into a short follow-up pass.
+
+**P46's verdict is HOLD, not SHIP, solely on this one item.** Every other
+area audited (release inventory, artifact freshness, deferred-issue
+re-classification, versioning, repository/git hygiene, security/signing
+sanity) was found already correct or an already-accepted, unchanged V1
+limitation — see `docs/15_QA_NOTEBOOK.md`'s P46 entry for the full
+per-area breakdown, including the Windows Firewall item, which this pass
+was able to *confirm working* (not just "unconfirmed") even on a
+Public-categorized network profile with no bundled firewall rule.
+
+Do not begin further release work automatically — the scoping decision on
+the one open item above is the project owner's to make, per this file's
+Git Workflow rules.
+
+**Update:** the project owner authorized the minimal fix; it was
+implemented and physically verified as P47 (see below). The P46 HOLD
+verdict no longer applies to this item.
+
+## Android Session Recovery & "Forget This Desktop" (P47)
+
+**Fixes P46's one blocker.** A paired Android device that can no longer
+reach the desktop at its stored `desktop_base_url` (switching between
+local Wi-Fi and mobile hotspot, or any DHCP change) now has an in-app way
+back to pairing, instead of only uninstalling and reinstalling the app.
+
+**`SettingsScreen.tsx`'s new `ForgetDesktopCard` is a thin UI trigger over
+already-existing mechanisms — no new session-clearing path was added.**
+It calls `SessionManager.clearSession()` (the exact same function the
+401-triggered `setUnauthorizedHandler` already used), confirmed via
+`AppDialog`'s existing confirm/cancel primitive (P30) — never
+`Alert.alert()`/`window.confirm()`-equivalents. `RootNavigator.tsx` needed
+no changes: it already switches purely on `useSession()`'s `session`
+value, so clearing the session alone is sufficient to fall back to
+`PairingStack` — no explicit `navigation.navigate()` call is correct or
+necessary for a "return to unpaired state" flow on Android. **Any future
+Android action that should return the app to the pairing flow must follow
+this same shape: call `SessionManager.clearSession()` and let
+`RootNavigator` react, rather than navigating directly.**
+
+**This is a purely local, Android-side session reset — it must never call
+a backend delete/unpair endpoint.** `pairing/deviceIdentifier.ts`'s
+`device_identifier` is stored independently of `Session` (a separate file,
+per P43) and is therefore untouched by `clearSession()` — physically
+verified live on RMX3997: forgetting the desktop and re-pairing (without
+also removing the row on Desktop) reconciled onto the *same* backend
+`Device` row (identical `id`, identical `device_identifier`, unchanged
+`paired_at`) rather than creating a duplicate, proving P43's
+identifier-persistence contract survives this new feature. A second live
+test — removing the Desktop-side row before re-pairing — correctly
+produced a fresh `Device` row instead (expected: removal is a genuine
+backend unpair, not something P47 touches or should paper over).
+
+**Do not generalize this into a "Desktop Remove"-equivalent affordance.**
+The Settings action is deliberately non-destructive-looking (no red/
+`#dc2626` styling on the trigger button, unlike Clear History's P34/P35
+exception) because it does not delete anything on the backend — only the
+confirmation dialog's own confirm button uses `style: 'destructive'`,
+since only *local* session/credential state is actually discarded. Any
+future "disconnect"/"forget" affordance elsewhere in the app should apply
+the same trigger-vs-confirm-button distinction rather than defaulting
+both to red.
+
+Full investigation, physical-verification detail (including the two live
+re-pair cycles above), and automated-test results:
+`docs/15_QA_NOTEBOOK.md`'s P47 entry.
+
+Do not begin further work automatically — the next milestone (if any) is
+the project owner's to authorize, per this file's Git Workflow rules.
 
 ## Documentation
 

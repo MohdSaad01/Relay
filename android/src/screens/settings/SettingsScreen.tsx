@@ -18,6 +18,8 @@ import { ApiError } from '../../api/client';
 import { getDefaultDeviceName } from '../../pairing/deviceName';
 import { AppDialog, useAppDialog } from '../../components/AppDialog';
 
+type AppDialogController = ReturnType<typeof useAppDialog>;
+
 /**
  * A small, user-facing settings screen — deliberately not an administrative
  * configuration panel (P23). Exposes exactly two things: this device's
@@ -145,6 +147,10 @@ export function SettingsScreen() {
           location.
         </Text>
       </View>
+
+      <Text style={[styles.sectionTitle, styles.sectionSpacing]}>Connection</Text>
+      <ForgetDesktopCard dialog={dialog} />
+
       <AppDialog {...dialog.props} />
     </View>
   );
@@ -269,6 +275,79 @@ function DeviceNameCard() {
           <Text style={styles.hint}>This is the name paired desktops see for this device.</Text>
         </>
       )}
+    </View>
+  );
+}
+
+/**
+ * Local session recovery (P47/P46) for the case where this device can no
+ * longer reach the desktop at its stored `desktop_base_url` (e.g. after
+ * switching between local Wi-Fi and a mobile hotspot) — previously the
+ * only way back to pairing was uninstalling the app, since
+ * SessionManager.clearSession() was only ever triggered by an HTTP 401.
+ *
+ * This clears only the local Session (secure-storage credentials, api/config,
+ * in-memory state) via the existing SessionManager.clearSession() — the
+ * same mechanism the 401 handler already uses. It does not call any backend
+ * endpoint: the desktop's Device row is untouched, exactly like Desktop's
+ * own Remove Device is a separate, backend-side action this never invokes.
+ * pairing/deviceIdentifier.ts's device_identifier is stored independently of
+ * Session and is therefore also untouched — re-pairing after this reuses
+ * the same identifier, so the backend's P43 reconciliation applies again
+ * rather than minting a new Device row.
+ *
+ * Rendered only while SettingsScreen itself renders, which — per
+ * RootNavigator's session-driven root switch — is only ever while a session
+ * exists, so no separate "only show when paired" guard is needed beyond the
+ * `if (!session) return null` this shares with DeviceNameCard.
+ */
+function ForgetDesktopCard({ dialog }: { dialog: AppDialogController }) {
+  const { session } = useSession();
+  const [forgetting, setForgetting] = useState(false);
+
+  const handleForget = useCallback(async () => {
+    setForgetting(true);
+    try {
+      await SessionManager.clearSession();
+    } finally {
+      // Only reachable if clearSession() itself throws — on success,
+      // RootNavigator swaps this whole screen out from under us.
+      setForgetting(false);
+    }
+  }, []);
+
+  const handlePress = useCallback(() => {
+    dialog.show({
+      title: 'Forget this desktop?',
+      message:
+        'This device will forget its connection to the paired desktop. The desktop keeps its own record of this device, so you can pair again anytime.',
+      buttons: [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Forget Desktop', style: 'destructive', onPress: handleForget },
+      ],
+    });
+  }, [dialog, handleForget]);
+
+  if (!session) {
+    return null;
+  }
+
+  return (
+    <View style={styles.card}>
+      <Text style={styles.label}>Paired desktop</Text>
+      <Text style={styles.hint}>
+        Forget this desktop on this device. You can pair again later — the desktop's own record of this
+        device is not affected.
+      </Text>
+      <Pressable
+        style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}
+        onPress={handlePress}
+        disabled={forgetting}
+        accessibilityRole="button"
+        accessibilityLabel="Forget this desktop"
+      >
+        <Text style={styles.secondaryButtonText}>{forgetting ? 'Forgetting…' : 'Forget This Desktop'}</Text>
+      </Pressable>
     </View>
   );
 }

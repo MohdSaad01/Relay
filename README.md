@@ -12,37 +12,33 @@ This repository contains Version 1 of Relay.
 
 ## Status
 
-Version 1 is **feature-complete and packaged for release as `v1.0.0`**:
-the backend API, the Electron desktop app, and the React Native Android
-app all implement the full pairing → discovery → share → transfer →
-stream flow described in `docs/`. The Windows desktop app has a real,
-version-1.0.0 installer (`docs/12_Packaging_Deployment.md`) —
-`cd desktop && npm run dist` produces `desktop/dist/Relay-Setup-1.0.0.exe`,
-a per-user NSIS installer bundling the packaged FastAPI backend. The
-Android app has a real, physically-verified release build signed with a
-genuine production keystore (`cd android/android &&
-./gradlew.bat :app:assembleRelease` produces `app-release.apk`,
-`versionName 1.0.0`) — sideloaded, no store listing. The installed
-Desktop app, its bundled backend, and the release APK have been verified
-working together as one product over a real LAN, with no release
-blockers found (`docs/15_QA_NOTEBOOK.md`'s P41/P48/P51). The Windows
-installer remains unsigned (out of scope for V1 — see
-`docs/12_Packaging_Deployment.md` §12); enhancements are listed under
-[Known Limitations](#known-limitations) below.
+**Relay `v1.0.0` has shipped.** The backend API, the Electron desktop
+app, and the React Native Android app all implement the full pairing →
+discovery → share → transfer → stream flow described in `docs/`. The
+Windows desktop app has a real, version-1.0.0 installer
+(`docs/12_Packaging_Deployment.md`) — `cd desktop && npm run dist`
+produces `desktop/dist/Relay-Setup-1.0.0.exe`, a per-user NSIS installer
+bundling the packaged FastAPI backend. The Android app has a real,
+physically-verified release build signed with a genuine production
+keystore (`cd android/android && ./gradlew.bat :app:assembleRelease`
+produces `app-release.apk`, `versionName 1.0.0`) — sideloaded, no store
+listing. The installed Desktop app, its bundled backend, and the release
+APK have been verified working together as one product over a real LAN,
+with no release blockers found (`docs/15_QA_NOTEBOOK.md`'s P41/P48/P51).
+The Windows installer remains unsigned (out of scope for V1 — see
+`docs/12_Packaging_Deployment.md` §12); other enhancements are listed
+under [Known Limitations](#known-limitations) below.
 
-A small download/overview website lives in `web/` (GitHub Pages-ready,
-not yet deployed) and its download links point at the project's GitHub
-Releases page — see [Downloads](#downloads) below for how the `v1.0.0`
-release itself is published.
+The project's overview/download website is live on GitHub Pages
+(`web/`), and its download links point at the published GitHub Release —
+see [Downloads](#downloads) below.
 
 ## Downloads
 
 Relay `v1.0.0` is distributed as a Windows installer and an Android APK
 via [GitHub Releases](https://github.com/MohdSaad01/Relay/releases),
 alongside a `SHA256SUMS.txt` checksum file — no other distribution
-channel exists. If no `v1.0.0` release is listed yet, it hasn't been
-published to GitHub yet; build the artifacts yourself following
-`docs/12_Packaging_Deployment.md` §15 in the meantime.
+channel exists.
 
 ## Features
 
@@ -299,7 +295,7 @@ here before release._
 | P50 | Production Android signing | Done |
 | P51 | Release artifact finalization — version `1.0.0` | Done |
 | P52 | Relay website (`web/`) | Done |
-| P53 | GitHub Release & distribution setup | Artifacts/checksums/notes/website prepared; tag & GitHub Release publish pending (manual, by project owner) |
+| P53 | GitHub Release & distribution setup | Done — `v1.0.0` tagged and published on GitHub Releases |
 
 See `CLAUDE.md` for the detailed, per-milestone implementation notes.
 
@@ -348,7 +344,9 @@ respectively during a documentation consolidation pass.)
 
 `backend/README.md` documents the backend's internals in depth (services,
 API layer, dependency injection, request flow). `CLAUDE.md` documents
-project rules and per-milestone history for Claude Code.
+project rules and durable engineering conventions for Claude Code; the
+full historical milestone-by-milestone record lives in
+`docs/15_QA_NOTEBOOK.md`.
 
 ## License
 

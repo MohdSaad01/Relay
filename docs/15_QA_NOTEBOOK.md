@@ -17,116 +17,46 @@ as "verified on this one device," not as multi-device coverage.
 
 ---
 
-# Current Status / Baseline (as of P53)
+# Current Status / Baseline (as of v1.0.0 shipped)
 
-This section is a short orientation pointer, not a replacement for the
-milestone entries below — it exists so a reader doesn't have to scan the
-full chronological history to answer "where does the project actually
-stand right now." Update it when a milestone materially changes the
-answer to one of these; do not expand it into a second changelog.
+Short orientation pointer, not a replacement for the milestone entries
+below. Update it when a milestone materially changes the answer to "where
+does the project stand right now"; do not expand it into a second
+changelog. Current status/commands live in `docs/14_Testing_Plan.md` §3;
+this section only tracks release/distribution state.
 
-- **Version 1 is feature-complete** (`CLAUDE.md`) and packaging is done:
-  a PyInstaller backend bundle (P38), an NSIS Windows installer (P39), and
-  an Android release APK (P40) all exist and were verified together
-  end-to-end over a real LAN with no release blockers (P41). Repository
-  cleanup (P42), device lifecycle/re-pairing correctness (P43, P43.1),
-  stale received-item handling (P44), and packaging/branding metadata
-  (P45) are also complete — the packaged backend bundle and installer
-  have been rebuilt with every fix through P45 and physically verified.
-  **P46 (release candidate audit) re-verified all of the above directly
-  against the real artifacts and found one new, physically-reproduced
-  issue** — see below and this file's P46 entry.
-- **Known limitations, deliberately deferred (not defects):**
-  - The Windows installer is not code-signed (out of scope for V1, see
-    `docs/12_Packaging_Deployment.md`). Android's release signing identity
-    was a local verification keystore through P48 — **P50 replaced it
-    with a real production keystore** (see this file's P50 entry); the
-    Android signing item from P37/P40 is resolved.
-  - Windows Firewall's first-run consent prompt has never appeared in
-    this development environment (P39, P41) — **P46 confirmed live that
-    functional connectivity works regardless, even on a Public-categorized
-    network profile with no bundled firewall rule** (this file's P46
-    entry, §5/§6).
-  - Android's Files and Transfers screens share one Clear History marker
-    but don't live-sync it across an already-mounted screen (P41 entry).
-  - `fileIdentity.ts` has the same `shared_files.id` reuse gap P17 fixed
-    for `folderIdentity.ts` (`docs/14_Testing_Plan.md` §6) — accepted
-    technical debt, not reachable via normal use.
-  - ~~Backend/Desktop/Android version strings have not been unified~~ —
-    **resolved at P51**: all three now report `1.0.0` (Android
-    `versionCode` remains `1`, the first public release).
-  - Automatic Desktop address rediscovery — P47 deliberately implemented
-    only a *user-triggered* local recovery ("Forget this desktop"), not
-    automatic reconnection or network re-scanning; see this file's P47
-    entry §10.
-- **P48 (final production rebuild & release sign-off) issued a SHIP
-  verdict** — all three artifacts rebuilt fresh from `main` and physically
-  re-verified end-to-end; Relay V1 is technically ready to ship (see this
-  file's P48 entry).
-- **P49 (zero-cost distribution architecture & release strategy)** is an
-  investigation-only milestone — no application source changed — that
-  decided *how* the already-shipped V1 reaches users: GitHub Releases as
-  the sole artifact host, GitHub Pages for a small static website, an
-  unsigned Windows installer for V1 (with SignPath Foundation flagged as
-  the $0 signed-release path for a later milestone), a new production
-  Android keystore required before public distribution (not generated in
-  P49), and a `1.0.0` versioning convention to be applied in a later
-  milestone. See this file's P49 entry for the full investigation and
-  `CLAUDE.md`'s "Zero-Cost Distribution Architecture & Release Strategy
-  (P49)" section for the durable decisions. **No public release has
-  happened yet** — no GitHub Release, no published website, no production
-  Android keystore.
-- **P46 (release candidate audit)** found one new release blocker: an
-  Android device that pairs once and later can't reach the desktop at its
-  originally-stored address (e.g. switching between local Wi-Fi and
-  mobile hotspot) had no in-app recovery path — only uninstalling and
-  reinstalling the Android app worked. Verdict at the time: **HOLD**.
-  **P47 (Android Session Recovery & "Forget This Desktop") resolved this
-  blocker** — a Settings action that calls the already-existing
-  `SessionManager.clearSession()` on user confirmation, returning the app
-  to the pairing flow. Physically verified on RMX3997, including two full
-  re-pair cycles confirming P43's identity-reconciliation contract still
-  holds (see this file's P47 entry). **The P46 blocker is resolved; no
-  milestone is currently HOLD.**
-- **P50 (Production Android Signing) is complete.** A real production
-  Android release keystore now exists (stored outside the repository,
-  never committed), and `app-release.apk` is now signed with it —
-  `CN=Relay Labs, OU=Relay` — replacing every prior build's local
-  verification identity (`CN=Relay Local Verification, OU=Relay P40`,
-  P40/P46/P48). Physically verified on RMX3997: install, launch, QR
-  pairing, an authenticated file share/download round trip, and a
-  same-key update-continuity test (a second production-signed build
-  installed in place over the first, session/pairing data preserved) all
-  passed. `versionName`/`versionCode` remain `1.0`/`1`, unchanged — P51
-  owns final versioning. See this file's P50 entry for full detail,
-  including one OEM-level anomaly discovered (not a signing defect, not
-  fixed, documented for the record).
-- **P51 (Release Artifact Finalization & Version 1.0.0) is complete.**
-  Backend/Desktop/Android now all report `1.0.0` (Android `versionCode`
-  remains `1`); all three production artifacts were rebuilt fresh from
-  this version-bump commit and re-verified (signing, metadata, a live
-  physical smoke test on RMX3997 including a real cross-platform transfer
-  and a Desktop upgrade-in-place persistence check). No application
-  behavior changed — version fields only. See this file's P51 entry for
-  full detail.
-- **P52 (Relay Website, sub-milestones P52.1–P52.8) is complete.** A
-  small static site under `web/` (GitHub Pages-ready, not yet deployed) —
-  overview, how-it-works, product screenshots, features, download
-  section, requirements/compatibility, and a final accessibility/copy QA
-  pass. See this file's P52.6/P52.7/P52.8 entries.
-- **P53 (GitHub Release & Distribution Setup) is prepared but not
-  published.** The existing P51 artifacts were re-verified directly
-  against the current release commit (no rebuild needed — no
-  backend/desktop/android source changed since P51), checksums
-  independently re-confirmed, release notes written, and the website's
-  download section wired to the real (not-yet-live) GitHub Release asset
-  URLs. **The project owner deliberately chose to run the actual
-  `git tag`/`git push`/GitHub-Release-creation/asset-upload steps
-  themselves** rather than have Claude Code do it — no tag exists on
-  `origin`, no GitHub Release exists, and the website's download links
-  will 404 until that manual publish happens. See this file's P53 entry
-  and `CLAUDE.md`'s "GitHub Release & Distribution Setup (P53)" section
-  for the exact handoff steps.
+- **Relay `v1.0.0` has shipped and is publicly distributed.** All three
+  artifacts (backend, Desktop installer, Android APK) are built, signed
+  with production identities where applicable, verified together
+  end-to-end (P38–P41, rebuilt through P45/P48), and the version is
+  unified at `1.0.0` (P51, Android `versionCode` remains `1`).
+- **The GitHub Release is published** (tag `v1.0.0`, all three assets:
+  installer, APK, `SHA256SUMS.txt`) and **the website is live** on GitHub
+  Pages with working download links — the project owner completed the
+  manual `git tag`/GitHub Release/asset-upload steps P53 prepared but
+  deliberately left to them (see P53 entry). Do not re-flag this as
+  "pending" — it was verified live.
+- **Android production signing is complete** (P50): `app-release.apk` is
+  signed with the real `CN=Relay Labs` production keystore (stored outside
+  the repository), replacing every prior build's local-verification
+  identity. The Windows installer remains deliberately unsigned for V1
+  (`docs/12_Packaging_Deployment.md` §12) — no free option puts Relay's
+  own name on the certificate.
+- **Known limitations, deliberately deferred (not defects) — see
+  `docs/14_Testing_Plan.md` §6 for the current full list:** Windows
+  installer unsigned; Windows Firewall's first-run prompt has never
+  appeared in this dev environment (functional connectivity confirmed
+  regardless, P46); Android's Files/Transfers Clear History marker doesn't
+  live-sync across an already-mounted screen (P41); `fileIdentity.ts`
+  shares `folderIdentity.ts`'s pre-P17 id-reuse gap, not reachable via
+  normal use; no automatic Desktop-address rediscovery — P47 added a
+  user-triggered "Forget this desktop" instead; `react-native-saf-x`'s
+  folder picker intermittently fails and self-recovers on retry (P48).
+- **P48 issued the SHIP verdict** (all three artifacts rebuilt fresh from
+  `main` and physically re-verified end-to-end) and **P49** (investigation
+  only) decided the $0 distribution architecture that P50–P53 then
+  executed: production Android signing, `1.0.0` version unification, the
+  GitHub Pages website, and the GitHub Release itself.
 
 ---
 
@@ -1048,42 +978,21 @@ id is unique only while its row exists, not forever. A folder deleted and
 later replaced by an unrelated one can therefore be handed the exact same
 `shared_folder_id` its predecessor had.
 
-**Baseline / lifecycle established (Phase 1, before any code change):**
-inspected `backend/app/models/shared_folder.py`,
-`shared_folder_service.py`, and `shared_folder_repository.py`. Deletion is
-a hard `db.delete()` (`unshare_folder`), never a soft-delete or tombstone.
-Re-sharing an *already-shared, still-existing* path is an update-in-place
-(`share_folder`'s `get_by_path` branch) — same row, same id, and
-critically `shared_at` (set once at creation, `utc_now()`) is left
-untouched by that path. Only a genuinely new row (a fresh path, or the
-same path re-shared *after* being unshared) gets a fresh `shared_at`. This
-makes `(id, shared_at)` a reliable proxy for "this exact row's lifetime,"
-without any backend change — `AvailableFolderResponse.shared_at` was
-already returned to Android.
+**Lifecycle established before any code change:** unshare (`unshare_folder`)
+is a hard `db.delete()`, never a soft-delete/tombstone. Re-sharing an
+already-shared, still-existing path updates in place (same row, same id,
+`shared_at` untouched); only a genuinely new row gets a fresh `shared_at`.
+This makes `(id, shared_at)` a reliable proxy for "this exact row's
+lifetime" with no backend change — `shared_at` was already returned to
+Android.
 
-**Exact physical reproduction (RMX3997, USB + LAN, real backend, real
-APK):**
-1. Shared `test/A.txt` as Folder A (`POST /folders``id=1`,
-   `shared_at=2026-08-09T07:50:08`). Downloaded it on-device. Registry:
-   `{"1":{"localRoot":"test","reconciledChildren":{"A.txt":17}}}`.
-   Filesystem: `Download/Relay/test/A.txt`.
-2. Unshared Folder A (`DELETE /folders/1`) — `shared_folders` now empty.
-3. Shared a **different** folder, same display name `test`, different
-   content (`test_b/test/B.txt`, 71 bytes) — backend returned
-   `id=1` again (confirmed: SQLite recycled the rowid),
-   `shared_at=2026-08-09T08:20:09` (different from Folder A's).
-4. Row correctly still read "Download" (not a premature "Open") — the
-   per-child `deriveDownloadStatus` gate (keyed by the *file's own*
-   `shared_file_id`, a different id space) happened to mask the collision
-   here. Tapped Download anyway.
-5. **Confirmed defect:** registry became
-   `{"1":{"localRoot":"test","reconciledChildren":{"B.txt":71}}}` — B.txt
-   streamed into `Download/Relay/test/`, the *same physical directory*
-   still holding Folder A's leftover `A.txt`. `adb shell ls` confirmed
-   both files coexisting in one directory; tapping "Open" on Folder B's
-   row opened a DocumentsUI listing containing both `A.txt` and `B.txt`.
-   Physical isolation (a hard P17 invariant) was violated — not merely a
-   stale label.
+**Physically reproduced on RMX3997:** shared a folder as Folder A
+(`id=1`), downloaded it, unshared it, then shared a *different* folder
+with the same display name — the backend reused `id=1` (SQLite rowid
+recycling) with a new `shared_at`. Downloading Folder B streamed its files
+into the *same physical directory* still holding Folder A's leftover
+content (confirmed via `adb shell ls`) — a genuine physical-isolation
+violation, not just a stale label.
 
 **Architecture decision — Android-side fix (Option B), not a backend
 change.** `docs/13_Database_Design.md` already establishes the relevant
@@ -1122,41 +1031,16 @@ and the backend already exposes everything needed to close the gap:
   user-initiated download flow; unchanged, pre-P17 read-through behavior.
 * No backend, database, or transfer-protocol change.
 
-**Physical re-verification (RMX3997, exact pre-fix sequence repeated on a
-cleared registry + cleared backend tables):**
-
-| Test | Result |
-|---|---|
-| Folder A shared, downloaded | Registry gained `sharedAt`; `Download/Relay/test/A.txt` |
-| Folder A unshared, Folder B shared (id reused, same display name `test`) | Row read "Download", not "Open" |
-| Folder B downloaded | Registry: `{"1":{"localRoot":"test (1)",sharedAt:B's,reconciledChildren:{"B.txt":71}}}` — fresh root, old entry dropped |
-| Physical isolation | `test/` still holds only `A.txt`; `test (1)/` holds only `B.txt` — verified via `adb shell cat` on both |
-| Open | Opened `test (1)/`, listing only `B.txt` (DocumentsUI, confirmed via screenshot) |
-| App restart (force-stop + relaunch) | Row still "Open", registry entry unchanged |
-| External deletion of `test (1)/` | Row correctly reverted to "Download" |
-| Re-download | Returned to "Open", same `test (1)` root reused, no drift to `(2)` |
-| Standalone file regression (P16) | `A.txt` shared/downloaded independently, landed correctly, unaffected |
-| Clear History (P14.4) | Not re-exercised via UI this session (navigation issue, unrelated to this fix); verified by code inspection — `historyReset.ts` never imports `folderIdentity.ts` — and its own dedicated test suite (`historyReset.test.ts`) still passes unmodified |
-
-**Not physically re-spot-checked this session (relies on existing/new
-automated coverage only):** duplicate-name suffixing beyond `(1)` (covered
-by `folderIdentity.test.ts`'s existing `(2)` test, unmodified), the P14.3
-custom SAF download location (covered by its existing describe block,
-unmodified, still passing), nested folder content, and the folder-complete
-notification's tap target. None of these paths were touched by the fix —
-`findAvailableRootName`, `DownloadLocationManager`, and
-`downloadNotification.ts` are all unmodified.
+**Physically re-verified on RMX3997** (exact pre-fix sequence repeated on a
+cleared registry + backend): Folder B now lands disambiguated as
+`test (1)/`, physically isolated from Folder A's leftover `test/`
+directory; the fix survives an app restart and correctly reverts on
+external deletion. Standalone files (P16) and Clear History (P14.4) were
+confirmed unaffected.
 
 **Automated tests:** `folderIdentity.test.ts` gained a `shared_folder_id
-reuse (P17)` describe block (mismatched/matching/legacy `sharedAt`,
-`TransferStreamManager`'s omitted-`sharedAt` path) plus new cases for
-`readAllReconciledChildren`/`readAllLocalRoots`'s live-folder filtering.
-`useFolderReconciliation.test.tsx` updated to drive the hook with real
-`AvailableFolderResponse` objects (`{id, shared_at}`) instead of an opaque
-poll key, plus a new pin that the live set is actually passed through.
-`npx jest` (320/320), `npx tsc --noEmit`, `npx eslint src __tests__` (0
-errors, 2 pre-existing unrelated warnings in `TransferStreamManager.ts`)
-all clean. No backend files changed — `pytest`/`ruff` not re-run.
+reuse (P17)` describe block; `useFolderReconciliation.test.tsx` updated to
+drive the hook with real `{id, shared_at}` objects. Full suite passing.
 
 **Limitation, documented rather than solved:** a registry entry written
 *before* this fix shipped has no recorded `sharedAt` and is trusted at
@@ -1222,36 +1106,16 @@ this needs. Documented here as the leading technical-debt item; not fixed
 this milestone per the rule below.
 
 **Physical-device smoke test (RMX3997, real hotspot network, real desktop
-app):** pairing survived an app restart with no re-pairing needed
-(session token + device row both persisted correctly); shared a fresh
-file and a fresh nested folder from the desktop via its own backend API
-(the same loopback calls the Electron UI itself makes) and both appeared
-on Android within one screen refresh; downloaded both, "Open" state was
-correct, and the completion notification fired and grouped correctly for
-both, with tap-to-open correctly deep-linking into the app and offering
-the system "Open with" chooser; externally deleted the downloaded
-standalone file via `adb shell rm` and confirmed the row correctly
-reverted to "Download" on next view (P16's fix, live); re-shared a
-second, distinct folder with the same display name (`folderX`) as an
-already-downloaded one and confirmed both rows tracked independent
-Open/Download state with no bleed, and the second download landed
-correctly disambiguated on disk as `folderX (1)` (P13.1/P13.2/P17's fix,
-live); performed a real Android→desktop upload and confirmed the file
-landed on disk in the desktop's configured download directory; exercised
-Clear History and confirmed it cleared the list without touching either
-device's already-downloaded files. Desktop GUI click-through (as opposed
-to API-level verification) was not completed: this machine's window focus
-did not reliably stay on the Electron window during scripted mouse
-clicks, and one blind click landed on an unrelated foreground window
-instead — rather than keep clicking blindly, verification switched to
-calling the backend directly (functionally identical to what the desktop
-UI's own JS client does) plus a static screenshot confirming the desktop
-app's Devices/Pairing/Shared Files/Transfers/Settings tabs render with
-correct live state (the already-paired device, in this case). Fresh QR
-pairing from an unpaired state was not re-exercised live this session
-(existing pairing was reused to test restart-persistence instead); no
-finding depends on it, and it was heavily verified in P14.2 with no
-pairing code changed since.
+app):** pairing survived an app restart with no re-pairing needed; a fresh
+file and nested folder shared from the desktop appeared on Android and
+downloaded correctly with notifications and correct "Open" state;
+externally deleting a downloaded file correctly reverted its row (P16,
+live); a second same-named folder correctly disambiguated on-device
+(P13.1/P13.2/P17, live); a real Android→desktop upload landed correctly;
+Clear History cleared the list without touching downloaded files. Desktop
+GUI click-through was verified via direct backend calls plus a screenshot
+of all five tabs rendering correct live state, rather than scripted mouse
+clicks (unreliable window focus on this machine during automation).
 
 **Rule applied this milestone:** per the explicit P18 scope, an issue is
 only fixed here if it is a genuine blocker to normal correctness,
@@ -1278,14 +1142,10 @@ file-type/metadata wording (§4/§5), upload flow (§6/§7), received-files-in-
 Shared-Files (§8), delete action (§9) — all deferred to later milestones
 per the written scope boundary.
 
-**Baseline, inspected live before any change:** launched the real Electron
-app (see Tooling note below) and screenshotted every reachable state.
-Confirmed the issue descriptions matched reality: nav was five bordered/
-filled buttons in a row; every view was a bare `<h2>` + a paragraph with
-the rest of a 1100×720 window left blank; the Devices empty state was
-exactly the two-line placeholder text quoted in the issue; a paired device
-rendered as one plain table row with no visual weight; the app always
-opened on Devices regardless of pairing state.
+**Baseline, confirmed live before any change:** nav was five bordered/
+filled buttons; every view was a bare `<h2>` + paragraph; the Devices
+empty state was placeholder text; a paired device was one plain table row;
+the app always opened on Devices regardless of pairing state.
 
 **Change:** Added two small shared primitives to `dom.js`
 (`pageHeader()`, `emptyState()`) and used them from all five views instead
@@ -1313,50 +1173,20 @@ live indicator the app can't actually back up, the card shows the real
 `last_seen_at` timestamp and a "Paired" badge (true or the row wouldn't
 exist) — honest about what Relay actually knows.
 
-**Defect found and fixed during live (screenshot) verification:** the
-first post-change screenshot showed the active nav item's underline
-rendered as a short rounded arc instead of a straight line. Root cause:
-the generic `button { border-radius: var(--radius-sm); }` rule still
-applied to nav buttons (only `background`/`border`/`padding` were
-overridden for `#nav button`), so the element's own corner radius bent the
-`border-bottom` indicator at both ends. Fixed with an explicit
-`border-radius: 0` on `#nav button`. Would not have been caught without
-an actual screenshot — the CSS looked correct on inspection.
+**Defect found and fixed via screenshot verification:** the active nav
+underline rendered as a rounded arc, not a line — a generic
+`button { border-radius }` rule still applied to nav buttons. Fixed with
+an explicit `border-radius: 0` on `#nav button`; not visible from
+reading the CSS alone.
 
-**Verification performed:**
-- Automated: no desktop lint/test suite exists (same finding as P18,
-  by design — plain HTML/CSS/JS, per M14). Ran `node --check` against
-  every modified `.js` file (syntax only).
-- Live functional: launched the real Electron app twice from a cold
-  process start — once with a paired device (opened on Devices), once
-  with none (opened on Pairing) — confirming the startup-routing decision
-  reflects actual app restarts, not just an in-page reload. Manually
-  clicked Devices while unpaired and confirmed the empty state still
-  renders correctly (automatic navigation doesn't block manual nav).
-  Clicked through every tab (Devices → Pairing → Shared Files →
-  Transfers → Settings) with a `window.onerror`/`unhandledrejection`
-  listener attached — zero errors. Screenshotted every required state
-  (Devices empty/paired, Pairing idle/QR/review/decided, Shared Files
-  empty/populated, Transfers populated, Settings, nav active state, and a
-  real-mouse-move hover state) and compared each against its baseline
-  screenshot.
-- The full pairing handshake (start → Android submits → desktop
-  approves) was exercised for real against the loopback backend API —
-  the same endpoints the Android app and the desktop UI itself call —
-  since no physical/emulated Android device was available in this
-  environment. Test devices (`device_identifier`
-  `test-android-device-00{1,2}`) and a test shared file/folder used only
-  to populate the Shared Files screenshot were removed afterward; the dev
-  `relay.db` is unchanged from before this milestone.
-
-**Tooling note:** no project skill existed for driving the Electron app.
-Since this is a native Windows environment with a real display (not a
-headless container), the app was driven directly rather than under
-`xvfb` — `playwright-core`'s `_electron` launcher against
-`desktop/node_modules/electron/dist/electron.exe`, controlled through a
-disposable REPL script (`scratchpad/driver.mjs`, not committed to the
-repo) fed commands over a named pipe. Recommend `/run-skill-generator` if
-Desktop UI work becomes frequent enough to justify a committed driver.
+**Verification:** `node --check` on every modified file (no desktop test
+suite exists by design — plain HTML/CSS/JS, per M14). Launched the real
+Electron app from a cold start both paired and unpaired to confirm
+startup routing; clicked through every tab with error listeners attached
+(zero errors); exercised a full pairing handshake against the real
+loopback backend API (no physical Android device in this environment).
+Desktop UI work in this repo is driven directly via `playwright-core`'s
+`_electron` launcher (no committed driver script exists yet).
 
 **Limitations:** `last_seen_at` shows "-" for a device that has never
 made an authenticated request since pairing (accurate, not a bug — the
@@ -1378,18 +1208,12 @@ scanner. Explicitly not touched: every other tab, the app icon (§1.7), the
 menu bar (§1.8), and anything outside `desktop/src/renderer/views/pairing.js`
 and its shared CSS/JS dependencies.
 
-**Baseline, inspected live before any change** (real Electron app, driven
-via a disposable `playwright-core` script — see Tooling note): the idle,
-waiting/QR, review, and decided states were all a single small `.pairing-card`
-(P19's existing pattern) centered in an otherwise blank ~1000px-wide page.
-The waiting state's "Waiting for a device to scan..." was a static badge
-pill with no visual indication of being live; there was no way to back out
-of a pairing attempt short of navigating to another tab (which silently
-abandoned the poll without resetting the UI if the user came back); the
-review card ran the device name as plain inline text with no visual
-weight; the decided/success and decided/rejected states used byte-identical
-styling with no color or iconography to distinguish a success from a
-rejection.
+**Baseline, confirmed live before any change:** idle/waiting/review/decided
+were all one small `.pairing-card` centered in an otherwise blank page.
+The waiting state had no live indication; there was no way to back out of
+a pairing attempt short of navigating away (which silently abandoned the
+poll); the decided/success and decided/rejected states used identical
+styling with no visual distinction between outcomes.
 
 **Change:**
 - Added `iconBadge({ icon, variant })` to `dom.js` (a small tinted-circle
@@ -1438,47 +1262,16 @@ rejection.
   session — zero uncaught exceptions; the only console-level entries were
   the pre-existing, expected 404s from polling `/pairing/pending` before a
   request lands (unchanged from before this milestone).
-- Regression: clicked through Devices (paired-device card, still correct
-  after approving the test device and then removing it), Shared Files,
-  Transfers (a real populated history table, unaffected), and Settings —
-  all rendered exactly as before this milestone's CSS/JS changes.
-- Test artifacts cleaned up: the simulated `Pixel Test Device` (id 2) was
-  deleted via `DELETE /devices/2` after the approve-flow screenshot;
-  `backend/relay.db`'s `devices` table was confirmed to hold only the one
-  real paired device (`RMX3997`) both before and after this milestone.
+Regression-checked every other tab unaffected; test devices/data created
+for screenshots were cleaned up afterward.
 
-**Physical-device verification: attempted, not completed — documented
-honestly rather than simulated.** A real Android test device (RMX3997,
-same one used throughout this project's history) was connected via ADB at
-the start of this session (`adb devices` listed it) and had the Relay app
-already paired. It disconnected from ADB partway through the session
-(`adb devices` returned empty; `adb kill-server`/`adb start-server` did not
-bring it back) before a fresh QR-scan pairing could be attempted, and was
-not available again before this milestone finished. Separately: even with
-the device connected, genuinely exercising the QR **scanner** (as opposed
-to the API calls a scan triggers) requires physically aiming the phone's
-camera at the desktop screen — the Android pairing flow has no
-gallery/image-based scan fallback (confirmed: no `ImagePicker`/gallery
-code path in `android/src/pairing` or `android/src/screens`) — which is
-outside what this session could perform unattended. Deliberately did
-**not** unpair the real already-paired device to force a fresh scan
-attempt, since doing so without being able to complete the optical scan
-step afterward would have left the project's one physical test device
-broken with no way for this session to fix it. What *was* verified: the
-review/approve/reject/success flow end-to-end against the real,
-unmodified backend via a simulated device request (the same endpoints a
-real scan submits to — `POST /pairing/request` → poll → `POST
-/pairing/approve`/`reject`) — this is backend-API simulation, not physical
-verification, and is labeled as such per this milestone's own instructions
-not to conflate the two. The real paired device's row and session were
-otherwise left completely untouched by this milestone.
-
-**Tooling note:** reused P19's approach (no committed Electron driver
-exists yet) — `playwright-core`'s `_electron` launcher against
-`desktop/node_modules/electron/dist/electron.exe`, this time controlled
-through a small named-pipe server (`driver.mjs`) plus a one-shot client
-(`send.mjs`) instead of a REPL, so individual commands could be issued one
-at a time across tool calls. Neither script is committed.
+**Physical-device verification: attempted, not completed.** The one real
+Android test device disconnected from ADB mid-session before a fresh
+QR-scan could be attempted (the Android pairing flow has no gallery/image
+scan fallback, so this can't be performed unattended). Verified instead via
+backend-API simulation of the same endpoints a real scan submits to
+(review/approve/reject/success end-to-end) — labeled as simulation, not
+physical verification, and the real paired device was left untouched.
 
 **Limitations:** the Cancel button stops the desktop from polling and
 resets its own UI, but (as already documented above) the backend's pairing
@@ -1500,47 +1293,22 @@ default — investigated, root-caused, deliberately left alone per this
 milestone's own "no Settings changes" boundary), any Android code (§5's
 Android half, §6, §7, §14, §15), and §12 (see "Scope ambiguity" below).
 
-**Requirements read and triaged before implementation** (`New_Issues.txt`
-in full, `docs/15_QA_NOTEBOOK.md`'s P19/P20 entries, then the live app):
+**Requirements triaged against `New_Issues.txt` and the live app:** §2
+Clear History, §4 file-type wording, §8 received files, §9 Delete were in
+scope and implemented; §3 Settings and the Android-only sections (§6/§7/
+§14/§15) were out of scope (Rule 4). §12 ("Desktop Files Tab —
+Long-Press/Context Actions") is mislabeled in the source document — its
+body actually describes Android's own not-yet-downloaded file browsing
+(confirmed against `FilesScreen.tsx`), which Desktop has no equivalent
+concept for even after this milestone's own §8 change (a Desktop entry
+only exists once a receive is `completed`). Treated as an Android
+requirement and left for a future Android UI milestone.
 
-- §1.1–1.8, §1.6: already delivered by P19/P20 — verified still intact
-  (regression pass below), not re-touched.
-- §2 Clear History, §4 file-type wording, §8 received files, §9 Delete: in
-  scope, implemented.
-- §5 metadata consistency: partially in scope — see below.
-- §3 Settings, §6 folder-upload wording, §7 file-selection flow, §14/§15
-  Android nav/Clear-History placement: out of scope for this milestone
-  (Settings explicitly excluded; §6/§7/§14/§15 are Android-only, per Rule 4).
-- §12 "Desktop Files Tab — Long-Press/Context Actions": scope ambiguity,
-  resolved as out-of-scope — see below.
-
-**Scope ambiguity — §12.** Its heading says "Desktop Files Tab," but its
-body (downloaded/not-downloaded/downloading-or-queued states, Open/Share/
-Delete/Details vs. Remove/Details) describes browsing *someone else's*
-shared files and deciding whether to download them — a concept that only
-exists on the Android side today (confirmed by reading
-`android/src/screens/files/FilesScreen.tsx`, whose current Open/Details-only
-action set matches the issue's complaint almost exactly) and that current
-Desktop Files couldn't produce even after this milestone's own §8 change:
-a Desktop entry only exists once a receive has fully **completed** (§8's own
-design — see Architecture decisions below), never as
-"not-downloaded"/"downloading"/"queued," so §12's states have no Desktop
-referent. Per this milestone's own instruction ("choose the smallest
-interpretation consistent with the surrounding requirements") and Rule 4
-("Not: Android UI redesign"), §12 is treated as an Android Files-screen
-requirement mislabeled in the source document, and left for a future
-Android UI milestone. Recorded here rather than silently skipped.
-
-**Investigation before implementation (live app, real data):**
-`backend/relay.db` already held one real paired device (RMX3997) and 541
-real `Transfer` rows (a mix of `send`/`receive`, including two real folder
-receives) from prior sessions' physical testing — no synthetic data was
-needed to see the actual §2/§8 problems. Baseline screenshots (Files empty,
-Transfers populated, Devices, Settings) confirmed every issue as described:
-Shared Files showed 0 rows despite real received files existing on disk;
-Transfers had no Clear History control; status was plain lowercase text
-(`completed`); the Type column, when files were shared during testing,
-showed a MIME type/raw item count exactly as quoted in the issue.
+**Investigation confirmed every issue as described** against the real dev
+database (one paired device, 541 real `Transfer` rows): Shared Files
+showed 0 rows despite real received files existing on disk; Transfers had
+no Clear History control; status was plain lowercase text; the Type
+column showed a raw MIME type/item count.
 
 **Root causes:**
 - §8/§9: `TransferStreamService.receive_upload` (confirmed by reading it)
@@ -1632,104 +1400,32 @@ showed a MIME type/raw item count exactly as quoted in the issue.
   intentional rather than overflowing, instead of introducing a new
   "more actions" menu pattern this codebase doesn't otherwise have.
 
-**Files modified:**
-- `desktop/src/renderer/dom.js` — `formatFileType`, `loadingState`,
-  restyled `renderError` (+retry), removed the now-dead `.error` CSS class's
-  only consumer.
-- `desktop/src/renderer/views/files.js` — received items, Source column,
-  Delete (sent + received), Open (received), type/folder-count formatting,
-  loading/error states.
-- `desktop/src/renderer/views/transfers.js` — Clear History, status badges,
-  loading/error states; grouping logic extracted to `transferGrouping.js`.
-- `desktop/src/renderer/transferGrouping.js` (new) — shared batch-grouping,
-  used by both Files and Transfers.
-- `desktop/src/renderer/transferHistory.js` (new) — Clear History marker
-  and filter (mirrors `android/src/transfers/historyReset.ts`).
-- `desktop/src/renderer/receivedFiles.js` (new) — received-item derivation
-  from transfers, removed-item marker, path resolution.
-- `desktop/src/main/ipc-handlers.js` / `desktop/src/preload/preload.js` —
-  three new IPC calls: `shell:openPath`, `shell:deleteItem` (trash),
-  `fs:resolveDownloadPath`.
-- `desktop/styles/app.css` — `.error-state`/`.loading-state`/`.spinner`,
-  `.badge-danger`/`.badge-progress`, `.status-detail`, `.row-actions`;
-  removed the dead `.error` rule.
+**Files:** `dom.js` (`formatFileType`, `loadingState`, restyled
+`renderError`), `views/files.js` (received items, Source column, Delete,
+Open, type formatting), `views/transfers.js` (Clear History, status
+badges), new `transferGrouping.js` (shared batch-grouping), new
+`transferHistory.js` (Clear History marker, mirrors Android's
+`historyReset.ts`), new `receivedFiles.js` (received-item derivation),
+`ipc-handlers.js`/`preload.js` (`shell:openPath`, `shell:deleteItem`,
+`fs:resolveDownloadPath`), `app.css` (`.row-actions` and related classes).
 
-**Verification performed:**
-- `node --check` (as ES modules for every `import`/`export` renderer file,
-  as CommonJS for the two main-process files) on every file touched or
-  added — clean.
-- Real Electron app, driven via `playwright-core@1.62.1` (`npm install
-  --no-save`, same P19/P20 pattern, not committed) against the project's
-  actual dev `backend/relay.db` (541 real transfers, one real paired
-  device) rather than synthetic fixtures:
-  - Confirmed the CSP `style-src` console warning on `.progress-fill`'s
-    inline `width` is cosmetic only — `getComputedStyle` showed the width
-    genuinely applied (100px/100px at 100%); not a real bug, not touched.
-  - Files: shared a real test file and a real test folder via the actual
-    `POST /files`/`POST /folders` endpoints, confirmed Type/Source/row-
-    actions rendering, then exercised Delete on both a sent file and a real
-    received file (`p144_custom (1).txt`, genuine prior-session data) —
-    confirmed via direct filesystem check that the sent file's original
-    path was empty afterward and the received file was gone from the
-    configured download directory (both trashed, not corrupted/orphaned),
-    and via direct `sqlite3` query that the sent file's `shared_files` row
-    was gone. Reloaded the view and did a full process restart — both
-    removals persisted (backend row genuinely gone; received-item
-    `localStorage` marker survives a real process restart, not just SPA
-    navigation).
-  - Discovered live (not from the issue text): sharing a file individually
-    and then sharing its containing folder raises an unhandled
-    `sqlalchemy.exc.IntegrityError` (`UNIQUE constraint failed:
-    shared_files.file_path`) surfaced to the user as a generic "unexpected
-    error" — a pre-existing backend edge case, unrelated to any P21
-    requirement and not blocking one. **Deferred**, recorded here per this
-    milestone's "record unrelated bugs, don't fix them" rule.
-  - Transfers: clicked Clear History against the real 100-row (pagination
-    limit, pre-existing and unchanged) history — table went to 0 rows,
-    button correctly disabled, "History cleared" empty state shown;
-    navigated away and back (including a real 2s poll tick) and the
-    cleared state held. Reset the marker afterward so the dev profile
-    isn't left showing "History cleared" for its next real use.
-  - Full click-through of all five tabs plus a real mouse-hover nav check,
-    with `pageerror` listeners attached throughout every run — zero
-    uncaught exceptions across every script in this milestone.
-  - All test-created shared_files/shared_folders rows were removed after
-    verification; `shared_files`/`shared_folders` are back to empty (their
-    pre-milestone state), the one real device is untouched.
-- **Regression:** Devices (paired-device card), Pairing (idle state, icon
-  badges), and Settings screens re-screenshotted and visually compared
-  against this milestone's own baseline captures — byte-for-byte identical
-  in layout/content, confirming P19/P20 are unaffected.
+**Verification:** `node --check` clean on every file. Exercised live
+against the real dev database (541 real transfers): shared/deleted a real
+file and folder, confirmed both trashed and their DB rows removed and the
+removal surviving a process restart; Clear History against real data went
+to 0 rows and held across a poll tick; full click-through of every tab
+with zero uncaught exceptions; Devices/Pairing/Settings re-verified
+unaffected. Found and deferred (out of scope): sharing a file individually
+then its containing folder throws an unhandled `IntegrityError` surfaced
+as a generic error — pre-existing backend edge case, unrelated to P21.
 
-**Physical-device verification: attempted, partially completed —
-documented honestly rather than simulated.** RMX3997 was connected via ADB
-(`adb devices`) and the Windows host was confirmed connected to the phone's
-own "samsung" hotspot (`netsh wlan show interfaces`, matching `adb shell ip
-route`'s `10.169.164.0/24` subnet) — genuine physical networking, not
-loopback. The installed Relay app is a Metro-connected debug build; Metro
-was already running from an earlier session, `adb reverse tcp:8081
-tcp:8081` was set up, and the app was relaunched successfully — logcat
-confirmed it made real, correctly-addressed HTTP requests to the desktop's
-real LAN IP (`http://10.169.164.233:8000/api/v1/files`, `/folders`,
-`/transfers`, `/transfers/requests`) on a live ~2s poll loop, and the
-desktop backend's own log confirmed the corresponding `POST /files` (a real
-test share made for this check) succeeded with no server-side error.
-**What could not be confirmed:** the phone's own Shared Files screen never
-progressed past its loading spinner despite these requests visibly
-succeeding — repeated navigation, force-stop/relaunch, and a `logcat`
-search for a JS error or crash all turned up nothing (no `ReactNativeJS`
-error, no `AndroidRuntime` fatal). This reads as a pre-existing Android-side
-rendering issue in this debug build, not a P21 regression: zero Android
-files were touched by this milestone, and the API response shapes Android
-consumes (`GET /files`/`/folders`/`/transfers`) are byte-for-byte unchanged.
-Chasing it further would mean debugging/fixing Android application code,
-which is explicitly out of scope for this milestone (Rule 4) — recorded
-here as a discovered, deferred issue rather than either faked or silently
-dropped. The backend-level round trip (share → real device successfully
-authenticates and requests it over a real LAN) is the strongest evidence
-available this session that the P21 changes don't break the real
-Android-facing contract; full on-device visual confirmation is deferred to
-whenever this debug build (or a release APK) is next working end-to-end.
+**Physical-device verification (RMX3997, real hotspot LAN, not loopback):**
+confirmed the app made correctly-addressed HTTP requests to the desktop's
+real LAN IP and the backend served them with no error. The phone's own
+Shared Files screen never progressed past its loading spinner despite
+these requests succeeding — a pre-existing Android-side rendering issue in
+this debug build, not a P21 regression (zero Android files touched; API
+response shapes unchanged). Recorded as a deferred, discovered issue.
 
 **Discovered defects (deferred, not fixed — out of P21's scope):**
 1. Sharing a file individually, then sharing its parent folder, throws an
@@ -1875,42 +1571,14 @@ errors, the same 2 pre-existing `no-void` warnings in
 `TransferStreamManager.ts` unrelated to this change; `npx jest` — 40 suites,
 339 tests, all passing (19 new, 0 regressions).
 
-**Physical-device verification (RMX3997, real backend/network):**
-- **Test A (single file):** unaffected — Download → Downloading... → Open,
-  and the Transfers row for it stays its own single row even alongside a
-  concurrent folder download.
-- **Test B (one-file folder):** the three "duplicate name" folders below
-  (§Test F) each had exactly one child and showed the identical clean
-  transition with no flicker.
-- **Test C (multi-file folder):** a 12-file, 240 MB folder captured at
-  0.5s intervals end-to-end (100 frames) — contact sheet confirmed a clean
-  "Downloading..." → "Open" transition with **zero** intermediate
-  "Download" frames (pre-fix, the same class of folder produced one). The
-  Transfers tab showed exactly one row ("Folder (12 items)", "In progress"
-  → "Completed") for the whole operation, never 12 rows.
-- **Test D (nested folder):** `a.bin` + `sub/b.bin` + `sub/c.bin` +
-  `sub2/d.bin` — one Files row, one Transfers row ("Folder (4 items)"),
-  "Open" correctly showed the full nested structure (`sub/`, `sub2/`,
-  `a.bin`) via the device's file manager.
-- **Test E (concurrent operations):** a folder download and a standalone
-  file download started together — the file correctly queued behind the
-  folder (FIFO unchanged), Transfers showed the file as its own row
-  ("0 B / 10.0 MB", "In progress") and the folder as one row
-  ("In progress") simultaneously; both reached "Completed"/"Open" cleanly.
-- **Test F (duplicate folder names):** three distinct shared folders all
-  named `test` (distinct `shared_folder_id`s 6/7/8, downloaded
-  concurrently) remained three separate rows on both Files and Transfers
-  throughout — one `Completed`/`Downloading...`/`Queued` at a time (FIFO),
-  never merged — and landed on-device as three distinct directories
-  (`test`, `test (1)`, `test (2)`, confirmed via `adb shell ls`),
-  regression-checking P13.2/P13.3/P17's existing identity handling.
-
-**Before/after:** Before — a multi-file folder's Files-screen button could
-regress "Downloading..." → "Download" for one frame right before "Open";
-the Transfers tab showed every folder child as its own row. After — the
-button transitions cleanly Download → Downloading... → Open/Retry with no
-regression; the Transfers tab shows exactly one row per folder operation
-alongside ordinary single-file rows.
+**Physically verified on RMX3997** across single files, one-file and
+12-file/240MB folders, a nested folder, concurrent file+folder downloads,
+and three duplicate-named folders downloaded concurrently: the Files-screen
+button now transitions cleanly Download → Downloading... → Open with zero
+intermediate "Download" frames (a 12-file/100-frame capture confirmed
+zero regressions, vs. one pre-fix), and the Transfers tab shows exactly
+one row per folder operation. Duplicate-name identity handling
+(P13.2/P13.3/P17) confirmed unaffected.
 
 **Defects discovered and deferred (not fixed — out of P21.1's scope):**
 - Re-downloading a folder that was previously downloaded, then deleted from
@@ -2390,130 +2058,97 @@ A genuine Android **reinstall** still, correctly and unavoidably, produces a new
 
 # Milestone P46 — Release Candidate Audit & Ship Readiness
 
-**Purpose:** an audit-only pass (no feature work) to answer one question — is the current Relay V1 release candidate actually ready to ship — by inspecting the real repository state and the real packaged artifacts rather than trusting prior documentation at face value.
+**Purpose:** audit-only pass — is the current release candidate actually
+ready to ship, verified against the real packaged artifacts rather than
+trusting prior documentation.
 
-**1. Release inventory (measured directly from the artifacts, not assumed from source):**
+**Findings:** the Desktop installer and APK were verified directly
+(version/publisher metadata, signing status, bundled-backend presence,
+manifest content) and matched what P38–P45 claimed. Artifact freshness was
+independently confirmed by comparing every P43–P45-touched file's mtime
+against the build outputs' timestamps — the shipped artifacts genuinely
+reflect `main`, not a stale build. `pytest` (376 passed, 2 skipped) and
+Android `npx jest` (367 passed) both ran clean with no source changes.
+Launching the actually-installed product confirmed the backend spawns
+correctly and `relay.db` survived the P45 upgrade install. Every
+previously-known limitation (unsigned installers, the local-verification
+Android keystore, the Clear History live-sync gap, the `fileIdentity.ts`
+id-reuse gap, version-string drift) was re-confirmed as an unchanged,
+already-accepted V1 limitation.
 
-*Desktop:* `desktop/dist/Relay-Setup-0.1.0.exe`, 118,743,810 bytes, unsigned (`Get-AuthenticodeSignature` → `NotSigned`, expected). Installed `Relay.exe`: `FileVersion`/`ProductVersion` 0.1.0, `CompanyName` "Relay Labs", `ProductName` "Relay", `LegalCopyright` "Copyright © 2026 Relay Labs". Control Panel registry entry (`HKCU:\...\Uninstall\{4cba8762-...}`): `DisplayName` "Relay 0.1.0", `Publisher` "Relay Labs". Bundled backend confirmed present and spawning from `resources/backend/relay-backend.exe` in the real installed app (not just `dist/`). Backend exe 9,929,960 bytes, PyInstaller `--onedir`, x64.
+**New finding, physically reproduced, not from code review alone:** while
+this machine was connected to the RMX3997 test phone's own mobile
+hotspot — a real instance of Relay's "mobile hotspot" use case — the
+already-paired Android app showed "Unable to reach Relay Desktop" on its
+Files tab, even though the network path itself worked (confirmed via a
+raw TCP connect and loading the desktop's API directly in the phone's
+browser). Root cause: `Session.desktop_base_url` is captured once at
+pairing time and never re-resolved, and `SessionManager.clearSession()`
+(the only thing that routes back to the pairing flow) is only ever
+triggered by an HTTP 401 — never by a plain unreachable-address failure.
+**There is no "Forget this desktop" or equivalent recovery control
+anywhere in the app** — the only way out is uninstalling and reinstalling
+(which also mints a new `device_identifier`, per P43). A foreseeable
+usage pattern (pair at home, later use elsewhere), not a contrived edge
+case, and not previously documented because no prior milestone's physical
+verification spanned two networks between pairing and use.
 
-*Android:* `android/android/app/build/outputs/apk/release/app-release.apk`, 94,830,542 bytes. Package `com.relay.mobile`, `versionName` "1.0", `versionCode` 1. `aapt dump badging` confirms `application-label:'Relay'` (not "RelayMobile") and no `debuggable` flag. `assets/index.android.bundle` present (Hermes bundle embedded — zero Metro dependency). `apksigner verify --print-certs`: v2-scheme signed, one signer, `CN=Relay Local Verification, OU=Relay P40` — confirmed **not** the debug keystore, and confirmed matching the local-verification identity `keystore.properties` documents (alias `relay-release-local-verification`). Manifest: `android:networkSecurityConfig` wired to a real resource (`@0x7f140004`); `usesCleartextTraffic` placeholder correctly resolved `false` for release, which is expected and irrelevant because `minSdkVersion` 26 makes the Network Security Config take precedence regardless.
-
-**2. Artifact freshness (does the packaged product actually contain P43–P45?):** compared every file touched by the P43/P43.1/P44/P45 commits (`f5e749f`, `1cc0ebd`, `20c5d6d`, `9e2756f`) against the three artifacts' build timestamps. Every touched source file's mtime (latest: `desktop/package.json` 23:51:24) predates all three build outputs (backend exe 23:38:29 — built *before* the branding commit's own file save, consistent with the commit being made after the rebuild that already contained the branding change in the working tree; installer 23:53:45; APK 23:54:06) — i.e. the currently shipped artifacts are not stale relative to `main`. This matches P45's own "closing the still-needs-to-be-rebuilt gap" claim; this pass independently re-derived it from file timestamps rather than re-trusting the prose.
-
-**3. Automated verification:** `pytest` (backend, existing dev `.venv`): **376 passed, 2 skipped**. Android `npx jest`: **42 suites / 367 tests passed**. Neither suite required any source change. Did not force a from-clean-venv PyInstaller/electron-builder/Gradle rebuild this pass — the freshness check in §2 already establishes the existing artifacts reflect current `main`, and re-running a ~35-minute Gradle release build (per P40's own recorded first-build time) with no source change to validate would be pure repetition, not new evidence; this is a deliberate reuse of existing evidence, not a skipped step.
-
-**4. Live clean-install-equivalent validation (real installed product, this machine):** launched the *actually installed* `%LOCALAPPDATA%\Programs\Relay\Relay.exe` (not a dev build). Confirmed: `relay-backend.exe` spawned automatically from the installed `resources\backend\` path; `netstat` showed it listening on `0.0.0.0:8000`; `GET /api/v1/devices` returned real data — the RMX3997 device paired on 2026-08-15, proving `relay.db` survived the P45 upgrade install (independently reconfirms P45's own claim). Closed both processes afterward to leave the machine as found.
-
-**5. New finding — Android has no recovery path when the paired desktop becomes unreachable at its stored address.** This was found while attempting a live physical E2E re-verification, not by code review alone. This machine happened to be connected to the RMX3997's own mobile hotspot during this pass (`ap0` 10.130.191.86/24 on the phone, Windows `Wi-Fi` adapter at 10.130.191.233 on the same /24) — a real instance of Relay's own "mobile hotspot" use case, not a simulated one. The already-paired Android app showed "Unable to reach Relay Desktop" on its Files tab. Root-caused, not assumed:
-   - Windows categorized this connection as a **Public** network (`Get-NetConnectionProfile`), and no firewall rule exists for Relay (`Get-NetFirewallRule -DisplayName "*Relay*"` → none) — this reproduces, for the first time with direct evidence, the scenario P39/P41 could only call "unconfirmed." However, unlike a worst-case assumption, actual HTTP reachability **was** confirmed working here: `nc -z` succeeded on TCP 8000 from the phone, and opening `http://10.130.191.233:8000/api/v1/devices` in the phone's own browser returned the real device list. (ICMP ping was blocked, which is Windows' unrelated default echo-request behavior, not evidence of a real block.) **This downgrades, rather than escalates, the Firewall item — connectivity works today even on a Public-categorized profile with zero bundled rule and zero first-run prompt**, consistent with P41's own "functional LAN connectivity was nonetheless confirmed working."
-   - Despite the network layer working, the Android app itself kept failing. Traced to `android/src/session/types.ts`'s `Session.desktop_base_url` — captured once at pairing time and never re-resolved. This session was paired roughly 21 hours earlier, almost certainly against a different desktop IP (a different network across that gap is entirely ordinary for a "local Wi-Fi *or* mobile hotspot" app). The client has no fallback: `SessionManager.clearSession()` (`android/src/session/SessionManager.ts`) is only ever invoked automatically on an HTTP `401`, and a stale/unreachable address never produces one — it produces a network-level failure the client's own P31.1 handling (correctly) converts into a friendly, silently-non-fatal `ApiError`. `RootNavigator.tsx` renders `PairingStack` only when `session` is `null`; nothing else ever clears it. Grepped the entire Settings screen and every other Android source file: **there is no user-facing "Forget this desktop" / "Re-pair" control anywhere in the app.** The only way to recover from a stale `desktop_base_url` is to uninstall and reinstall the Android app (which, per P43, also mints a new `device_identifier`, so it registers as a new device rather than continuing the same paired identity).
-   - This is a genuine, physically-reproduced dead end, not a cosmetic issue: a normal, foreseeable usage pattern (pair at home, later connect via hotspot elsewhere, or simply a DHCP lease change) permanently strands the user on an "unreachable" screen with no in-app way out. It was not previously documented anywhere in P37–P45 or this notebook's known-limitations list, because none of those milestones' physical verification passes spanned two different networks between pairing and use.
-   - **Not fixed in this pass.** A correct minimal fix (e.g., a "Forget this desktop" action in Settings that calls the already-existing `SessionManager.clearSession()` unconditionally, dropping the user back to `PairingStack`) is small and low-risk, but it is a real UI/behavior addition, not a packaging/config correction like P43–P45's fixes — implementing it without checking first would violate this milestone's own audit-only charter. Flagged for a scoping decision (see verdict below) rather than implemented unilaterally.
-   - Full physical device-to-device pairing/transfer re-verification (fresh QR scan, a new send/receive cycle) was not completed this pass as a direct consequence: the existing paired session is the one that hit this dead end, and generating a fresh one requires a physical camera-to-screen QR scan, which needs a human at the machine. Prior physical verification of the pairing/transfer mechanics themselves (P41, P43, P43.1, P44, P45 — all "verified live on RMX3997") is reused rather than repeated, since none of that mechanism's code changed in this pass.
-
-**6. Deferred-issue classification (re-audited against live evidence, not just re-stated):**
-
-| Item | Classification | Basis |
-|---|---|---|
-| No code signing (Desktop/Android) | ACCEPTED V1 LIMITATION | Confirmed unsigned live; explicitly out of scope for V1 per `docs/12`. |
-| Android release signing = local verification keystore | ACCEPTED V1 LIMITATION for this V1, **must be replaced before any public/store distribution** | Confirmed via `apksigner` — real non-debug cert, but explicitly not a production identity. |
-| Windows Firewall first-run prompt | ACCEPTED V1 LIMITATION | Now confirmed (not just "unconfirmed") functional even on a Public-categorized profile with no bundled rule — see §5. |
-| Android Files/Transfers Clear History live-sync gap | ACCEPTED V1 LIMITATION / POST-V1 BACKLOG | Unchanged since P41; cosmetic, no data impact. |
-| `fileIdentity.ts` id-reuse gap | ACCEPTED V1 LIMITATION | Unchanged since P17/`docs/14_Testing_Plan.md` §6; not reachable via normal use. |
-| Desktop/Android version-string drift | ACCEPTED V1 LIMITATION | Re-confirmed no packaging-level inconsistency exists within either platform; no shared-version mechanism invented, per explicit P46 instruction not to. |
-| Received-item stale-path identity edge case (P44) | ACCEPTED V1 LIMITATION | Unchanged; narrow, requires filename reuse timing. |
-| `[QR-DEBUG]` logging | ALREADY CORRECT | Grepped the full tree — zero source references remain; only historical doc/test mentions. |
-| Stray `console.error`/`console.warn` in Android networking code | ALREADY CORRECT | Six remaining call sites (`secureStorage.ts`, `DiscoveryService.ts`, `TransferStreamManager.ts`, `foregroundService.ts`, `downloadNotification.ts` ×2, `blobUtil.ts` ×2) are all developer-visibility warnings for genuinely exceptional conditions with a safe fallback already in place — not the P31.1 double-logging pattern (an already-user-facing result logged a second time). |
-| **Stale `desktop_base_url` / no re-pair path (this pass's finding)** | **SHOULD FIX BEFORE RELEASE — pending a scoping decision, not auto-implemented** | New, physically reproduced this pass; see §5. |
-
-**7. Versioning decision:** re-investigated per P46's explicit brief; reached the same conclusion P45 already documented — Desktop's own packaging chain is internally consistent, Android's is internally consistent, and no shared-version mechanism exists between the two build systems. No version number was invented or changed. Left unchanged, as instructed when unification isn't necessary.
-
-**8. Git/repository integrity audit:** `git status` clean, no staged or unstaged changes, nothing to commit. Confirmed via `git ls-files`: no `.db`/`.sqlite`, no keystore (only the deliberately-tracked, non-secret `debug.keystore`), no `dist/`/`build/` output, no `backend/.env` (only `.env.example`) is tracked. `backend/keystore.properties`-equivalent (`android/android/keystore.properties`) exists locally with real local-verification credentials and is correctly untracked. No broad cleanup performed — none was warranted (matches this milestone's explicit "do not repeat P42" instruction).
-
-**9. Final verdict: HOLD — one item pending a scoping decision, otherwise ship-ready.**
-
-Everything audited in §1–4, §6–8 is either already correct or an already-accepted, unchanged V1 limitation — no action needed. The one open item is §5's stale-session dead end:
-
-1. **Blocker:** an Android device that pairs once and later can't reach the desktop at its originally-stored address (a realistic outcome of switching between local Wi-Fi and mobile hotspot, or any DHCP change) has no in-app way to recover — only uninstalling and reinstalling the Android app works.
-2. **Why it blocks release:** this is a foreseeable, not edge-case, usage pattern for an app whose own pitch is "local Wi-Fi network or mobile hotspot," and the only recovery path (reinstall) is a poor first impression for a V1 product and not something support-scale documentation should have to explain.
-3. **Exact minimum fix:** add a "Forget this desktop" action to Android's Settings screen that calls the already-existing `SessionManager.clearSession()` unconditionally (not gated on a 401). No backend change, no new architecture — the clearing mechanism already exists and already correctly routes `RootNavigator` back to `PairingStack`; this only adds a user-reachable trigger for it.
-4. **Whether a new milestone is required:** this is a small, well-contained UI addition, not a redesign — it can reasonably be folded into a short follow-up pass rather than needing a full milestone's worth of scope, but per this audit's own charter it was deliberately not implemented unilaterally. Left for the project owner to authorize.
-
-No other item in this audit rises to blocker status.
+**Deliberately not fixed in this pass** — a real UI/behavior addition
+would exceed this milestone's audit-only charter; flagged for a scoping
+decision instead. **Verdict: HOLD** — this is the sole reason; every other
+audited area (signing, freshness, versioning, repository hygiene) was
+already correct.
 
 ---
 
 # Milestone P47 — Android Session Recovery & "Forget This Desktop"
 
-**Purpose:** fix the one release blocker P46 found and deliberately left unimplemented — an already-paired Android device with no in-app way to recover once its stored `desktop_base_url` becomes unreachable (e.g. switching between local Wi-Fi and mobile hotspot).
+**Purpose:** fix P46's blocker — an already-paired Android device with no
+in-app way to recover once its stored `desktop_base_url` becomes
+unreachable.
 
-**1. P46 blocker being addressed:** `android/src/session/types.ts`'s `Session.desktop_base_url` is captured once at pairing time and never re-resolved; `android/src/session/SessionManager.ts`'s `clearSession()` — the only thing that routes `RootNavigator.tsx` back to `PairingStack` — was only ever invoked by an HTTP `401` handler, never by a plain unreachable-address failure; and no "Forget this desktop" or equivalent control existed anywhere in the app. The only recovery was uninstalling and reinstalling Android (which also mints a new `device_identifier`, per P43).
+**Baseline reproduction was real, not staged:** the test device (RMX3997)
+was found already in exactly this failure state, left over from a prior
+session — Files tab stuck on "Unable to reach Relay Desktop," Settings
+with no recovery affordance.
 
-**2. Baseline reproduction (real, not staged):** before touching any code, the test device (RMX3997) was found to already be in exactly this failure state, left over from a prior session — a genuine, unplanned reproduction, not a contrived one. `adb exec-out screencap` on launch showed the Files tab stuck on "Unable to reach Relay Desktop. Make sure the PC is running Relay and both devices are on the same network." with no backend reachable (phone on 5G cellular, no shared network with this PC), and Settings had no recovery affordance of any kind — only `Device display name` and `Storage` sections (P23's original two-section scope). Screenshots captured and inspected directly.
+**Existing architecture already had everything needed:**
+`SessionManager.clearSession()` already did the right thing (clears
+secure storage/in-memory state) but was only ever wired to the 401
+handler; `RootNavigator` is already purely session-driven, so calling
+`clearSession()` from anywhere is sufficient; `deviceIdentifier.ts`
+already persists independently of `Session` (P43), unchanged.
 
-**3. Root cause:** confirmed by reading `SessionManager.ts` (`clearSession()` wired only to `setUnauthorizedHandler`, not exposed as a user action anywhere), `RootNavigator.tsx` (switches `PairingStack`/`MainTabs` purely on `useSession()`'s `session` value — no other gating), and `pairing/deviceIdentifier.ts` (persists `device_identifier` in its own private file, independent of `Session`, since P43 — confirmed still the case, unchanged by this milestone).
+**Fix:** added a `CONNECTION` section to Settings with one card
+(`ForgetDesktopCard`) — a neutral (not red) trigger, since this action
+deletes nothing on the backend, opening an `AppDialog` (P30) whose
+*confirm* button carries the destructive styling. Confirming calls
+`clearSession()` directly. One file changed:
+`android/src/screens/settings/SettingsScreen.tsx`.
 
-**4. Existing session architecture (investigated before writing code, per this milestone's own critical rule):**
-   - `SessionManager.clearSession()` already does exactly the right thing — clears secure-storage (`secureStorage.ts`'s Keychain entry), in-memory state, and `api/config.ts` — and is already exercised by `__tests__/session/SessionManager.test.ts`. No second clearing mechanism was needed or added.
-   - `RootNavigator` needed no changes — it is already purely session-driven, so calling `clearSession()` from anywhere is sufficient to fall back to `PairingStack`.
-   - `pairing/deviceIdentifier.ts` confirmed independent of `Session` (a separate `relay-device-identity.json`, not part of the Keychain blob) — the exact mechanism P47's item 5 required to already exist, unchanged since P43.
-   - `SettingsScreen.tsx` (P23's two-section `Device`/`Storage` layout) and `AppDialog`/`useAppDialog` (P30's confirm/cancel primitive, already used by this same screen for a download-location error) were the two components extended, per this milestone's "no new dialog primitive, no general Settings redesign" boundary.
-   - Grepped the whole `android/src` tree for `forget`/`unpair`/`disconnect` before writing anything — no existing concept found (only comments describing what *doesn't* exist).
+**Tests:** `tsc`/`eslint` clean; `npx jest` 367 tests passing (unchanged
+count — existing `SessionManager.test.ts` already covers `clearSession()`,
+and this codebase doesn't render-test screens). Backend: no source
+changed, but P43's reconciliation suite was re-run explicitly (121
+passed) since it's this milestone's regression surface.
 
-**5. UX/architecture decision:** a third Settings section, `CONNECTION`, containing one card (`ForgetDesktopCard`): explanatory text ("Forget this desktop on this device. You can pair again later — the desktop's own record of this device is not affected.") plus a **neutral, bordered** trigger button (`secondaryButton`, the same style already used for "Reset to Default") — deliberately *not* red/`#dc2626`, since this action does not delete anything on the backend and P34/P35's destructive-red convention is reserved for genuinely backend/local-data-destroying actions (Clear History, Delete). Tapping it opens an `AppDialog` (title "Forget this desktop?", explaining the Android-only/backend-unaffected/re-pairable-anytime facts the milestone brief required) with `Cancel` (`style: 'cancel'`) and `Forget Desktop` (`style: 'destructive'` — the *dialog's own* confirm button, not the trigger, carries the red styling, matching every other confirm-dialog call site in this codebase). Confirming calls `SessionManager.clearSession()` directly — no navigation call, no new backend request.
+**Physically verified on RMX3997 (real backend, real network):** the
+Settings UI, Cancel path, and Confirm path (genuinely clears the session
+and falls back to Discovery/pairing) all confirmed; a full real QR re-pair
+over the phone's own hotspot succeeded and the Files tab loaded correctly
+authenticated. **Two live re-pair cycles confirmed both halves of the P43
+regression surface via direct backend inspection:** removing the Desktop
+row first before re-pairing correctly registered as a new row (fresh
+`paired_at`); re-pairing with the Desktop row left untouched correctly
+reconciled onto the *same* row (`paired_at` byte-for-byte unchanged,
+`device_identifier` unchanged) — proving `clearSession()` doesn't disturb
+`device_identifier` and P43's reconciliation still holds after this
+change. Desktop's Devices tab, Discovery, and device naming were all
+confirmed unaffected; no backend file was touched.
 
-**6. Files changed:** `android/src/screens/settings/SettingsScreen.tsx` only (added `ForgetDesktopCard`, a `Connection` section, and an `AppDialogController` type alias reusing the screen's single existing `useAppDialog()` instance). No backend, no other Android file, no navigation file touched — confirmed via `git status`/`git diff` at the end of the session.
-
-**7. Automated tests:**
-   - Android: `npx tsc --noEmit` — clean. `npx eslint .` — 0 errors, 4 pre-existing warnings unrelated to this change (`FilesScreen.tsx`, `TransferListScreen.tsx`, `TransferStreamManager.ts` — all present before this milestone). `npx jest` — **42 suites / 367 tests passed**, identical count to P46's baseline; no test was added or needed changing, since `SessionManager.test.ts` already covers `clearSession()` and this codebase's convention (confirmed via `__tests__/`) is pure-logic tests, not rendered-component tests for screens (no `@testing-library/react-native` dependency exists) — `DeviceNameCard`/other `SettingsScreen.tsx` cards have no render tests either.
-   - Backend: no source changed, but P43's reconciliation logic is this milestone's critical regression surface, so it was run explicitly: `pytest tests/api/test_pairing.py tests/api/test_devices.py tests/api/test_requesting_device_dependency.py tests/repositories/test_device_repository.py tests/repositories/test_device_session_repository.py tests/services/test_device_service.py tests/services/test_pairing_manager.py tests/services/test_pairing_service.py` — **121 passed**. Full suite: `pytest -q` — **376 passed, 2 skipped**, identical to P46's baseline.
-
-**8. Physical-device verification (RMX3997, via ADB + a real installed build — not source inspection or API simulation):**
-   - The already-installed app on RMX3997 was signed with the P40 local-verification release keystore, so a plain `installDebug` failed (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`, mismatched signature) — switching to `./gradlew.bat app:installRelease` (same `keystore.properties` identity already on this machine) produced a signature-matching update install, preserving the existing session/pairing state instead of wiping it. This was deliberate, not incidental: destroying the live baseline-reproduction state before testing it would have defeated §2.
-   - **Settings UI:** screenshot confirmed the new `CONNECTION` section renders correctly below `DEVICE`/`STORAGE`, with the expected copy and a neutral (non-red) `Forget This Desktop` button.
-   - **Cancel path:** tapping the trigger opened the `AppDialog` with the expected title/message/buttons; tapping `Cancel` dismissed it with the session and Settings screen completely unchanged (re-screenshotted to confirm).
-   - **Confirm path:** tapping `Forget This Desktop` → `Forget Desktop` genuinely cleared the session and the app immediately fell back to the real Discovery/pairing screen ("No Relay devices found yet" / "Scan QR to Pair") — a real `RootNavigator` stack swap, not a simulated one.
-   - **Re-pair, end to end, over a real network:** at the user's direction, the phone's mobile hotspot was enabled and this PC's Wi-Fi connected to it (real LAN, IPv4 `10.130.191.233`/24, matching P46 §5's own setup). The real Electron desktop app (`npm start`, dev backend on `0.0.0.0:8000`) was launched; the user clicked `Start Pairing`, scanned the QR with the phone, and approved it. Discovery was also confirmed working live in the process (the phone's Discovery screen listed "Thomas" — this PC's desktop name — before the second re-pair cycle). Post-pairing, the phone's Files tab loaded "No files are currently shared." (a real authenticated `GET /files` success), not the old unreachable error — confirming the new session's `desktop_base_url`/token are live and correct.
-
-**9. P43 reconciliation verification — two distinct live cycles, both confirmed via direct backend inspection (`GET /api/v1/devices`), not assumption:**
-   - **Cycle 1 (Forget, then Remove on Desktop, then re-pair):** the user removed the Desktop-side row before re-pairing. Backend response showed `id: 1` (same, via SQLite id-reuse — P17 — since the table was briefly empty) but a **freshly-set `paired_at`**, proving this correctly went through `register_device` (a fresh row), not `reconcile_device` — the expected, correct outcome of an explicit backend-side unpair (`DeviceService.remove_device` is a genuine hard delete; a deleted identifier can no longer match on the next pairing attempt, and *should* register as new).
-   - **Cycle 2 (Forget again, Desktop row left untouched, re-pair again):** this is the actual scenario P47's item 5 requires. Backend response showed `id: 1` (unchanged), `device_identifier` unchanged, `device_name` unchanged ("RMX3997"), and — critically — **`paired_at` byte-for-byte unchanged** from before this second re-pair (`2026-08-16T08:54:29.646944` both before and after), with only `updated_at` advancing. This is only possible via `PairingService.approve_pairing`'s `reconcile_device` branch (`device_secret_hash` rotated, every field it doesn't explicitly touch left alone) — direct proof that true P43 reconciliation fired, no duplicate row was created, and the Android `device_identifier` genuinely survived `clearSession()` (confirmed independently at the code level in §4, and now confirmed functionally here).
-   - Device count stayed at exactly 1 in the backend's device list throughout both cycles — no duplicate ever appeared.
-
-**10. Regression testing:** Desktop's Devices tab was screenshotted mid-session and showed the RMX3997 row as `Paired` with working `Rename`/`Remove` buttons, unaffected by any of this work. Discovery, QR pairing, and device naming were all exercised live as a side effect of §8/§9 and behaved exactly per their existing P23/P24/P43/P43.1 documentation — nothing needed updating. No backend file was touched (`git status` confirms `backend/` is clean), so Desktop-side unpair/session-reconciliation code paths are provably unchanged.
-
-**11. Problems discovered (process, not product):**
-   - Blind coordinate-based mouse automation (`SetCursorPos`/`mouse_event` via PowerShell) against the user's real desktop twice surfaced *other* on-screen windows into a screenshot mid-session — once the user's own unrelated browser tab, once a Windows taskbar hover-preview strip. Both were caught immediately, the content was not acted on or referenced, and this approach was abandoned in favor of asking the user to perform the two Desktop-side clicks (`Start Pairing`) themselves — a deliberate, disclosed change of approach mid-milestone, not a silent workaround.
-   - The already-installed app's release signing (P40's local-verification keystore) meant a debug build could not be installed over it without an uninstall (which would have destroyed the valuable baseline-reproduction state in §2) — worked around by building/installing the `release` variant with the same keystore instead of debug, preserving app data across the update.
-
-**12. Deferred issues:** none newly introduced. The pre-existing Android Files/Transfers Clear History live-sync gap (P41) and the version-string drift (P45/P46) are unrelated and untouched.
-
-**13. Remaining limitations (explicitly out of this milestone's scope, per its own brief):**
-   - No automatic Desktop address rediscovery, network re-scanning, or automatic session recovery — "Forget this desktop" is a deliberate, user-triggered, manual action only.
-   - No backend `Device` deletion and no Desktop-side unpair change — confirmed via §10 that none occurred.
-   - No new pairing protocol fields or device-identifier mechanism.
-
-**14. Suggested commit message:**
-```
-feat(android): add "Forget this desktop" session recovery to Settings
-
-Fixes the P46 release blocker: a paired Android device with an
-unreachable stored desktop_base_url had no in-app way back to pairing
-short of uninstalling the app. Adds a Connection section to Settings
-with a confirm-gated action that calls the existing
-SessionManager.clearSession() — RootNavigator's existing session-driven
-routing handles the rest. device_identifier (P43) is untouched, verified
-live: a re-pair after Forget reconciles onto the same backend Device row
-with no duplicate created.
-```
-
-**15. Final verdict: P46's blocker is genuinely resolved, physically verified.**
-
-- **Fixed and physically verified (RMX3997, real backend, real network):** the Settings action's existence/visibility, the confirm dialog (both Cancel and Confirm paths), the session-clear → return-to-pairing navigation, Discovery, a full real QR re-pair, authenticated post-re-pair operation (Files tab), and — via two distinct live cycles — both halves of the P43 regression surface (fresh-registration-after-explicit-removal, and true reconciliation-after-Forget-only).
-- **Already correct (confirmed, not changed):** `SessionManager.clearSession()`, `RootNavigator`'s session-driven switch, `deviceIdentifier.ts`'s independent persistence, `AppDialog`/`useAppDialog`.
-- **Fixed but only source/test-verified:** none — every part of this milestone's change surface was physically exercised on real hardware.
-- **Deferred:** automatic address rediscovery (explicitly out of scope, see §13); the pre-existing Clear History live-sync gap and version-string drift (unrelated, pre-existing, untouched).
-- **Remaining limitations:** none new. The same accepted V1 limitations from P46 §6 stand unchanged.
+**Remaining limitations, explicitly out of scope:** no automatic address
+rediscovery/network re-scanning — this is a deliberate, user-triggered
+manual action only; no backend `Device` deletion or protocol change.
 
 **The P46 release blocker is resolved.**
 
@@ -2521,333 +2156,362 @@ with no duplicate created.
 
 # Milestone P48 — Final Production Rebuild & Release Sign-Off
 
-**Purpose:** the final production validation milestone for Relay V1 — rebuild all three production artifacts from current `main`, physically re-verify P43/P47 in the rebuilt artifacts, run a real end-to-end transfer/pairing pass, and issue a definitive ship/hold verdict. Not a feature-development pass.
+**Purpose:** the final production validation milestone for V1 — rebuild all
+three production artifacts from current `main`, physically re-verify P43/
+P47 in the rebuilt artifacts, run a real end-to-end transfer/pairing pass,
+and issue a definitive ship/hold verdict.
 
-**1. Release candidate identity.** Baseline: `git status` clean, HEAD `8dddf6f6e56ca94ce3b55efdceab8e7c27bcfc3e` ("feat(android): add forget device functionality" — the P47 commit). Confirmed via `git diff 9e2756f..HEAD -- backend/ desktop/`: empty — no backend or Desktop source has changed since P45's branding commit, so the P46-built backend/Desktop artifacts were already byte-identical in source terms to what P48 needed; they were rebuilt anyway per this milestone's explicit "must be built from current source" instruction. `git diff` for `android/` between the pre-P47 and HEAD commits: only `android/src/screens/settings/SettingsScreen.tsx` (+79 lines, the `ForgetDesktopCard`), confirmed via `git show --stat`.
+**Artifacts rebuilt fresh from HEAD `8dddf6f` (the P47 commit)** — backend
+(clean venv), Desktop installer, Android release APK — and each verified
+directly against the built output (version/publisher metadata, signing
+identity, manifest content, embedded Hermes bundle), not assumed from
+source.
 
-**2. Exact artifacts (freshly built this pass, not reused):**
-- **Backend:** `backend/dist/relay-backend/relay-backend.exe`, 9,929,960 bytes, built 14:52 from a **clean venv** (`python -m venv`, then `pip install -r requirements-build.txt` only — never `backend/.venv`, which carries unrelated dev packages per P38's established rule). Pinned versions resolved identically to P38/P46 (`fastapi==0.141.1`, `uvicorn==0.52.1`, `sqlalchemy==2.0.51`, `pydantic==2.13.4`, `pyinstaller==6.22.0`, `starlette==1.6.0`, ...). Built via `pyinstaller relay-backend.spec --noconfirm --clean`.
-- **Desktop:** `desktop/dist/Relay-Setup-0.1.0.exe`, 118,742,681 bytes, built 14:59 via `npm run dist` (`electron-builder --win --x64`), pulling the just-built backend in via `extraResources`.
-- **Android:** `android/android/app/build/outputs/apk/release/app-release.apk`, 94,832,338 bytes, built 15:03 via `./gradlew.bat :app:assembleRelease` (fresh, `rm -rf app/build/outputs/apk/release` first; build succeeded in 3m11s, 578 tasks). SHA-256: `b4790f97c436495b7a9c3146ff409d14c9efe45bb6565f3515edc3323a70d9e5`.
+**P43/P43.1 regression, two live re-pair cycles on RMX3997 confirmed via
+direct backend inspection:** Cycle 1 (stale packaged-app database vs. the
+phone's real identity) correctly surfaced a P43.1 name collision, resolved
+via Replace. Cycle 2 (Forget-only, no Desktop-side removal) reconciled
+onto the *same* row with `paired_at` byte-for-byte unchanged and the prior
+session genuinely deleted — the same evidence pattern P47 already
+established, now reproduced on the rebuilt artifacts. **P47's "Forget This
+Desktop"** confirmed present and correctly styled in the fresh APK.
 
-**3. Artifact freshness/content verification (inspected the built artifacts directly, not source):**
-- Backend: launched in full isolation — a copy of `dist/relay-backend/` moved to a scratch directory with **no `.env` anywhere on its path** (the real gotcha this pass found and resolved: `pydantic-settings`' `env_file=".env"` resolves relative to the process's **working directory**, not the exe's own folder — the first isolation attempts accidentally launched with cwd still inside `backend/`, picked up the dev `.env`'s `DATABASE_URL`, and silently served the real dev database instead of a fresh one; not a product defect, a test-harness mistake, corrected by setting `-WorkingDirectory` explicitly to the isolated exe folder). With `PATH` scrubbed to `C:\Windows\System32` only and a fresh `RELAY_DATA_DIR`: process started, created a fresh `relay.db`/`logs/` under that directory, served `GET /api/v1/devices` (empty list) and `POST /api/v1/pairing/start` (QR payload correctly reporting `"port": 8196`, the exact `--port` this instance was launched with — re-confirms P39's env-var-before-import fix is intact).
-- Desktop: `Get-AuthenticodeSignature` → `NotSigned` (expected/accepted). `Relay.exe` `VersionInfo`: `FileVersion`/`ProductVersion` 0.1.0, `CompanyName` "Relay Labs", `ProductName` "Relay", `LegalCopyright` "Copyright © 2026 Relay Labs", `Comments` empty (no unwanted description) — all matching P45's documented contract, re-verified against this fresh build.
-- Android: `apksigner verify --print-certs` → V2-signed, `CN=Relay Local Verification, OU=Relay P40` (confirmed **not** the debug keystore). `aapt dump badging`: `package: name='com.relay.mobile' versionCode='1' versionName='1.0'`, `application-label:'Relay'` (all locales), **no** `application-debuggable` line. `assets/index.android.bundle` present, `file` identifies it as **Hermes JavaScript bytecode** (2,136,380 bytes) — a real embedded bundle, zero Metro dependency. Manifest (`aapt2 dump xmltree`): `networkSecurityConfig=@0x7f140004` wired to a real resource; resolved that resource (`res/8G.xml` under its obfuscated name) via `aapt2 dump resources -v` and `dump xmltree --file`, and confirmed its actual compiled content: `<base-config cleartextTrafficPermitted="true">` — genuinely present in the packaged manifest resource, not just in source.
+**Transfer validation, byte-verified both directions:** Desktop→Android
+(standalone file, zero-byte file, Unicode filename+content, nested
+folder, duplicate-name disambiguation) and Android→Desktop (single-file
+and two real folder uploads via the native picker, correctly grouped by
+`upload_batch_id`) all confirmed byte-identical via direct comparison, not
+just UI state. Progress/cancellation/history all behaved correctly on
+larger files (an 80MB download, a 600MB download cancelled mid-stream);
+Clear History confirmed still local-only (backend rows unaffected).
+Both stale-file regressions (P44, P32/P29) re-verified. Both platforms
+survived a real restart and Desktop a real upgrade-in-place with `relay.db`
+byte-identical before/after.
 
-**4. P43 regression — device identity (two full physical re-pair cycles on RMX3997, real QR scans, real backend inspection):**
+**One pre-existing, non-blocking limitation reconfirmed:**
+`react-native-saf-x`'s folder picker intermittently fails with "Unsupported
+Uri" on this device (first seen in P13, unchanged code) — self-recovers on
+retry, no data loss. Classified as an accepted V1 limitation, not a P48
+regression.
 
-Baseline recorded from the packaged app's own database (`%APPDATA%\Relay\relay.db`, freshly launched after the P48 installer upgrade): `id=1`, `device_identifier=edf05da3-7009-4698-ae0e-8646df985d22`, `device_name="RMX3997"`, `paired_at=2026-08-15T16:28:33.000355`. Note: this packaged-app database is a separate lineage from the dev-backend database P47's own `docs` entry cites (`backend/relay.db`) — the two were never expected to agree, and didn't need to for this test.
-
-- **Cycle 1** — the phone's own locally-stored `device_identifier` (persisted independently of `Session` since P43, untouched by anything done between P47 and now) did **not** match this stale baseline row, because the packaged app's database predates the phone's actual current identity. Desktop correctly surfaced this as a **P43.1 name collision** (`RMX3997` vs `RMX3997`), not a plain approval — the user confirmed seeing the Replace/Make-new dialog and chose **Replace**. Backend result: `id=1` (unchanged), `device_name` unchanged, but `device_identifier` changed to `29592ea5-b5e7-4739-a687-c264458d8dd3` and `paired_at` refreshed to `2026-08-16T09:41:53.974044` — the exact signature of `DeviceService.replace_device`, correctly dispatched.
-- **Cycle 2** (the actual P43 acceptance test — Forget-only, no Desktop-side removal in between): tapped "Forget This Desktop" on Android (confirmed via `AppDialog`, destructive-red confirm button, correct copy), app fell back to Discovery, found "Thomas" live, real QR scan + Approve. Backend result: `id=1`, `device_identifier=29592ea5-...` (**byte-identical** to Cycle 1's result), `device_name="RMX3997"` (unchanged), **`paired_at=2026-08-16T09:41:53.974044`** — **byte-for-byte unchanged** from Cycle 1 — only `updated_at` advanced (`09:47:11.610894`). Device count stayed at exactly 1 throughout. This is the unambiguous signature of `PairingService.approve_pairing`'s `reconcile_device` branch firing, not a fresh registration.
-- **Old session invalidated / new session works:** queried the packaged app's `sessions` table directly (`sqlite3` via the clean build venv) — **exactly one row**, `issued_at=2026-08-16 09:47:11.611828` (matching the Cycle 2 reconciliation moment to the millisecond), proving the prior session was deleted, not merely superseded. Android's Files tab loaded `"No files are currently shared."` immediately after re-pairing — a real authenticated `GET /files` success against the new token.
-
-**5. P47 regression — Android session recovery (verified in the fresh APK on RMX3997):** the `CONNECTION` section and `ForgetDesktopCard` render correctly below `DEVICE`/`STORAGE` in Settings, with the documented neutral (non-red) trigger button and the exact confirm-dialog copy ("Forget this desktop?" / "Forget Desktop" in red on the dialog's own confirm button only, per P47's trigger-vs-confirm-button distinction). Confirming it genuinely dropped the app back to Discovery/pairing (screenshotted both before and after) — a real `RootNavigator` stack swap. §4 above is this same mechanism's functional proof: `device_identifier` survived two separate `clearSession()` calls untouched.
-
-**6. Physical E2E (real hardware throughout — no API simulation):** the PC's Wi-Fi and RMX3997's mobile hotspot were already on the same subnet at the start of this pass (carried over live from the P47 session — `10.130.191.233`/`10.130.191.86` on `ap0`), confirmed via `Get-NetIPConfiguration` and `adb shell ip addr show ap0` before proceeding, no reconnection needed. Two full QR-camera-to-screen pairing cycles were performed by the user (not simulated) against the real packaged Desktop app and the real installed release APK; Desktop correctly showed the collision dialog once and a plain approval once, matching §4's two cycles exactly. GUI automation on the Desktop side was avoided after one `SetForegroundWindow` call surfaced an unrelated window (the user's own browser tab) mid-session — the screenshots were deleted immediately without being acted on or referenced, and every subsequent Desktop-side click (Start Pairing, Approve, Open/Show in Folder on stale items, Refresh/Delete on a stale source) was performed directly by the user at Claude's direction, exactly the workaround P47's own notebook entry already established.
-
-**7. Transfer validation (real packaged products, byte-verified via `adb shell cat`/size checks and backend API inspection, not just UI state):**
-
-*Desktop → Android:* a standalone file (`hello.txt`, 50 B), a zero-byte file (`empty.bin`, 0 B), a Unicode-named file (`ünïcödé 文件 🎉.txt`, 22 B — content byte-verified via `adb shell cat`), and a nested folder (`nested/inner.txt` + `nested/deeper/deepfile.txt`, proving multi-level structure preservation) — all shared via the backend's own loopback API (`POST /api/v1/files`/`/folders`, the same mechanism the Desktop UI itself calls) and downloaded for real on RMX3997. All five landed with exact matching sizes and byte-identical content on the phone's storage. Duplicate-name handling: a second, different-content `hello.txt` (81 B) downloaded alongside the first correctly resolved to `hello (1).txt` with its own distinct content — no clobbering.
-
-*Note on Unicode via automation:* the first two attempts to share the Unicode-named file via PowerShell's `Invoke-RestMethod` produced a mojibake `file_name` in the response (`Ã¼nÃ¯cÃ¶dÃ©...`) even from a byte-perfect UTF-8 JSON file on disk — isolated to a PowerShell console/byte-array-body encoding artifact (confirmed by re-sending the *identical* file via `curl --data-binary`, which returned the correct `"ünïcödé 文件 🎉.txt"` immediately). **Backend Unicode handling itself is correct**; this was purely a test-tooling quirk, noted here so it isn't mistaken for a product defect in a future pass.
-
-*Android → Desktop:* a single-file upload (`hello.txt`) through the real native picker → `UploadConfirmSheet` (exact "Upload this file" wording confirmed) → `POST /transfers/requests`, and **two** real folder uploads via the native SAF folder picker (a `nested` folder, 2 items, and a `Relay` folder, 6 items including its own nested `deeper` subfolder) — both grouped correctly into single rows on both Android's Transfers list and via the backend's `upload_batch_id`, with `folder_relative_path` correctly preserving the picked structure (e.g. `Relay/nested/deeper/deepfile.txt`). Verified byte-for-byte on the Desktop's actual download directory (`deepfile.txt`, `hello (1).txt` content read back and matched exactly).
-
-*Folder-picker intermittent failure (found, root-caused, classified — not a new regression):* the first several folder-upload attempts (both via `adb input tap` automation **and**, confirmed separately, the user's own genuine physical touches) failed with `"Could not open the folder picker."` — reproduced for two different target folders, ruling out a folder-specific cause. Root-caused via `TransferListScreen.tsx`'s `handleUploadFolder` (a bare `catch {}` swallowing the real error) and `folderPicker.ts`'s own doc comment, which **already documents** this exact failure mode: `react-native-saf-x`'s `listFiles()` intermittently rejects with "Unsupported Uri" on certain real devices (previously observed live on a realme C65 5G during P13) even with the `persist: true` workaround already applied — "the exact same call succeeds once the grant is persisted." The user confirmed it self-resolved after 2-3 retries with no crash, no stuck state, and no data loss — exactly the documented behavior, now also observed on RMX3997. **Classified as an accepted, pre-existing, environment/library-level limitation, not a P48 regression** (`folderPicker.ts` is unchanged since P13, long before P41) — see §13.
-
-**8. Transfer lifecycle (progress, cancellation, history — real, larger files to get a visible multi-second window):** an 80 MB download completed in ~13.5 s (`bytes_transferred == file_size` exactly, real `started_at`/`completed_at` gap). A 150 MB download was observed live increasing (0 B → 112 MB in ~1 s — this LAN sustains roughly 75 MB/s). A 600 MB download was opened at 1.4 MB and cancelled from the Transfer detail screen at 72.0 MB — status correctly settled to **"Cancelled"**, partial bytes preserved and displayed, entry retained in history. The Transfer detail screen's progress bar (P33's native-`<progress>`-backed rendering) was confirmed visually rendering correctly in the final packaged release APK for both the in-progress and cancelled states. **Clear History** confirmed: the Android Transfers list emptied to "No transfers yet.", while the underlying backend `Transfer` rows (ids 50-57 and earlier) remained fully queryable via `GET /transfers` — confirming Clear History is still the documented local-only marker, never a backend delete. Failure-path handling (a transfer failing mid-stream) was **not freshly reproduced this pass** — `transfer_stream_service.py` is unchanged since P41's own byte-verified failure-injection tests, and reproducing it again would need artificial network/mid-stream file deletion with no code-path changed to justify it; this is a deliberate reuse of P41's evidence, not a skipped check.
-
-**9. Stale-file regressions (both physically re-verified on the final packaged Desktop app):**
-- **P44 (downloaded item deleted externally):** deleted a received `hello.txt` from `Downloads\Relay` on disk, then clicked Open on the corresponding Shared Files row — got the documented "File unavailable — This file was moved or deleted from its original download location." dialog, and the stale row was removed from the list. (One round of user confusion mid-test, resolved: an earlier click momentarily showed old content, almost certainly a stale already-open Notepad window from an earlier, pre-deletion "Open" click in this same long session, not a live re-read — the deliberate, clean repro immediately after was unambiguous and correct.) Confirmed via the backend API that the underlying `Transfer` row (`id=46`) is still fully intact (`status: completed`, `bytes_transferred: 50`) — permanent history genuinely untouched by the UI-side removal.
-- **P32/P29 (shared source deleted externally):** deleted the source file backing a shared item (`empty.bin`), clicked Refresh — got the documented generic scoped row error with a Retry button (no raw filesystem path exposed, whole-view unaffected), then clicked Delete — the item was correctly removed (`GET /api/v1/files/4` → `404 "Shared file 4 was not found."` immediately after).
-
-**10. Persistence / restart (both platforms):**
-- **Desktop:** killed `Relay.exe` and `relay-backend.exe` entirely, relaunched via the real installed shortcut path. Backend auto-spawned again; `device_display_name` ("Thomas"), `download_directory`, and the paired `RMX3997` device row (same `id`/`device_identifier` as §4's final state) all survived intact.
-- **Android:** `adb shell am force-stop` + relaunch — session survived with no re-pair prompt, Shared Files loaded live authenticated data immediately on the first frame.
-- **Upgrade-in-place (Desktop):** the P48 installer was run silently (`/S`) over the existing P46-era install. `relay.db` confirmed **byte-identical** before/after via SHA-256 (`8D1B823B...81701681`, matched exactly) despite `Relay.exe`/backend both being freshly deployed (new `LastWriteTime`, backend `Length` matching the fresh 9,929,960-byte build). Registry `DisplayName`/`Publisher` and both Desktop/Start Menu shortcuts (empty `Description`, correct `TargetPath`/icon) all re-verified correct on this fresh install.
-- **Uninstall:** **not repeated this pass** — the NSIS/`electron-builder` config is confirmed byte-unchanged since P39/P45 (`git diff` on `desktop/package.json`), and P39 already physically verified uninstall behavior (binaries/shortcuts removed, `%APPDATA%\Relay` preserved). Reusing that evidence per this milestone's own "don't repeat unchanged packaging tests" instruction rather than performing a destructive uninstall on the machine mid-audit.
-
-**11. Security/release checks:** Android release-signed (non-debug, `CN=Relay Local Verification`) ✓; not debuggable (`aapt dump badging`, no flag present) ✓; Hermes bundle embedded, zero Metro dependency ✓; Desktop has no Python dependency (isolated-launch test, §3) ✓; backend executable is bundled (`resources/backend/relay-backend.exe`, confirmed spawning from that exact path) ✓; no test credentials/secrets/keystores tracked (`git ls-files` sweep — only the pre-existing, accepted, non-secret `android/android/app/debug.keystore` and `.env.example` templates) ✓; no debug backdoors or new logging found (only Android source change this cycle, `SettingsScreen.tsx`, already reviewed in P47) ✓; LAN plaintext HTTP confirmed as the intentional, unchanged V1 design (`cleartextTrafficPermitted="true"`, §3) ✓. Unsigned Windows binaries and the local-verification Android signing identity are **not** treated as new blockers, per this milestone's own explicit instruction — both remain the same accepted V1 limitations P37-P46 already established.
-
-**12. Repository audit:** `git status` clean at HEAD `8dddf6f`, no staged or unstaged diffs, nothing untracked. `git ls-files` swept for `.db`/`.apk`/`.exe`/`dist/`/`build/outputs`/`node_modules`/`.env`/secret-looking filenames — only the already-accepted `debug.keystore` matched, nothing new. No P42-style cleanup performed (none needed — this was a verification pass, not a hygiene pass, per this milestone's own instruction).
-
-**13. Remaining limitations, classified:**
-
-| Item | Classification |
-|---|---|
-| No code signing (Desktop/Android) | **Accepted V1 limitation** (unchanged since P37) |
-| Android release signing = local verification keystore | **Accepted V1 limitation for this V1** — must be replaced before public/store distribution |
-| Windows Firewall first-run prompt | **Accepted V1 limitation** — functional connectivity already confirmed (P46) |
-| Android Files/Transfers Clear History live-sync gap | **Accepted V1 limitation / post-V1 backlog** (unchanged since P41) |
-| `fileIdentity.ts` id-reuse gap | **Accepted V1 limitation** (unchanged since P17) |
-| Desktop/Android version-string drift | **Accepted V1 limitation** — each platform internally consistent, no shared-version mechanism exists by design |
-| Received-item stale-path identity edge case (P44) | **Accepted V1 limitation** (unchanged, narrow) |
-| Automatic Desktop address rediscovery | **Post-V1 backlog** — P47 deliberately shipped manual "Forget" instead |
-| **`react-native-saf-x` intermittent folder-picker "Unsupported Uri" failure (§7)** | **Accepted V1 limitation, newly re-confirmed live on RMX3997** — self-recovers on retry, no data loss, already documented in source since P13; a **post-V1 backlog candidate** if it proves worse on other real devices (e.g. retry-with-backoff inside `pickAndEnumerateFolder`, or evaluating an alternative SAF library) |
-
-No item in this list rises to release-blocker status.
-
-**14. Final verdict: SHIP.**
-
-Every fresh production artifact was built from current `main` and directly inspected (not assumed from source); P43's identity-reconciliation contract holds byte-for-byte across two full physical re-pair cycles on the actual rebuilt artifacts; P47's recovery flow is present and physically verified in the fresh APK; a real QR-camera pairing was performed twice against the real installed products over a real LAN; Desktop→Android and Android→Desktop transfers (files, zero-byte, Unicode, nested folders, duplicate names, folder uploads with confirmation sheet) are all byte-verified; transfer progress/cancellation/history/Clear History all behave correctly in the final packaged build; both stale-file regressions (P44, P32/P29) hold; persistence survives real restarts on both platforms and a real installer upgrade-in-place with the database byte-identical before and after; the repository is clean; and the one new finding from this pass (the SAF folder-picker intermittent failure) is a previously-documented, self-recovering, environment-level limitation, not a defect introduced by or newly exposed as blocking by this milestone. **Relay V1 is ready to ship.**
+**Verdict: SHIP.** Every previously-known limitation (unsigned installers,
+the then-local-verification Android keystore, Clear History live-sync gap,
+version-string drift) remained an accepted, unchanged V1 limitation — no
+new blocker found. **Relay V1 is ready to ship.**
 
 ---
 
 # Milestone P49 — Zero-Cost Distribution Architecture & Release Strategy
 
-**Purpose:** an investigation/architecture-only pass (no application source, no builds, no deployment) to decide exactly how the already-shipped V1 (P48: SHIP) reaches real users at genuine $0 recurring cost — website hosting, GitHub Release structure, versioning convention, Android sideload UX, Android/Windows signing posture, checksum strategy, update model, domain strategy, and a security audit of the proposed architecture. Full 20-section report delivered to the project owner in-conversation; this entry records the investigation evidence and decisions for the repository. See `CLAUDE.md`'s "Zero-Cost Distribution Architecture & Release Strategy (P49)" section for the condensed durable conventions future milestones must follow.
+**Purpose:** an investigation/architecture-only pass (no application
+source, no builds, no deployment) to decide how the already-shipped V1
+(P48: SHIP) reaches real users at genuine $0 recurring cost. See
+`CLAUDE.md`'s "Packaging, signing & distribution" and "Distribution
+model" conventions for the durable decision record — this entry is the
+supporting investigation evidence.
 
-**1. Current release state (inspected directly, not assumed):**
-- **Repository:** `https://github.com/MohdSaad01/Relay`, confirmed **public** (fetched the live page). MIT-licensed (`LICENSE`). One existing tag, `backend-v1-complete` (2026-08-02, a mid-project checkpoint, not a version tag) — **no `vX.Y.Z` tag exists yet, and no GitHub Release has ever been published.** No `.github/` directory — no CI/CD workflows exist.
-- **Desktop:** `desktop/package.json` — `version: "0.1.0"`, `productName: "Relay"`, `appId: "com.relay.desktop"`, `author: { "name": "Relay Labs" }`, `description: ""` (deliberately empty per P45), NSIS/`electron-builder` per-user installer, `compression: "store"` (P45). No auto-update mechanism (no `electron-updater` dependency, no update-check code anywhere in `desktop/src`). `Get-AuthenticodeSignature` on the built installer → `NotSigned` (P39/P45/P46/P48, unchanged). GitHub Releases can distribute the `.exe` directly — a plain binary asset, no special handling needed (confirmed against current GitHub Releases documentation, §2 below).
-- **Android:** `applicationId "com.relay.mobile"`, `versionName "1.0"`, `versionCode 1` (`android/android/app/build.gradle`). Release signing reads a gitignored `keystore.properties` (real file exists locally, confirmed untracked via `git ls-files`) or environment variables, fails fast if absent (P40) — never falls back to `debug.keystore`. The signing identity used for every release build so far is explicitly a **local verification keystore** (`CN=Relay Local Verification, OU=Relay P40`, confirmed via `apksigner` in P46/P48), not a final production identity. APK is directly sideloadable (a standard, non-Play-Store APK); no update mechanism exists beyond "download and install a newer APK," which only preserves app data if the new APK is signed with the *same* certificate as the installed one (confirmed live in P48 §4 — a signature mismatch forced an uninstall-equivalent reinstall path).
-- **Backend:** confirmed architecturally hosting-free by design — `desktop/src/main/backend-manager.js` spawns `relay-backend.exe` as a local child process of the Electron app (P38/P39); Android never talks to any server other than the paired desktop's own LAN address (`docs/09_Networking.md`, `docs/10_Security.md` §12). There is nothing to host for V1 distribution beyond the two static installer/APK files — confirmed by re-reading `docs/12_Packaging_Deployment.md` and `CLAUDE.md`'s own architecture section, not assumed.
-- **Checksums:** no systematic checksum process exists. A single SHA-256 was computed ad hoc for the APK during the P46 audit (`b4790f97c436495b7a9c3146ff409d14c9efe45bb6565f3515edc3323a70d9e5`) as a freshness-comparison aid, not as part of any release/publishing flow.
-- **Website:** does not exist in this repository in any form (no `website/`, `docs/site/`, or similar directory).
+**Current state confirmed by direct inspection:** the GitHub repository is
+public with no version tag and no published Release; Desktop is unsigned
+with no auto-update mechanism; Android's release signing is still the P40
+local-verification keystore (must be replaced before any public
+distribution); no website exists; no systematic checksum process exists.
 
-**2. External facts verified against current sources (not assumed from training knowledge):**
-- **GitHub Releases:** no limit on total release size or download bandwidth; each individual asset must be ≤ 2 GiB (Relay's ~119 MB installer and ~95 MB APK are both far under this); up to 1000 assets per release. Old releases remain available indefinitely at no cost. [GitHub Releases docs](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases), [community discussion on asset limits](https://github.com/orgs/community/discussions/196657).
-- **GitHub Pages:** free for public repositories; ~1 GB recommended site size, ~100 GB/month bandwidth (soft, not a hard cutoff), ~10 builds/hour; custom domain + free HTTPS (Let's Encrypt) supported. [Devian guide](https://www.devian.in/blogs/github-pages-free-hosting), [Supadrop limits reference](https://supadrop.host/blog/github-pages-limits/).
-- **Cloudflare Pages:** free tier has no enforced bandwidth cap (fair-use only), up to 500 builds/month on the free plan, multiple custom domains per project, free HTTPS via Cloudflare's edge. Requires a separate Cloudflare account and its own deploy pipeline (Git integration or Wrangler CLI), distinct from GitHub's own repo settings. [DevToolReviews](https://www.devtoolreviews.com/reviews/cloudflare-pages-pricing-bandwidth-limits-2026), [Easton free-limits guide](https://eastondev.com/blog/en/posts/dev/20260526-cloudflare-free-limits/).
-- **Android sideload UX (Android 14/15):** the "Install unknown apps" permission is now granted **per source app** (the browser or file manager used to open the APK), not a single device-wide toggle — `Settings → Apps → Special app access → Install unknown apps`, select the app, allow. [AndroidInfotech](https://www.androidinfotech.com/unknown-sources-app-installation-android/), [Appaloosa IT admin guide](https://www.appaloosa.io/blog/guides/how-to-install-apps-from-unknown-sources-in-android). Google Play Protect independently scans sideloaded APKs on Play-Protect-certified devices and may show its own "unsafe app" style warning even for a legitimate, non-malicious APK — expected friction, not a Relay defect. [Google Play Protect dev guidance](https://developers.google.com/android/play-protect/warning-dev-guidance).
-- **Google Android Developer Verification (forward-looking, not a current blocker):** Google is rolling out a requirement that installing *any* app — including sideloaded ones — on a "certified" (Play-Protect) Android device requires the app's developer to have completed an identity-verification step, comparable to a free/low-friction "ID check," separate from any Play Store listing or the $25 Play Console fee. A free workflow exists for students/hobbyists. Enforcement begins **2026-09-30 in four countries only (Brazil, Indonesia, Singapore, Thailand)**; global rollout is planned for **2027**. An "advanced flow" for installing from unverified developers (and ADB) remains available. This does not block or cost anything for Relay's V1 release today, but is a real forward-looking item — see Part 13's milestone sequencing note. [9to5Google](https://9to5google.com/2025/08/25/android-apps-developer-verification/), [Android Developers Blog](https://android-developers.googleblog.com/2025/08/elevating-android-security.html).
-- **Free Windows code signing:** no genuinely free, no-strings production code-signing option exists that puts "Relay"/the project owner's own name on the certificate. **SignPath Foundation** (and the similar **OSSign**) sponsor free OV-level Authenticode signing for qualifying open-source projects, but the certificate's publisher identity shown to end users is the *foundation's* name (e.g. "SignPath Foundation"), not the project's, and integration requires wiring the project's build into SignPath's own CI-based signing pipeline (an added dependency/process, not a drop-in). Even a signed OV certificate does not grant instant Microsoft SmartScreen trust — that reputation still has to accumulate over time/downloads (Microsoft's old instant-trust EV-certificate exception is no longer a factor most small projects can access cheaply). Azure Trusted/Artifact Signing exists but is a paid service (~$9.99/mo Basic tier) restricted to certain business regions — excluded by the $0 constraint. [SignPath OSS program](https://signpath.io/solutions/open-source-community), [Microsoft code-signing options doc](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/code-signing-options), [comparecheapssl.com 2026 overview](https://comparecheapssl.com/free-code-signing-certificate-and-how-to-get-it/).
-- **Domain cost baseline:** a custom domain (e.g. via Cloudflare Registrar/Namecheap/Porkbun at at-cost pricing) runs roughly $10-15/year for a typical `.com`/`.dev`/`.app` TLD — not $0, and not purchased or assumed necessary during this investigation.
+**External facts verified against current sources, not assumed:** GitHub
+Releases has no total-size/bandwidth cap (2 GiB per asset, well above
+Relay's ~119MB/~95MB artifacts) and retains releases indefinitely at no
+cost; GitHub Pages is free for public repos with ample soft limits;
+Android 14/15 grants "install unknown apps" per source app, and Play
+Protect may warn on any sideloaded APK regardless of legitimacy; no
+genuinely free Windows code-signing option puts Relay's own name on the
+certificate (SignPath Foundation signs under its own name, not the
+project's); Google's Android Developer Verification requirement is
+forward-looking only (2026-09-30, four countries; global 2027) and not a
+V1 blocker.
 
-**3. Security audit of the proposed architecture (Part 11 of the report):** no secrets are committed anywhere in the tracked repository (`android/android/keystore.properties`, the real local-verification credentials file, is confirmed present locally but untracked via `git ls-files`; only the non-secret RN-template `debug.keystore` and the `keystore.properties.example` template are tracked; `backend/.env` is likewise untracked, only `.env.example` is). A targeted grep for hardcoded API keys/secrets/passwords/private-key material across the whole tree returned no matches. The repository being public exposes no credentials, tokens, or production signing material — Relay's architecture never persists long-lived secrets in source (pairing tokens are runtime-only per `docs/13_Database_Design.md` §9, session tokens are hashed at rest). Publishing the source, the installer, and the APK publicly introduces no new exposure beyond what P37-P48 already accepted (unsigned binaries, a local-verification Android signing identity that must not be treated as production-grade — see Part 6/P50 below).
+**Decisions reached (durable record in `CLAUDE.md`):** GitHub Pages for
+the website, GitHub Releases as the sole artifact host (one release per
+`vX.Y.Z` tag, three assets: installer, APK, `SHA256SUMS.txt`), unify on
+version `1.0.0`, Windows ships unsigned for V1, a new production Android
+keystore is required before public distribution (deferred to P50), and no
+custom domain for V1.
 
-**4. Decisions reached (see `CLAUDE.md` for the full durable record):**
-- **Website host:** GitHub Pages (primary) — same platform as the code, zero separate account/billing relationship, ample soft limits for a small mostly-text site whose actual file bandwidth is served by GitHub Releases (not Pages) anyway. Cloudflare Pages recorded as the credible fallback if a future need (custom analytics, edge functions, a stricter bandw' guarantee) arises.
-- **Artifact host:** GitHub Releases, one release per `vX.Y.Z` tag, assets `Relay-Setup-<version>.exe`, `Relay-<version>.apk`, `SHA256SUMS.txt`. Auto-generated source-archive zips are ignored/irrelevant (they can't be built without the full monorepo tooling and a real signing keystore).
-- **Versioning:** unify on product-level `1.0.0` for the V1 public release (git tag `v1.0.0`, Desktop `package.json` version, Android `versionName`, `versionCode` starting at 1 for this first public release, backend `APP_VERSION`) — proposed, **not applied** in P49.
-- **Windows signing for V1: unsigned.** SmartScreen's "unrecognized publisher" warning is accepted, matching the already-documented V1 limitation (`README.md`, `docs/12_Packaging_Deployment.md`). SignPath Foundation is the recommended $0 path for a *future* signed release, once a CI pipeline exists to integrate with it — explicitly deferred, not attempted in P49.
-- **Android signing for V1 public release: a new production keystore must be generated before the first public distribution** (not the existing local-verification one) — deferred to a dedicated milestone (P50) per the project owner's own signing-key-generation caution, not generated in P49.
-- **Checksums:** `SHA256SUMS.txt` generated at release-build time (`certutil -hashfile`/`sha256sum`), published as a release asset and displayed on the website; supplements, does not replace, code signing.
-- **Domain:** ship V1 on GitHub Pages' free `*.github.io` subdomain; a custom domain (~$10-15/yr) is a future, explicitly-owner-approved purchase, not assumed or recommended for V1.
+**Security audit: clean** — no secrets committed anywhere in the tracked
+repository; a public repository introduces no new exposure beyond the
+already-accepted unsigned-binaries/local-verification-keystore
+limitations.
 
-**5. Verdict: investigation complete, architecture decided, nothing deployed.** No GitHub Release was created, no website was built or published, no production Android keystore was generated, no domain was purchased, and no application source, build configuration, or dependency was changed. Milestone sequencing (P50-P54) proposed for project-owner authorization — see `CLAUDE.md`. Per this file's and `CLAUDE.md`'s own Git Workflow rule, no next milestone begins automatically.
+**Verdict: investigation complete, architecture decided, nothing
+deployed.** No application source, build config, or dependency changed.
 
 ---
 
 # Milestone P50 — Production Android Signing
 
-**Purpose:** replace the local-verification Android signing identity used by every prior release build (P40/P46/P48) with a genuine production keystore, per P49's own conclusion that public distribution must not ship under a keystore explicitly labeled "not for production." Signing only — no website, no GitHub Release, no version-string changes (`CLAUDE.md`'s P51 boundary).
+**Purpose:** replace the local-verification Android signing identity used
+by every prior release build with a genuine production keystore, per
+P49's conclusion. Signing only — no version-string or feature changes.
 
-**1. Baseline investigation (before any change):** `android/android/app/build.gradle` already implements the exact fail-fast, keystore-agnostic mechanism P40 documented — resolves `RELAY_RELEASE_STORE_FILE`/`_STORE_PASSWORD`/`_KEY_ALIAS`/`_KEY_PASSWORD` from a gitignored `keystore.properties` (checked first) or environment variables (fallback), and a `gradle.taskGraph.whenReady` guard throws a `GradleException` before `assembleRelease`/`bundleRelease` run at all if neither source supplies all four values — confirmed by direct inspection, not assumed correct because P40 previously passed. **No Gradle changes were needed** — swapping the signing identity is purely a `keystore.properties` content change, exactly as the mechanism was designed to allow. The pre-existing local-verification keystore (`android/android/relay-release-local-verification.keystore`, gitignored, `CN=Relay Local Verification, OU=Relay P40`) and its `keystore.properties` were left in place on disk (not deleted — still potentially useful for local dev builds) but are no longer referenced by the active `keystore.properties`.
+**No Gradle changes needed** — `build.gradle`'s fail-fast,
+keystore-agnostic mechanism (P40) already supported swapping the identity
+via `keystore.properties` content alone. The production keystore was
+generated (`keytool -genkeypair`, RSA 2048, alias
+`relay-release-production`, `CN=Relay Labs, OU=Relay, O=Relay Labs`) and
+stored at a fixed location **outside the repository entirely** — stricter
+than P40's in-repo-but-gitignored keystore. The password was generated
+randomly and written only to the gitignored `keystore.properties`, never
+displayed, logged, or recorded anywhere else. Git/secret audit confirmed
+clean (no keystore or password ever tracked).
 
-**2. Production keystore generation.** Per the project owner's explicit direction (asked before generating anything, matching P50's own "stop and confirm" instruction): stored at `C:\Users\Saad\ProjectSigning\RelaySigning\relay-release-production.keystore` — a dedicated folder **outside the repository entirely** (stricter than the P40 keystore's in-repo-but-gitignored location), to be backed up by the project owner into a password manager/encrypted vault. `keytool -genkeypair` (PKCS12, RSA 2048, 10000-day validity, alias `relay-release-production`, DN `CN=Relay Labs, OU=Relay, O=Relay Labs, L=Local, ST=Local, C=US` — matching `desktop/package.json`'s existing `author.name` for cross-platform identity consistency). The password was generated as a 32-character random string and written **only** to `android/android/keystore.properties` (gitignored) — never displayed in any tool output after generation, never logged, never placed in this document or `CLAUDE.md`.
+**Build and artifact verification:** `apksigner verify --print-certs`
+confirmed the new certificate (SHA-256
+`59af725033dcb49e92964df01c8fa4d2493084cd97e5e6669f4b100d8ad564ba`),
+distinct from the old local-verification certificate; `versionCode 1`/
+`versionName "1.0"` unchanged; non-debuggable; no credential file inside
+the APK.
 
-**3. Git/secret audit (run both before and after):** `git status`/`git diff` showed no unexpected tracked changes; `git ls-files | grep -i keystore` returned only `app/debug.keystore` (the standard RN-template debug keystore, intentionally tracked) and `keystore.properties.example` (the secret-free template) — the real `keystore.properties` and the production `.keystore` file (outside the repo tree) are both confirmed untracked; `git check-ignore -v android/android/keystore.properties` confirmed the gitignore rule still applies; a targeted `git grep` for the generated password across the whole tree returned no matches. Clean.
+**Physically verified on RMX3997:** the old certificate's install was
+uninstalled (a same-cert upgrade is architecturally impossible across a
+signing-identity change) and the production-signed APK cleanly installed
+and paired, with P47's "Forget This Desktop" present and a full
+authenticated transfer round trip succeeding.
 
-**4. Build and artifact verification.** `./gradlew.bat :app:assembleRelease` succeeded (`versionCode 1`/`versionName "1.0"`, unchanged per this milestone's explicit boundary). `apksigner verify --print-certs` on the resulting `app-release.apk`:
-```
-Signer #1 certificate DN: CN=Relay Labs, OU=Relay, O=Relay Labs, L=Local, ST=Local, C=US
-Signer #1 certificate SHA-256 digest: 59af725033dcb49e92964df01c8fa4d2493084cd97e5e6669f4b100d8ad564ba
-```
-— confirmed distinct from both the P40/P46/P48 local-verification certificate (`CN=Relay Local Verification, OU=Relay P40`, SHA-256 `230fe66672f24068c9bd22f2c457bc0a993a74c4e0c9644cf7a7707a13b98907`) and the RN debug certificate. `aapt2 dump badging`/`dump xmltree` confirmed: `applicationId com.relay.mobile` unchanged, `application-label:'Relay'` unchanged, no `application-debuggable` flag present (release build genuinely non-debuggable — independently reconfirmed live on-device: `adb shell run-as com.relay.mobile` returned `run-as: package not debuggable`), Hermes native libraries and `assets/index.android.bundle` present, `network_security_config.xml`'s `cleartextTrafficPermitted="true"` intact (resource-renamed to `res/8G.xml` by resource shrinking, resolved and inspected directly). Zip listing confirmed no keystore/`.properties`/credential file anywhere inside the APK.
+**Same-key update-continuity test:** a temporary `versionCode 2` build
+(same production keystore, reverted after) installed via `adb install -r`
+directly over the first without uninstalling — succeeded, with
+`firstInstallTime` unchanged and paired session data fully intact,
+proving this identity supports real in-place updates. (A certificate
+mismatch would have failed this exact step — which is what correctly
+happened going from the old to the new identity.)
 
-**5. Physical-device verification (RMX3997, USB/ADB).** The device already had Relay installed under the old local-verification certificate — uninstalled it (a same-cert upgrade is architecturally impossible across a signing-identity change, exactly as P50's own instructions anticipated) and cleanly installed the production-signed APK. Confirmed live: app launches, package/version/signature match the built artifact (`pkgFlags` show no `DEBUGGABLE`), QR pairing to the real Desktop app succeeded, Files/Transfers/Settings all render correctly, P47's "Forget This Desktop" is present and correctly worded, and a full authenticated round trip (share a file from Desktop over loopback → appears on Android → Download → completes → row shows "Open") succeeded byte-correctly.
+**One anomaly investigated, not fixed (out of scope):** during initial
+pairing, the Desktop app reported a name collision resolved via "Replace,"
+but backend evidence showed the pairing actually went through plain P43
+reconciliation (unchanged `paired_at`) rather than a true replace —
+suggesting the Android `device_identifier` file may have survived an
+uninstall/reinstall cycle on this specific OEM ROM (ColorOS/RealmeUI),
+which should not be possible per Android's private-storage contract.
+Could not be conclusively root-caused (non-debuggable release build).
+Recorded for a future milestone if it recurs.
 
-**6. Same-key update-continuity test.** Per this milestone's Part 7 instruction, a version bump was the legitimate way to exercise a real update path: temporarily set `versionCode 2` (documented here, reverted immediately after), rebuilt (**vB**, same production keystore) — `apksigner` confirmed vB's certificate fingerprint is byte-identical to vA's. Installed vB via `adb install -r` **over the running vA install, without uninstalling** — succeeded (a certificate mismatch would have failed with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, the exact failure mode a signing-identity change like P40→P50 itself produces). Confirmed via `dumpsys package`: `firstInstallTime` unchanged, `lastUpdateTime` reflected the in-place update, and the app launched directly into the paired `MainTabs` state with zero re-pairing required — proving the production identity, once established, supports normal in-place updates with full data/session continuity. `versionCode` was then reverted to `1` and the project rebuilt clean (`git diff` on `build.gradle` confirmed a no-op net change); this final rebuild is the actual P50 deliverable artifact. The device itself was deliberately left on the vB test build after the continuity test (same production certificate, fully functional) rather than forcing a second disruptive uninstall/re-pair cycle purely for version-number cosmetics — noted here rather than silently left unexplained.
+**Tests:** `tsc`/`eslint` clean; `jest` 367 tests passing, matching P48's
+baseline exactly — zero source changes beyond the reverted version bump.
 
-**7. One anomaly discovered, investigated, and left unfixed (out of P50's signing-only scope).** During the initial clean-install pairing (step 5), the Desktop app reported a device-name collision and the project owner chose "Replace" — but backend log/DB inspection afterward showed the pairing actually settled through the plain P43 *reconciliation* path (matching `device_identifier`, `Device.paired_at` unchanged from an earlier-that-day timestamp), not a P43.1 *replace* (which would have produced a new row/new `paired_at`). This means the freshly-reinstalled Android app's `device_identifier` (`android/src/pairing/deviceIdentifier.ts`, persisted via `react-native-blob-util`'s `DocumentDir`, confirmed in source to map to `context.getFilesDir()` — genuine OS-guaranteed-private, uninstall-wiped storage) apparently survived an `adb uninstall` + `adb install` cycle on this specific device (RMX3997, ColorOS/RealmeUI) intact, when Android's own platform contract says it should not be possible. `adb shell run-as` could not directly inspect the file (non-debuggable release build, correctly), so this could not be conclusively root-caused within P50's scope. It contradicts CLAUDE.md's P43 assumption ("still lost on app uninstall... intentional") for at least this one OEM ROM, but does **not** indicate any defect in the production signing work itself — the pairing, reconciliation, and session all behaved correctly given whatever identifier was actually submitted, and this exact class of app-data-survives-uninstall behavior (if real) is a known category of ColorOS/RealmeUI "recently uninstalled apps" data-retention feature, not something fixable from Relay's own code. Recorded here for a future milestone to investigate if it recurs or is seen on another device — not fixed, not re-investigated further, per P50's explicit signing-only charter.
-
-**8. Automated regression checks (all clean, zero source changes required beyond the documented, reverted version bump):** `tsc --noEmit` — no output/no errors. `eslint .` — 4 pre-existing warnings (`react/no-unstable-nested-components` ×2, `no-void` ×2), 0 errors, identical to the pre-P50 baseline. `jest` — **42 suites / 367 tests, all passed**, matching P48's baseline exactly.
-
-**9. Key-management documentation.** `android/android/keystore.properties.example`'s existing guidance (generate via `keytool`, store outside the repo, back up securely, never commit) already matched what P50 executed — no changes needed there. `CLAUDE.md`'s P49 section already flagged the "must never lose this key" consequence (breaks the Android update chain permanently); P50 does not duplicate that warning, only fulfills it.
-
-**10. Verdict: production Android signing identity established and verified. P50 complete.** `app-release.apk` at `android/android/app/build/outputs/apk/release/` is now signed with the real `CN=Relay Labs` production certificate, `versionCode 1`/`versionName "1.0"` unchanged, ready for P51 (version finalization) to build on. Per `CLAUDE.md`'s Git Workflow rule, P51 does not begin automatically.
+**Verdict: production Android signing identity established and verified.
+P50 complete.**
 
 ---
 
 # Milestone P51 — Release Artifact Finalization & Version 1.0.0
 
-**Purpose:** unify the product-level version at `1.0.0` across Desktop/Android/backend (the convention P49 proposed but deliberately did not apply) and rebuild/re-verify all three production artifacts from the resulting commit, producing the actual Relay v1.0.0 release-candidate artifact set. Version fields and a rebuild only — no publishing (no GitHub Release, no tag, no website), per this milestone's explicit charter in `CLAUDE.md`.
+**Purpose:** unify the product-level version at `1.0.0` across Desktop/
+Android/backend and rebuild/re-verify all three production artifacts from
+the resulting commit. Version fields and a rebuild only — no publishing.
 
-**1. Baseline investigation.** `git status`/`git log` confirmed a clean tree at HEAD `f7aeab8` (the P50 commit). Repo-wide search for every active version declaration found exactly three: `desktop/package.json` (`"version": "0.1.0"`), `android/android/app/build.gradle` (`versionCode 1` / `versionName "1.0"`), and `backend/app/core/config.py`'s `Settings.APP_VERSION = "0.1.0"` — the single source both `app.main`'s `FastAPI(version=...)` and the `/health` endpoint already read, confirming no second version mechanism needed inventing. `android/package.json`'s `"version": "0.0.1"` (the RN project's own npm metadata, never surfaced to a user) was deliberately left untouched — not one of the three user-visible product versions this milestone unifies. All prose in `CLAUDE.md`/`docs/15_QA_NOTEBOOK.md` describing *past* milestones' version numbers (P37/P40/P45/P46/P48/P50 entries, all correctly `0.1.0`/`1.0` at the time they were written) was likewise left untouched — historical record, not currently-active configuration.
+**Version changes:** `backend/app/core/config.py`'s `APP_VERSION`,
+`desktop/package.json`'s `version`, and `android/.../build.gradle`'s
+`versionName` all set to `"1.0.0"`. Android `versionCode` deliberately
+left at `1` (still the first public release). `android/package.json`'s
+unrelated npm-metadata version was left untouched — not user-visible.
+`pytest` re-run immediately after: 376 passed, 2 skipped, unchanged.
 
-**2. Version changes applied.** `backend/app/core/config.py`: `APP_VERSION` → `"1.0.0"`. `desktop/package.json`: `version` → `"1.0.0"` (root-level `productName`/`author`/`build` fields, all already correct per P45, untouched). `android/android/app/build.gradle`: `versionName` → `"1.0.0"`; `versionCode` deliberately left at `1` (still the first public release, per this milestone's own boundary — not incremented merely by rebuilding). `backend/tests` was searched for any hardcoded `"0.1.0"`/`APP_VERSION` expectation first — none exists, so no test changes were needed. `pytest` re-run immediately after the config change: **376 passed, 2 skipped**, identical to the pre-change baseline.
+**All three artifacts rebuilt from the version-bump commit and verified
+directly against the built output, not source:** backend (isolation-
+tested exactly per P38's discipline — clean venv, no reachable `.env`,
+confirmed `{"version":"1.0.0"}` from `/health`); Desktop installer
+(`Relay.exe`'s `FileVersion`/`ProductVersion` confirmed `1.0.0`, still
+genuinely unsigned, confirmed packaging the freshly-rebuilt backend, not a
+stale one); Android APK (`versionName 1.0.0`/`versionCode 1`, `apksigner`
+confirmed the exact same P50 production certificate fingerprint — no
+accidental re-signing).
 
-**3. Backend production bundle rebuilt.** Per P38's established discipline, built from a **fresh, isolated venv** (not the tracked `backend/.venv`, which still carries the unrelated packages P38 flagged) — `python -m venv`, `pip install -r requirements-build.txt` (pulls in `requirements.txt`'s pinned `fastapi`/`uvicorn`/`sqlalchemy`/`pydantic`/`pydantic-settings` plus the build-only `pyinstaller==6.22.0`), then `pyinstaller relay-backend.spec` from `backend/`. Produced `backend/dist/relay-backend/relay-backend.exe` (~9.9 MB stub + `_internal/`). **Isolation-verified live**, reproducing P38's own test shape: copied the whole `relay-backend/` output to a scratch directory with no `backend/.env` reachable from its working directory (the exact trap P48 documented — `.env` resolves relative to CWD and silently overrides `RELAY_DATA_DIR` if reachable), launched with an explicit `RELAY_DATA_DIR` pointed at a fresh scratch folder and a non-default port (`--port 8199`). Confirmed: `GET /api/v1/health` → `{"version":"1.0.0"}`; a fresh `relay.db` and `logs/` were created *only* under the scratch `RELAY_DATA_DIR`, not anywhere near the source tree; `GET /api/v1/settings` returned a correctly-resolved first-run default (`download_directory` under the real user's `Downloads`, i.e. `Path.home()`-based resolution still works standalone); `GET /api/v1/devices` returned `[]`; the process log confirmed `Uvicorn running on http://0.0.0.0:8199` (LAN binding intact) and the discovery broadcaster started. Process stopped cleanly afterward.
+**Physically verified on RMX3997 over the real hotspot LAN:** a Desktop
+upgrade-in-place with `relay.db` byte-identical before/after (paired
+device, transfer history, and settings all survived); a fresh QR pairing
+that exercised P43.1's Replace path correctly; and a byte-verified
+cross-platform transfer smoke test in both directions (a plain file, a
+Unicode filename, a zero-byte file, a nested folder, and a folder
+upload) — every file pulled off the device and diff'd byte-identical
+against its original.
 
-**4. Windows installer rebuilt.** Confirmed the freshly-built `backend/dist/relay-backend/relay-backend.exe` timestamp predated `npm run dist` before building (guards against the exact stale-backend hazard P39/P43 already flagged). `desktop/dist/Relay-Setup-1.0.0.exe` produced (~118.7 MB, `compression: "store"` per P45 — no size regression). **Metadata verified directly on the built artifacts, not inferred from config:**
-- `Get-AuthenticodeSignature` on both `Relay-Setup-1.0.0.exe` and `win-unpacked\Relay.exe`: `Status: NotSigned` — confirms the installer remains genuinely unsigned (P39/P49's deliberate choice), and that electron-builder's `"signing with signtool.exe"` build-log lines (present in this build's output) are its normal blockmap/asar-integrity-hash bookkeeping, not an actual Authenticode signing step — a real signature would show `Status: Valid`, not `NotSigned`.
-- `Relay.exe`'s `VersionInfo`: `FileVersion 1.0.0`, `ProductVersion 1.0.0.0`, `CompanyName "Relay Labs"`, `ProductName "Relay"`, `LegalCopyright "Copyright © 2026 Relay Labs"`, `Comments` empty (P45's "stays blank" requirement still holds) — no stale `0.1.0` anywhere.
-- `resources/backend/relay-backend.exe` inside `win-unpacked` compared byte-length- and timestamp-identical to the source `backend/dist/relay-backend/relay-backend.exe` — confirms the installer packaged the fresh P51 backend, not a stale one.
-- Icon/branding: unchanged from P36/P45 (no assets touched this milestone); title bar and taskbar icon visually confirmed correct in the physical-verification pass below.
+**`SHA256SUMS.txt` generated** for `Relay-Setup-1.0.0.exe` and
+`Relay-1.0.0.apk` (self-verified). `relay-backend.exe` deliberately has no
+separate checksum entry — never a standalone distribution asset, always
+embedded inside the installer (`docs/12_Packaging_Deployment.md` §15).
 
-**5. Android release APK rebuilt.** `cd android/android && ./gradlew.bat :app:assembleRelease` — **BUILD SUCCESSFUL**, ~1m 46s (incremental; most tasks `UP-TO-DATE`). Produced `app-release.apk` (~94.8 MB). Verified directly against the built artifact:
-- `apksigner verify --print-certs`: `CN=Relay Labs, OU=Relay, O=Relay Labs, L=Local, ST=Local, C=US`, SHA-256 `59af725033dcb49e92964df01c8fa4d2493084cd97e5e6669f4b100d8ad564ba` — **byte-identical to P50's documented production fingerprint**, confirming the same production keystore signed this build (no accidental fallback, no new identity).
-- `aapt2 dump badging`: `package: name='com.relay.mobile' versionCode='1' versionName='1.0.0'`, `application-label:'Relay'`, `launchable-activity: name='com.relay.mobile.MainActivity' label='Relay'` — no `application-debuggable` flag anywhere in the dump.
-- `AndroidManifest.xml`'s `android:networkSecurityConfig` attribute confirmed still present and resolving to a real resource (unchanged code path, not touched this milestone).
-- Zip listing: no `keystore`/`.properties`/credential file anywhere inside the APK (only benign third-party library `.properties` metadata — ML Kit/Play Services version-stamp files, unrelated); `assets/index.android.bundle` present (Hermes JS bundle bundled, zero Metro dependency).
-- `git ls-files | grep -i keystore` / `git status`: only the tracked template (`keystore.properties.example`) and the RN debug keystore appear; the real `keystore.properties` and the production `.keystore` (outside the repo entirely, per P50) remain untracked and gitignored.
+**Tests:** backend 376 passed/2 skipped; Android `tsc`/`eslint` clean,
+`jest` 367 passing — all identical to the P50 baseline, confirming no
+application behavior changed, version fields and a rebuild only.
 
-**6. Physical-device verification (RMX3997, real hotspot LAN — not USB-only, not API simulation).** The Windows machine was connected to RMX3997's own mobile hotspot for this pass (`ap0` interface on the phone at `10.130.191.86`, the Windows Wi-Fi adapter at `10.130.191.233` on the same `/24`) — the same "real phone-hotspot LAN" configuration P39/P41/P46/P48/P50 used, not a contrived same-host test.
-- **Desktop:** `Relay-Setup-1.0.0.exe` silently upgrade-installed (`/S`) over the previously-installed `0.1.0` build. Control Panel afterward correctly showed `Relay 1.0.0`. **`relay.db` was confirmed byte-identical (SHA-256 match) before and after the upgrade** — the paired device row (`RMX3997`, its original `device_identifier`), 58 pre-existing transfer history rows, and the display-name setting all survived untouched, reconfirming NSIS's per-user-install data-preservation behavior (P39) still holds at `1.0.0`. The app launched automatically after install; the bundled `relay-backend.exe` (not Python) started as a child process and answered `GET /api/v1/health` with `{"version":"1.0.0"}`. A window-scoped capture (Win32 `PrintWindow` against the app's own window handle — deliberately not a full-screen capture, see note below) confirmed the Devices tab renders correctly post-upgrade: correct icon/title, all five nav tabs, and the pre-existing paired device shown as "Paired" with a live "Last seen" timestamp.
-- **Android:** the device was left mid-P50 on a temporary `versionCode 2` continuity-test build (documented in the P50 entry above, §6) signed with the same production key. `adb install -r -d app-release.apk` correctly **failed** with `INSTALL_FAILED_VERSION_DOWNGRADE` (Android blocks a versionCode downgrade for a non-debuggable release build even with matching signature and `-d`) — expected, not a defect. Resolved by `adb uninstall` + a clean `adb install` of the canonical `versionCode 1`/`1.0.0` build, landing at the correct final version (confirmed via `dumpsys package`: `versionCode=1 versionName=1.0.0`). `adb shell run-as com.relay.mobile` again returned `run-as: package not debuggable`, reconfirming non-debuggability.
-- **Fresh pairing:** the uninstall/reinstall cleared the app's session, so a real, physical QR-camera pairing was performed by the project owner (I cannot drive a phone's camera via `adb`) — Discovery correctly found "Thomas" over the real hotspot LAN before the scan even happened. Backend log confirms a **new** `device_identifier` was submitted this time (unlike the anomaly P50 §7 recorded, this reinstall behaved per Android's normal contract) and that the resulting pairing resolved through **P43.1's name-collision "Replace" path** (same `device_id=1`, but a new `device_identifier` and a new `paired_at` — only possible via Replace, not plain P43 reconciliation) — live re-confirmation that P43.1's collision-and-replace flow still works correctly on the finalized `1.0.0` build.
-- **Settings screen** (captured via `adb exec-out screencap`, the phone's own display — not the Windows desktop): Device display name, Storage/download-folder card, and **P47's "Forget This Desktop"** all present and correctly worded, non-destructive trigger styling intact per P47's documented convention.
+**Git hygiene:** exactly three files modified (the version bump); no
+build artifact, keystore, or database ever tracked.
 
-**7. Cross-platform transfer smoke test (compact, not a P41/P48-scale matrix).** Four items shared from Desktop via direct API calls to the same loopback endpoints the Electron UI itself uses (`POST /files` ×3, `POST /folders` ×1) — a plain text file, a Unicode/diacritic filename (`日本語-Unicode-Tëst.txt`), a zero-byte file, and a two-file nested folder — then downloaded through the **real Android app UI** (`adb input tap`, not an API shortcut) after a one-time notification-permission prompt was dismissed. All four completed (`GET /transfers` on the backend confirmed `bytes_transferred == file_size` for every one); **all five resulting files/folder contents were pulled off the device and diff/cmp'd byte-for-byte identical against their originals**, including the Unicode filename and content. The reverse direction was also driven through the real app UI end-to-end: created a file on-device, used the app's own native-picker → P26 confirm-sheet → "Upload this file" flow, and confirmed it landed on the Desktop side (`GET /transfers/64`, `direction: "receive"`, `status: "completed"`) with byte-identical content in the real `Downloads` folder. All test shares/files were unshared and deleted afterward (`DELETE /files/{id}` ×3, `DELETE /folders/{id}` ×1, plus removing the physical scratch files on both sides) to leave the product's live Shared Files/Downloads state clean — the underlying `Transfer` history rows were left in place, per their permanent-by-design contract (P21).
-
-**8. A genuine screen-interaction incident, corrected mid-milestone.** An early attempt to screenshot the Desktop app used a full-screen capture plus a simulated mouse click to bring its window forward — this is a real, interactive Windows machine (not an isolated CI sandbox), and the click landed on the project owner's own live Chrome window (a personal, unrelated browser tab), briefly exposing personal information into this process's context. Recognized and stopped immediately: no further full-screen captures or simulated mouse/keyboard input were used for the remainder of this milestone. The project owner was informed directly and asked how to proceed; all subsequent Desktop-window verification used a targeted `PrintWindow` capture against the app's own window handle (content only, no mouse movement, no risk of touching unrelated windows), and all phone-screen captures used `adb exec-out screencap` against the physical test device (RMX3997) — an already-established, sanctioned technique for this project's physical-device QA (not the same class of action as touching the Windows desktop). Recorded here as a process note for any future milestone that considers screen automation on this specific machine: prefer a window-scoped/target-scoped capture API over a full-screen capture, and never simulate a click without first confirming exactly what is at that screen coordinate.
-
-**9. Automated regression checks (all re-run fresh, zero source-behavior changes beyond the documented version bump):** Backend `pytest` — **376 passed, 2 skipped**, identical to the P50/pre-P51 baseline. Android `tsc --noEmit` — clean, no output. Android `eslint .` — 4 pre-existing warnings (`react/no-unstable-nested-components` ×2, `no-void` ×2), 0 errors — identical to the P50 baseline. Android `jest` — **42 suites / 367 tests, all passed** — identical to the P50 baseline.
-
-**10. SHA256SUMS.txt generated.** Staged at `desktop/dist/release/` (gitignored, matching every other build-output location in this repo — not committed):
-```
-1d9c190a766939382e64fbe1bcd200562ff92301a752a168080e41a8c6d04740  Relay-Setup-1.0.0.exe
-7936e30e1e63ebf346419ca7f2ab3bf53ea670387421c8988d25513a931c9b00  Relay-1.0.0.apk
-```
-Self-verified with `sha256sum -c` immediately after generation (`OK` for both). `relay-backend.exe` deliberately has no separate checksum entry — it is never a standalone distribution asset, only ever consumed embedded inside the installer (see `docs/12_Packaging_Deployment.md` §15 for the durable statement of this decision). The Android build output (`app-release.apk`) was copied to the release filename `Relay-1.0.0.apk` for staging/hashing — Gradle's own task still names its output `app-release.apk`; no Gradle configuration was changed to rename it.
-
-**11. Git/repository hygiene.** `git status` after all of the above: exactly three modified files (`android/android/app/build.gradle`, `backend/app/core/config.py`, `desktop/package.json`) — the intended version-bump diff and nothing else. No keystore, `keystore.properties`, APK, installer, `backend/dist`, `desktop/dist`, `android/.../build/`, `relay.db`, log file, or scratch/test file appears as tracked or staged. All generated artifacts (backend bundle, installer, APK, the `desktop/dist/release/` staging folder and its `SHA256SUMS.txt`) live under already-gitignored paths (`dist/`, `build/`).
-
-**12. Build reproducibility record.**
-- Git commit SHA this release candidate was built from: `f7aeab8b8d303f719d440f2cc8a94b8ef1f3c5d5` (the P50 commit), plus this milestone's own uncommitted version-bump diff (three files, §2 above) at build time.
-- Desktop version: `1.0.0`. Android: `versionName "1.0.0"` / `versionCode 1`. Backend: `APP_VERSION "1.0.0"`.
-- Production Android signing certificate: `CN=Relay Labs, OU=Relay, O=Relay Labs, L=Local, ST=Local, C=US`, SHA-256 `59af725033dcb49e92964df01c8fa4d2493084cd97e5e6669f4b100d8ad564ba` (unchanged from P50 — no re-signing event occurred).
-- Final artifact filenames: `Relay-Setup-1.0.0.exe`, `Relay-1.0.0.apk`, `SHA256SUMS.txt` — hashes in §10 above.
-- No secret (keystore password, or any other credential) is recorded anywhere in this entry, `CLAUDE.md`, or any other tracked file.
-
-**13. Problems discovered.** None that were application defects. The one real incident (§8, an accidental full-screen-capture-driven click onto the project owner's own live desktop) was a process/tooling mistake on my part, not a Relay defect — corrected immediately, and the recommended mitigation (window-scoped capture, no blind clicks) is recorded above for future milestones. The `INSTALL_FAILED_VERSION_DOWNGRADE` hit in §6 was expected Android platform behavior given the device's leftover P50 test state, not a defect in the P51 artifact.
-
-**14. Deferred / out of scope (unchanged from P49's plan, not started here):** GitHub Pages website (P52), the actual GitHub Release/tag/publish step (P53), and external/outside-perspective installation testing (P54). Windows code signing remains out of scope for V1 (`CLAUDE.md`'s P49 section). No automatic updater was designed or implemented.
-
-**15. Verdict: Relay v1.0.0 release-candidate artifact set is finalized and verified.** `desktop/dist/Relay-Setup-1.0.0.exe`, `android/android/app/build/outputs/apk/release/app-release.apk` (staged for distribution as `Relay-1.0.0.apk`), and their `SHA256SUMS.txt` are ready for the P52–P54 publishing sequence. No GitHub Release, tag, or website was created — publishing remains a separate, not-yet-authorized milestone. Per `CLAUDE.md`'s Git Workflow rule, P52 does not begin automatically.
+**Verdict: the Relay v1.0.0 release-candidate artifact set is finalized
+and verified**, ready for the P52–P54 publishing sequence. No GitHub
+Release, tag, or website was created in this pass.
 
 ---
 
 # Milestone P52.6 — Download & Installation Section
 
-**Purpose:** replace `web/index.html`'s `#download`/`#install` placeholder sections (scaffolded in P52.1, never implemented) with a real Download & Installation section, describing Relay's actual, current distribution state — not a fabricated one. Scope was explicitly narrowed to this one section; P52.7 (Requirements/Compatibility) and the actual GitHub Release/Pages publish step (P53/P54) were out of bounds for this milestone.
+**Purpose:** replace `web/index.html`'s placeholder Download/Install
+sections with a real one describing Relay's actual current distribution
+state — not a fabricated one. P52.1–P52.5 (foundation, hero, how-it-works,
+visuals, features) were implemented without ever writing a QA Notebook
+entry — a pre-existing documentation gap, not this milestone's to
+backfill.
 
-**1. Baseline investigation.** Read the full existing `web/` implementation (`index.html`, `css/style.css`, `js/main.js`) built across the undocumented P52.1–P52.5 passes (that gap — those milestones never wrote a QA Notebook entry — is a pre-existing documentation debt, not something this milestone's charter covered fixing). Confirmed via `git remote -v`/`git tag -l` and `docs/15_QA_NOTEBOOK.md`'s own P49 entry (§1) that `https://github.com/MohdSaad01/Relay` is a real, existing, public repository with **no tags and no GitHub Releases** — so any "download" affordance pointing at a specific release asset would be fabricated. Cross-checked the release-candidate facts already established in P49–P51 and `docs/12_Packaging_Deployment.md` §15: version `1.0.0` across all three components; final distribution filenames `Relay-Setup-1.0.0.exe` and `Relay-1.0.0.apk`; `SHA256SUMS.txt` as the checksum mechanism; `relay-backend.exe` deliberately has no standalone release entry (embedded in the installer only). Android sideloading/Play Protect framing was drawn from P49's own "Android direct distribution (no Play Store)" section.
+**Baseline confirmed no release exists yet** (no tag, no GitHub Release) —
+so a "download" affordance can't point at a specific release asset.
 
-**2. Implementation.** In `web/index.html`, merged the two placeholder sections into one `<section id="download">` ("Download Relay"): a heading with the `v1.0.0` version badge, then two `.download-platform` cards (Windows, Android) — each with a platform icon (reused verbatim from the hero diagram's existing monitor/phone SVGs, no new icon), an `h3` title with its own version badge, a subtitle (`Windows desktop application · installer` / `Direct APK download · no Play Store listing`), a `.download-cta` status block, and platform-specific content (Windows: a 4-step `<ol>` — download, run, launch, pair; Android: a note on allow-unknown-sources/Play Protect). A closing footnote states the GitHub Releases distribution model, mentions `SHA256SUMS.txt` non-prominently, and links to the real (already-used-elsewhere-on-the-page) `github.com/MohdSaad01/Relay/releases` URL. The `#install` section id was retired (its content is now inside `#download`, matching the milestone brief's single-section IA); `#requirements` was left untouched as a placeholder for a future milestone. No changes were needed to `js/main.js` — its existing generic `a[href^='#']`/`IntersectionObserver` nav-highlighting logic already covers `#download` unchanged.
+**Implementation:** merged the two placeholder sections into one
+`<section id="download">` with two platform cards (Windows, Android),
+each showing the real `v1.0.0` version and final artifact filename
+(`Relay-Setup-1.0.0.exe`/`Relay-1.0.0.apk`), reusing existing icon/card/
+badge components — no new visual language. Since there's nothing to
+click yet, each card renders a plain "Release coming soon" status line,
+not a disabled-looking button — never make an inert element look
+interactive. Each card carries an HTML comment marking the exact spot
+P53 replaces with a real download link.
 
-**3. The "release not published" state.** Per the milestone's explicit accessibility instruction, `.download-cta-status` ("Release coming soon", with a reused clock icon from the Features section) is a plain status line, not a disabled-looking button — there is nothing to click, so nothing pretends to be clickable. Each card carries an HTML comment (`<!-- P53 replaces this status block with a real download link... -->`) marking the exact swap point so P53 can drop in a real `.btn` download link without restructuring either card.
+**Responsive verification used the CDP-based technique** (`Emulation.
+setDeviceMetricsOverride`, not `chrome --headless --window-size`, which
+floors around ~500px in this Chrome build and produces a falsely
+cropped-looking image below that) — confirmed zero horizontal overflow
+at 1440px/834px/390px.
 
-**4. New CSS (`web/css/style.css`).** Added one new commented block (`.download-grid`, `.download-platform`, `.download-cta`, `.download-steps`, `.download-note`, `.download-footnote`, plus one `@media (max-width: 900px)` override collapsing the two-column grid to one column) — reused existing tokens/components throughout (`.card`, `.badge`, `.feature-icon`, the existing color/spacing/radius variables); no new colors, shadows, or gradients were introduced.
+**Two process notes recorded** (both disclosed immediately, no lasting
+harm): a `taskkill /IM chrome.exe` during cleanup closed every Chrome
+window on this real, interactively-used machine, not just the one
+headless instance launched for verification — target the specific PID
+instead, never an image-name-wide kill.
 
-**5. Responsive verification — a tooling pitfall found and worked around.** Initial verification via `chrome.exe --headless=new --window-size=390,900 --screenshot=...` appeared to show real horizontal overflow (the hero heading and CTA buttons visibly clipped, the mobile nav-toggle pushed off-screen) — but a diagnostic page confirmed headless Chrome's `--window-size` flag has an effective ~500px floor for the actual layout viewport in this Chrome build (`window.innerWidth` reported `500` regardless of a smaller requested size), so the CLI screenshot flag was silently laying the page out at 500px and then cropping the image to the requested narrower width, producing an appearance of overflow that wasn't real. Re-verified correctly via the DevTools Protocol directly (`Emulation.setDeviceMetricsOverride` with an explicit `width`/`mobile: true`, one-off Node script talking to `--remote-debugging-port`): at 1440px, 834px, and 390px, `document.documentElement.scrollWidth` matched the requested viewport width exactly at all three sizes — genuinely zero horizontal overflow anywhere on the page, both in the pre-existing sections and the new Download section. Visually confirmed via cropped screenshots of just `#download` at all three widths: cards stack to one column under 900px, artifact filenames and install steps stay readable, the Windows/Android cards remain immediately distinguishable by icon/title/content shape (not identical boxes), and the CTA/footnote text reflows cleanly with no compression or clipping. This CLI-flag pitfall (and the CDP-based workaround) is recorded here for any future milestone that needs to screenshot-verify this site at a narrow width — do not trust `chrome --headless --window-size=<w>,<h> --screenshot` alone below roughly 500px.
-
-**6. An operational incident during cleanup, corrected immediately.** After the CDP verification, `taskkill /F /IM chrome.exe /T` was run intending to stop only the one background headless instance launched for this milestone — but since this is a real, interactively-used Windows machine (not an isolated CI sandbox, the same fact P51 §8 already flagged for screen-capture actions), that command force-closed **every** Chrome process on the machine, including any ordinary browser windows/tabs the project owner had open. This was disclosed to the project owner immediately and unprompted; the project owner confirmed no harm resulted. Recorded here as the same class of process-hygiene lesson P51 §8 already established for screen capture, extended to process management: on this machine, never target a shared process by image name alone (`taskkill /IM ...`) — target the specific PID this session actually launched instead.
-
-**7. No structural/functional regressions.** `index.html`'s other sections (Hero, How It Works, Product Visuals, Features, footer) were not modified. No JavaScript errors were introduced (the new section adds no interactive behavior beyond what the existing nav-highlighting script already generically handles). No external dependencies, build tooling, or asset files were added.
-
-**8. Deferred / explicitly out of scope for this milestone:** P52.7 (Requirements/Compatibility section — the `#requirements` placeholder is untouched), any GitHub Release/tag creation, GitHub Pages deployment/CI configuration, and a real download link (blocked on P53, which this section's markup is now structurally ready for).
-
-**9. Verdict: Download & Installation section implemented and verified.** `web/index.html` and `web/css/style.css` now present a real, honest Download Relay section — correct version, correct artifact names, no fabricated release URL — visually verified at 1440px/834px/390px with zero horizontal overflow. Per `CLAUDE.md`'s Git Workflow rule, P52.7 does not begin automatically.
+**Verdict: Download & Installation section implemented and verified** —
+a real, honest section with the correct version and artifact names, no
+fabricated release URL.
 
 ---
 
 # Milestone P52.7 — Requirements & Compatibility Section
 
-**Purpose:** replace `web/index.html`'s `#requirements` placeholder (scaffolded in P52.1, left untouched by P52.6) with a real Requirements & Compatibility section, stating only what a new user genuinely needs to install and use Relay — verified against actual project configuration, never invented. This was the last substantive content section of the website; publishing (P53/P54) remains explicitly out of scope.
+**Purpose:** replace `web/index.html`'s `#requirements` placeholder with
+a real section stating only what a new user genuinely needs — every claim
+verified against actual project configuration, not invented.
 
-**1. Investigation — every claim traced to a source, not assumed.** Read `web/index.html`/`css/style.css`/`js/main.js` in full to confirm the design system to extend. Cross-checked each candidate requirement directly against the repository rather than `CLAUDE.md`'s prose alone:
+**Every requirement traced to a source:** Windows 10/11 64-bit only
+(`desktop/package.json`'s `build.win.target`, `docs/12` §3); Android 8.0+
+(`minSdkVersion = 26`); per-user install, no admin rights (NSIS
+`perMachine: false`); the local-network/no-cloud model (`docs/09
+_Networking.md`); QR pairing with desktop approval; sideloaded APK
+("install unknown apps," Play Protect scanning); the unsigned Windows
+installer (real SmartScreen warning); manual updates only; Windows
+Firewall phrased conditionally, since no prompt has been observed in this
+dev environment but that's not a promise for a genuinely fresh machine.
+Deliberately not stated: RAM/CPU/storage figures, supported Android
+manufacturers, transfer-speed benchmarks — none are established anywhere
+in the project.
 
-* **Windows version.** `README.md`'s own "Requirements" section states "Windows 10/11 — the desktop app (Electron + embedded backend) targets Windows"; `desktop/package.json`'s `build.win.target` is `nsis`/`arch: ["x64"]` only, and `docs/12_Packaging_Deployment.md` §3 confirms "Windows x64 only, matching the project's supported dev/runtime environment — no ia32/arm64 builds." Combined: Windows 10 or 11, 64-bit only.
-* **Android minimum version.** `android/android/build.gradle`: `minSdkVersion = 26` (`compileSdkVersion`/`targetSdkVersion` both `36`) — API 26 is Android 8.0 "Oreo." No android/README or doc states a friendlier version string anywhere, so the site states the OS name/version pair itself rather than a raw API level.
-* **Per-user install, no admin rights.** `docs/12_Packaging_Deployment.md` §3/§14 and `CLAUDE.md`'s P39 section: NSIS `perMachine: false`, installs to `%LOCALAPPDATA%\Programs\Relay`.
-* **Network model.** `docs/09_Networking.md` §1/§3/§6: local-first, no internet/cloud infrastructure required; supported networks are home Wi-Fi, office LAN, and mobile hotspots; the desktop hosts the backend, Android connects directly to it.
-* **Pairing mechanics.** `docs/09_Networking.md` §4/§8 (UDP broadcast discovery, then pairing) and the already-implemented QR/approval flow described elsewhere in `CLAUDE.md` (M7/M8, P43.1) — stated at the level of "what the user does," not re-explaining the full protocol (that's How It Works' job, not this section's).
-* **Sideloaded APK / "install unknown apps."** `docs/12_Packaging_Deployment.md` §5 ("Distributed as a standard APK (sideloaded — no store listing exists)") and `CLAUDE.md`'s P49 "Android direct distribution (no Play Store)" section (per-source-app unknown-sources permission, Play Protect scanning a sideloaded APK). The Download section (P52.6) already touches this from the installation-step angle; Requirements states it as a compatibility fact instead, without re-explaining Play Store non-existence at length.
-* **Unsigned Windows installer.** `docs/12_Packaging_Deployment.md`'s own header and `CLAUDE.md`'s P49 "Windows signing for V1: unsigned" section — a real, user-facing SmartScreen "unrecognized publisher" warning on first run, not an internal detail.
-* **Manual updates only.** `docs/12_Packaging_Deployment.md` §9 ("Automatic updates are outside Version 1's scope; updates are performed manually") and `CLAUDE.md`'s P49 "Update model: manual" section.
-* **Windows Firewall.** `docs/09_Networking.md` §10 ("If the OS blocks incoming connections, Relay should detect the problem and explain how the user can allow access") is the durable product requirement; P39/P41/P46's own finding that no firewall prompt has actually appeared in this dev environment is an *environmental* observation, not a promise the prompt won't happen on a genuinely fresh end-user machine — so the copy is phrased conditionally ("allow access if Windows Firewall asks"), never as a guaranteed step.
+**Implementation:** a `<dl class="card">` of four requirement rows
+(Windows/Android/Network/Pairing), each pairing a reused icon with a
+bolded value and one supporting sentence — the semantically correct
+element for "term: current fact" content, extending existing
+card/badge/icon components with no new visual language. A closing
+footnote states only the two genuinely user-facing caveats (unsigned
+installer, manual updates) — the much longer P37–P51 engineering backlog
+was deliberately excluded as not user-facing.
 
-Deliberately **not** stated anywhere: RAM/CPU/storage figures, supported Windows editions beyond 10/11, supported Android manufacturers, maximum file size, Wi-Fi speed, transfer-speed benchmarks, or a device-count limit — none of these are established anywhere in the project, and inventing any of them would fail this milestone's own charter.
+**Full-page regression pass at 1440px/834px/390px** (same CDP technique
+as P52.6): zero horizontal overflow, zero console/network errors anywhere
+on the page. The P52.5 Hero mobile "text overflow" concern was re-checked
+in this real rendered environment and confirmed, once more, to have never
+been a genuine defect — just the `--window-size` tooling artifact P52.6
+already identified.
 
-**2. Implementation.** In `web/index.html`, replaced the `#requirements` placeholder with a real `<section>`: a `.section-heading` (matching every other section), then one `.requirements-list` — a `<dl class="card">` of four `.requirement-row` groups (`<div>` wrapping one `<dt>` + `<dd>`, valid HTML5 within `<dl>`), each a definition-list entry — Windows / Android / Network / Pairing — pairing a reused `.feature-icon`-in-`.diagram-icon` badge with the term, and a bolded requirement value plus one supporting detail sentence as the definition. Icons are reused verbatim, not invented: the hero's monitor glyph (Windows), the hero's phone glyph (Android), the Features section's "Stays on your network" lines-and-circles glyph (Network), and How It Works' "Pair" step's QR-like grid glyph (Pairing) — the last one chosen specifically because it already represents pairing elsewhere on the same page. A closing `.requirements-footnote` states the two genuinely user-facing caveats (unsigned installer / SmartScreen warning, manual updates on both platforms) in two sentences, deliberately not a longer limitations list — every other candidate item from `CLAUDE.md`'s P37–P51 sections (PyInstaller internals, dev-only Metro behavior, QA-device-specific SAF picker flakiness, the Android Developer Verification 2026/2027 rollout, local-verification-vs-production keystore history) was excluded as either not user-facing or not yet relevant to a V1 install.
-
-**3. New CSS (`web/css/style.css`).** Added one new commented block: `.requirements-list`/`.requirement-row`/`.requirement-icon`/`.requirement-value`/`.requirement-detail`/`.requirements-footnote`, plus one `@media (max-width: 640px)` override collapsing each row's two-column grid (`minmax(150px, 200px) 1fr`) to a single stacked column. Reused `.card`, `.feature-icon`/`.diagram-icon`, `.section-heading`, and the existing color/spacing tokens throughout — no new colors, shadows, gradients, or breakpoints beyond the one already used elsewhere in the file (`640px`, matching the container's own mobile padding breakpoint).
-
-**4. Responsive & full-page verification, applying the P52.6-established CDP technique.** Launched `chrome.exe --headless=new --remote-debugging-port=9333 --user-data-dir=<scratch-profile>` against the local `index.html` file directly (no dev server needed, no build step), then drove it via a one-off Node script over the raw DevTools Protocol (`Emulation.setDeviceMetricsOverride` with an explicit `width`/`mobile` flag per viewport, never the CLI `--window-size` flag P52.6 already proved unreliable below ~500px). At each of 1440px/834px/390px: `document.documentElement.scrollWidth` was read directly and compared to the requested `window.innerWidth` — **exact match at all three widths, zero horizontal overflow anywhere on the full page**, not just the new section. Full-page screenshots at all three widths were visually reviewed: Hero, How It Works, Product Visuals, Features, Download, the new Requirements section, and the footer all render correctly in sequence at 1440px; the same holds at 834px (tablet — download cards and the two-column requirement rows both still fit without compression) and at 390px (mobile — hamburger nav, single-column requirement rows, all text reflows without clipping or excessive gaps). The previously-flagged P52.5 Hero mobile text-overflow concern was re-checked in this same real rendered environment as part of the full-page pass and did **not** reproduce — the Hero heading and CTA buttons render and wrap cleanly at 390px, consistent with P52.6's own conclusion that the earlier appearance of overflow was the `--window-size` tooling artifact, not a genuine defect; nothing further was changed in Hero, matching this milestone's explicit "preserve already-approved sections" boundary.
-
-**5. Technical/console verification.** A separate CDP pass enabled `Runtime`/`Network`/`Page` domains and reloaded the page at 1440px, capturing every `Runtime.consoleAPICalled`, `Runtime.exceptionThrown`, and any HTTP response ≥ 400: all three came back empty — no console errors/warnings, no JS exceptions, no broken image/CSS/JS references. `document.getElementById('requirements')` resolved correctly and the existing `nav-links`/`IntersectionObserver` scroll-spy script required no changes (Requirements has no nav entry, matching the pre-existing, deliberate precedent already set by Product Visuals — not every section is linked from the nav). No build system was introduced; the site remains plain HTML/CSS/JS.
-
-**6. An operational note, applying (not repeating) the P52.6 process lesson.** The verification's headless Chrome instance was launched with a milestone-unique `--user-data-dir` specifically so it could be identified and stopped precisely afterward: `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | Where-Object { $_.CommandLine -like '*chrome-profile-p527*' }` located exactly the 8 processes in this instance's own tree (by PID, via its unique profile path in each process's command line), and only those were stopped — confirmed zero remaining afterward. No `taskkill /IM` or other image-name-wide kill was used at any point, so no other Chrome window/tab on this real, interactively-used machine was affected.
-
-**7. No structural/functional regressions.** Nav, Hero, How It Works, Product Visuals, Features, Download & Installation, and the footer were not modified beyond what verification in item 4 already covers as unaffected. No new external dependencies, fonts, or assets were added.
-
-**8. Deferred / explicitly out of scope for this milestone:** P52.8 (Final Website QA & Polish), P53 (GitHub Release/tag/publish), P54 (external smoke test), any GitHub Pages/Actions configuration, and any domain purchase.
-
-**9. Verdict: Requirements & Compatibility section implemented and verified.** `web/index.html` and `web/css/style.css` now present a real, fact-checked Requirements section — Windows 10/11 64-bit, Android 8.0+, shared-network and QR-pairing requirements, and the two genuinely user-facing V1 caveats (unsigned installer, manual updates) — with a full-page regression pass at 1440px/834px/390px showing zero horizontal overflow and zero console/network errors anywhere on the page. Per `CLAUDE.md`'s Git Workflow rule, P52.8 does not begin automatically.
+**Verdict: Requirements & Compatibility section implemented and
+verified.**
 
 ---
 
 # Milestone P52.8 — Final Website QA & Polish
 
-**Purpose:** a final audit-and-polish pass over the already-complete `web/` site before P53 (GitHub Release/tag/publish). Explicitly not a redesign — the P52.1–P52.7 visual system (palette, spacing scale, card/badge language, section hierarchy) was treated as settled; the charter was to find and fix objective defects, not to re-litigate subjective choices.
+**Purpose:** a final audit-and-polish pass over the complete `web/` site
+before P53. Not a redesign — the P52.1–P52.7 visual system was treated as
+settled; the charter was to find and fix objective defects only.
 
-**1. Investigation.** Read every file in `web/` in full (`index.html`, `css/style.css`, `js/main.js`, all three image assets), `git log -- web/`, the P52.1–P52.7 QA Notebook entries, and this file's website-conventions sections in `CLAUDE.md`. Confirmed via `git status`/`git diff` that the working tree was clean before starting. Served the site locally (`python -m http.server`, from `web/`) and drove an isolated headless Chrome instance (`--user-data-dir` pointed at a session-unique scratch profile, `--remote-debugging-port`) over the raw DevTools Protocol from a Node script — the same technique P52.6/P52.7 established — rather than the unreliable sub-500px `--window-size` CLI flag.
+**Responsive/runtime verification (before and after every fix, via the
+established CDP technique):** zero horizontal overflow and zero console/
+network errors at 1440px/834px/390px, unchanged throughout.
 
-**2. Responsive/runtime verification (first pass, before any fix).** Captured full-page screenshots and `document.documentElement.scrollWidth` vs. `window.innerWidth` at 1440px/834px/390px: zero horizontal overflow at any width. `Runtime.consoleAPICalled`/`Runtime.exceptionThrown`/any HTTP response ≥ 400 were all captured across a full page load at each width: all empty — no console errors or warnings, no JS exceptions, no failed asset requests. Re-ran the identical checks after every fix below; the result stayed unchanged (still zero overflow, zero console/network errors) at every re-check.
+**Accessibility:** heading order and landmarks correct; every image has
+appropriate alt text; no focus-outline suppression anywhere. **Contrast
+defect found and fixed:** `--color-text-muted` (`#8a8f98`, ported 1:1 from
+the Desktop app's own token) measured only ~3.0–3.25:1 against this site's
+surfaces — below WCAG AA's 4.5:1 — and is used at small sizes for real
+content. Darkened to `#6c717a` (~4.6–4.9:1) in `web/css/style.css` only;
+the Desktop app's own token is untouched (out of scope, not shown to have
+the same problem).
 
-**3. Accessibility pass.** `document.querySelectorAll('h1,h2,h3,h4')` confirmed exactly one `<h1>` and a correctly nested heading order (H1 → H2 per section → H3/H4 within Features' lead card) with no skipped levels. Landmark count confirmed exactly one each of `<header>`/`<nav>`/`<main>`/`<footer>`. Every `<img>` has an `alt` attribute; the two product screenshots carry real descriptive alt text (not "image of..." redundancy), and the two decorative uses of the Relay mark correctly use `alt=""`. No focus-outline suppression exists anywhere in the CSS (no `outline: none`/`outline: 0`), so every interactive element keeps the browser's native visible focus ring — the mobile nav toggle is a real `<button>` with `aria-expanded`/`aria-controls`/`aria-label`, and both platform CTAs and all footer/nav links are real `<a>` elements, so keyboard operability was not a source-level concern.
+**Content pass:** fixed three missing-punctuation clauses, one comma
+splice, one mid-sentence capitalization inconsistency, one confusing
+sentence (Devices feature card), and straight-vs-curly quotes — every
+other claim on the page was checked against its source and left
+unchanged as already accurate.
 
-**Contrast defect found and fixed:** computed WCAG 2.1 contrast ratios for every text/background color pair in `style.css` (small Node script implementing the standard relative-luminance formula). `--color-text-muted` (`#8a8f98`, ported 1:1 from the Desktop app's own `app.css` per the P52.1 design-token decision) measured only **~3.0–3.25:1** against this site's two surface colors — below WCAG AA's 4.5:1 threshold for normal-size text — and it is used at small sizes for real content, not just decorative icons: the hero's CTA note, the "same Wi-Fi or hotspot" diagram caption, both platform sub-labels and the download footnote, and the requirements footnote. Darkened to `#6c717a` (**~4.6–4.9:1** against both surfaces) in `web/css/style.css` only — the Desktop app's own `app.css` token is untouched, since the app's internal UI chrome was not in scope and was not shown to have the same problem. The new value stays visibly lighter than `--color-text-secondary`, preserving the three-tier text hierarchy.
+**Other fixes:** one image `height` attribute corrected to match its real
+dimensions (was causing a layout shift), one dead CSS rule removed
+(`.section-placeholder`, zero remaining references), Open Graph tags and
+`theme-color` added (no `og:url` — no live URL yet, would be fabricated).
 
-**4. Content/copy pass — read every visible sentence against the actual product, not against how a prior milestone phrased it.** Found and fixed four grammar defects, all missing punctuation between two independent clauses (a pattern that recurred three times, suggesting em dashes were lost somewhere in earlier drafting) plus one further comma/run-on:
-   * How It Works' Pair step: "...before the phone is trusted nothing connects without that confirmation." → added an em dash before "nothing."
-   * How It Works' Transfer step: "...over the local network no server or cloud storage sits in between." → added an em dash before "no server."
-   * Requirements' Android row: "...not from Google Play you'll need to allow installs..." → added an em dash before "you'll," and removed a stray mid-sentence `<br>` that broke the line at an arbitrary point rather than a natural boundary (the line now wraps naturally at every width, verified in the re-check pass).
-   * How It Works' section subtitle: a comma splice ("...sending your first file, all of it stays on your own network.") → em dash, matching the site's own established em-dash convention for this exact kind of qualifying clause (already used correctly elsewhere, e.g. the hero diagram caption and the Devices feature card).
-   * Requirements footnote: a second comma splice ("...updated manually on both platforms so download a newer version...") → added the missing comma before "so."
-
-   **Capitalization inconsistency found and fixed:** the hero description read "No cloud storage, No account, and No internet server in between." — mid-sentence "No" capitalized three times. The identical construction appears correctly elsewhere on the same page (Requirements' Network row: "No cloud storage and no internet server sit in between." — capital only at the true sentence start) and in the page's own `<meta name="description">`, both lowercase mid-sentence. Fixed the hero to match the site's own already-correct pattern.
-
-   **Confusing sentence found and fixed:** the Devices feature card read "...if a phone ever loses track of its paired PC or a new network, a different hotspot — forget it and pair again..." — an ungrammatical fragment that doesn't parse as written. Rewritten to "...if a phone ever loses track of its paired PC — say, after a new network or a different hotspot — forget it and pair again...", preserving the exact same factual claim (P47's "Forget This Desktop," triggered by a network change) without adding any new one.
-
-   **Straight quotes → curly quotes:** the requirements footnote's `"unrecognized publisher"` was the page's one and only quoted phrase, in plain ASCII quotes; changed to `&ldquo;`/`&rdquo;` for typographic consistency with a polished marketing page.
-
-   Every other claim on the page was checked against its source and left unchanged as already accurate: the local-network/no-cloud/no-account model (`docs/09_Networking.md`), pairing/QR/approval mechanics (M7/M8, P43.1), folder transfer and nested-structure preservation (P26), "Rename a device from Settings" (true on both platforms, P23/P29), "Turn off network visibility from Settings" (verified directly against `desktop/src/renderer/views/settings.js`'s real `discovery_enabled` checkbox, labeled "Discoverable on the local network" — matching terminology), Clear History (P21/P28), the unsigned-installer and manual-update caveats (P49), and the Android sideload/Play Protect note (P49). No unsupported claims, fake statistics, fabricated testimonials, or internal milestone/QA language were found anywhere in visible copy (the two `<!-- P53 replaces... -->` HTML comments are developer-only, non-rendered signposts already established as intentional in the P52.6 entry above, not a leak).
-
-**5. Asset defect found and fixed.** `android-files.png`'s real dimensions (confirmed via direct PNG-header inspection) are 720×1530, but `index.html`'s `<img>` declared `height="1604"`. Since the image is styled `width: 100%; height: auto`, browsers reserve layout space using the HTML-declared aspect ratio until the real image loads, then reflow to the image's true ratio — the mismatch caused an avoidable layout shift on every page load. Corrected the `height` attribute to `1530` to match the actual file. `desktop-files.png`'s declared `1384×629` was independently confirmed to already match its real dimensions — no change needed there.
-
-**6. Dead CSS found and removed.** `.section-placeholder` (`web/css/style.css`) was P52.1 scaffolding for the since-replaced placeholder sections; grepped the whole `web/` tree and confirmed zero remaining references in `index.html` or `main.js`. Removed the rule and the stale P52.1 comment header above it that no longer described the surrounding code (the `.section`/`.section:last-of-type` rules it introduced are still current and were left untouched).
-
-**7. Metadata pass.** The `<head>` had a title, description, viewport, charset, and favicon already (all correct — verified the favicon file loads with no 404, confirmed via the network-failure capture in item 2). No Open Graph tags existed at all. Added `og:type`, `og:title`, `og:description` (reusing the existing, already-accurate meta description verbatim), and `og:image` (the real `relay-mark.png` brand asset — no new image fabricated). **Deliberately did not add `og:url`** — no GitHub Pages URL is live yet (P53's job), and inventing one would violate this milestone's explicit instruction never to fabricate a site URL. Also added `theme-color` (`#2d6cdf`, the existing `--color-primary` token, not a new color) since the site had none. No analytics, tracking, or third-party scripts were present before or after this pass — none were added.
-
-**8. CSS/JS/asset audit — clean otherwise.** Read `js/main.js` in full: mobile nav toggle, scroll-spy via `IntersectionObserver`, and click-to-activate — no `console.log`/debug code, no dead functions, nothing that needs a build step. All three assets under `web/assets/` (`relay-mark.png`, `desktop-files.png`, `android-files.png`) are referenced and used; PNG `tEXt`/`iTXt`/`zTXt` chunks were inspected directly on all three and none carry embedded metadata (no local file paths, usernames, or device identifiers leaked from the screenshot-capture process). A targeted case-insensitive search of the whole `web/` tree for local paths, IPs, device identifiers, and secret-shaped strings returned only the legitimate public `github.com/MohdSaad01/Relay` URLs already used throughout the file — no security/public-information findings.
-
-**9. Visual/interaction spot-checks.** Verified via scripted `scrollIntoView()` + screenshot that the nav's active-link underline correctly follows scroll position for How It Works/Features/Downloads (Requirements has no nav entry by design, matching the pre-existing Product Visuals precedent — P52.7 §5 — so it correctly leaves the last-visited link, Downloads, active rather than showing no active state at all). Verified the mobile hamburger menu's open state directly: correct spacing, dividers, and bold GitHub link, matching desktop nav's own weight treatment. One subjective, non-blocking observation recorded rather than acted on: the hamburger icon doesn't swap to a close/X glyph when the mobile menu is open (it stays functionally correct via `aria-expanded` and remains clickable to close) — a nice-to-have, not an objective defect, left alone per this milestone's "polish, don't redesign" charter.
-
-**10. Process discipline.** The isolated headless Chrome instance and the local static file server were both stopped by their own specific PIDs (matched via `--remote-debugging-port=9333` and the serving port in each process's own command line respectively, through `Get-CimInstance Win32_Process`), never a broad `taskkill /IM`/image-name-wide kill — continuing the precedent P52.6/P52.7 already established for this real, interactively-used machine. Confirmed both processes were unreachable after cleanup and that no other Chrome/Python process on the machine was affected.
-
-**11. No changes made outside `web/`.** `git status`/`git diff` after all fixes show exactly two modified files, `web/index.html` and `web/css/style.css` — no screenshots, browser profile data, or other temporary files were added to the repository; everything from the verification passes was written to the session scratch directory, outside the repo.
-
-**12. Deferred / explicitly out of scope for this milestone (per its own charter):** GitHub Pages deployment, GitHub Release/tag creation, GitHub Actions/CI configuration, domain purchase, and any repository-settings change — all remain P53/P54's job. The one subjective observation in item 9 (hamburger→X icon swap) was deliberately left unfixed rather than treated as a defect.
-
-**13. Verdict: the website is ready to hand off to P53.** Every section was re-verified as still visually correct after every fix (full-page screenshots at 1440px/834px/390px, zero horizontal overflow, zero console/network errors, throughout). Fixes made were: one accessibility contrast correction, six copy/grammar corrections plus one capitalization correction, one image-dimension correction, one dead-CSS removal, and one metadata addition (Open Graph + theme-color, no fabricated URL). No structural, layout, or visual-design change was made anywhere — the P52.1–P52.7 design system is unchanged. Per `CLAUDE.md`'s Git Workflow rule, P53 does not begin automatically.
+**Verdict: the website is ready to hand off to P53.** No structural,
+layout, or visual-design change was made anywhere — the P52.1–P52.7
+design system is unchanged.
 
 ---
 
 # Milestone P53 — GitHub Release & Distribution Setup
 
-**Purpose:** prepare Relay's first public GitHub Release (`v1.0.0`) — verify the existing release-candidate artifacts still match the current release commit, generate/verify checksums, write user-facing release notes, and wire the P52 website's download section to the real release URLs. The project owner explicitly chose to run the actual `git tag`/`git push`/GitHub-Release-creation/asset-upload sequence themselves (their first hands-on GitHub release) rather than have Claude Code do it — this entry documents everything prepared and verified up to that handoff point, not a completed publish.
+**Purpose:** prepare Relay's first public GitHub Release (`v1.0.0`) —
+verify the existing release-candidate artifacts still match the current
+commit, verify checksums, write release notes, and wire the website's
+download section to the real release URLs. The project owner chose to run
+the actual `git tag`/push/release-creation/asset-upload sequence
+themselves; this entry documents everything prepared and verified up to
+that handoff.
 
-**1. Investigation.** Confirmed `git status` clean, `HEAD` at `d81eced` (end of P52.8), no tags on `origin` yet (`git ls-remote --tags origin` empty; the only local tag, `backend-v1-complete`, predates the packaging milestones and is unrelated). Confirmed `git diff --stat 4975372..HEAD` (the P51 version-finalization commit through P53's starting point) touches only `web/`, `CLAUDE.md`, and `docs/15_QA_NOTEBOOK.md` — zero files under `backend/`, `desktop/`, or `android/` — so the P51-built artifacts require no rebuild to be valid for this release commit. Located the existing release-candidate artifacts at `desktop/dist/release/` (`Relay-Setup-1.0.0.exe`, `Relay-1.0.0.apk`, `SHA256SUMS.txt`, all dated 2026-08-16 19:51, from the P51 build). Read `docs/12_Packaging_Deployment.md`, `CLAUDE.md`'s P49/P50/P51/P52.6 sections, and `web/index.html`/`web/css/style.css`'s existing P53 swap-point comments before touching anything.
+**No rebuild needed:** `git diff --stat` from the P51 commit to P53's
+starting HEAD touched only `web/`, `CLAUDE.md`, and this file — zero
+files under `backend/`, `desktop/`, or `android/` — so the P51-built
+artifacts still correspond exactly to this release commit.
 
-**2. Artifact re-verification (all direct inspection, none assumed from prior milestones' prose).** Windows installer: `Get-Item .VersionInfo` confirmed `FileVersion`/`ProductVersion` `1.0.0`, `CompanyName` "Relay Labs", `ProductName` "Relay", empty `Comments`; `Get-AuthenticodeSignature` confirmed genuinely `NotSigned` (the expected, documented V1 state); `resources/backend/relay-backend.exe` inside `desktop/dist/win-unpacked/` confirmed byte-identical (same SHA-256, `152d3220…04b9f4`) to `backend/dist/relay-backend/relay-backend.exe`, and the `resources/` tree confirmed to contain no stray dev files (`.env`, `relay.db`, etc.). Android APK: `apksigner verify --print-certs` (from `%ANDROID_HOME%\build-tools\37.0.0\`) confirmed the exact same production certificate P50/P51 documented — `CN=Relay Labs, OU=Relay, O=Relay Labs, L=Local, ST=Local, C=US`, SHA-256 `59af725033dcb49e92964df01c8fa4d2493084cd97e5e6669f4b100d8ad564ba`; `aapt2 dump badging` confirmed `package name='com.relay.mobile' versionCode='1' versionName='1.0.0'`, `application-label='Relay'`, and no `debuggable`/`testOnly` flags; `aapt2 dump xmltree --file AndroidManifest.xml` confirmed `android:networkSecurityConfig` is wired, and dumping the resolved `network_security_config.xml` resource directly (traced through `aapt2 dump resources` since P50/P51's build renames resource files) confirmed `cleartextTrafficPermitted=true`; `unzip -l` confirmed `lib/<abi>/libhermesvm.so` for all four ABIs plus `assets/index.android.bundle` (Hermes embedded, no Metro dependency) and zero keystore/`.env`/`.pem`/secret-shaped filenames anywhere in the archive. `git ls-files | grep -i keystore` confirmed only the non-secret RN-template `debug.keystore` and the `keystore.properties.example` template are tracked.
+**Both artifacts re-verified by direct inspection, not assumed from prior
+milestones' prose:** the Windows installer's version/publisher/signing
+metadata and its bundled backend (byte-identical to the source build) all
+confirmed correct; the APK's production signing certificate confirmed
+identical to P50/P51's documented fingerprint, `versionName`/`versionCode`
+correct, cleartext config present, Hermes bundle embedded, no credential
+file anywhere in the archive. Both files' SHA-256 hashes independently
+recomputed and matched the existing `SHA256SUMS.txt` exactly — no
+regeneration needed.
 
-**3. Checksum verification.** `Get-FileHash -Algorithm SHA256` independently recomputed for both `Relay-Setup-1.0.0.exe` and `Relay-1.0.0.apk` and diffed against the existing `SHA256SUMS.txt` — exact match on both (`1d9c190a…04740` / `7936e30e…31c9b00`). No regeneration was needed; the P51-produced file is correct as-is and is the file to upload.
+**Website wired to the real GitHub Release asset URLs** at the exact
+`<!-- P53 replaces this -->` markers P52.6 left, confirming P52.6's own
+prediction that no card restructuring would be needed. These links 404
+until the tag/release actually exist — expected, not a defect.
 
-**4. Website integration.** `web/index.html`'s two `.download-cta` blocks (marked by P52.6's own `<!-- P53 replaces this status block... -->` comments) were swapped from the "Release coming soon" status line to real `.btn.btn-primary` anchors pointing at `https://github.com/MohdSaad01/Relay/releases/download/v1.0.0/Relay-Setup-1.0.0.exe` and `.../Relay-1.0.0.apk` — the predictable GitHub Release asset URL pattern, valid the instant the project owner publishes a release with tag `v1.0.0` and these exact filenames. No card restructuring was needed, confirming P52.6's own prediction. The hero's `hero-cta-note` ("...once the first release is live") was reworded to drop the not-yet-live hedge. `web/css/style.css`'s now-unused `.download-cta-status` rule (the old status-line component, no longer referenced by any element) was removed rather than left as dead CSS, matching P52.8's own precedent; `.download-cta-icon`'s hardcoded muted-gray color was also dropped since the icon now lives inside a `.btn-primary` and correctly inherits the button's white text color via `currentColor`. These links will 404 until the project owner completes the manual publish steps below — expected, not a defect.
+**Responsive verification used real CDP-driven mobile emulation**, not
+`chrome --headless --window-size=390,...` alone — P52.6's documented
+~500px viewport-floor caveat was reconfirmed, and legacy `--headless`
+(no `=new`) showed a second, previously undocumented failure mode (a
+genuinely narrow output image but content laid out at a wider virtual
+viewport). The reliable method (CDP `Emulation.setDeviceMetricsOverride`
+plus a `scrollWidth`/`clientWidth` comparison) confirmed zero overflow and
+zero console/network errors at 1440px/834px/390px.
 
-**5. Responsive/regression re-verification of the changed section.** Re-confirmed `chrome --headless=new --window-size=<w>,...` is reliable at 1440px and 834px (real, non-floored viewport widths) via direct screenshot: both show the new download buttons rendering correctly, no leftover placeholder text, no visual breakage. At 390px, both of the previously-documented CLI tooling artifacts were re-encountered and worked around: `--headless=new --window-size=390,...` reproduced P52.6's already-documented ~500px viewport floor (a cropped, falsely-overflowing-looking image); legacy `--headless` (no `=new`) produced a genuinely 390px-wide output image but with content laid out at a wider virtual viewport and only its left slice rendered — an equally misleading result not previously documented, encountered fresh in this milestone. Resolved by driving Chrome directly over the DevTools Protocol: launched `chrome --headless=new --remote-debugging-port=9333`, created a target via `PUT /json/new`, connected over its `webSocketDebuggerUrl` using Node's `ws` package (present in this environment; no new dependency installed in the repo itself — the script lived entirely in the session scratch directory), called `Emulation.setDeviceMetricsOverride({width:390, height:4200, mobile:true})`, and confirmed `document.documentElement.scrollWidth === document.documentElement.clientWidth === 390` (zero horizontal overflow) before capturing screenshots of both the full page and the download section specifically — both render cleanly, full-width buttons, no clipping. A second CDP script listened on the `Log`/`Runtime`/`Network` domains across a full page load and reported zero console errors/warnings, zero `Runtime.exceptionThrown` events, and zero HTTP responses ≥ 400 or `Network.loadingFailed` events.
+**Release notes and the exact publish sequence were prepared, not
+executed** — `git tag -a v1.0.0`, pushing the tag, and creating the
+GitHub Release with the three attached assets were left for the project
+owner to run themselves (their first hands-on GitHub release), along with
+a post-publish verification checklist.
 
-**6. Process discipline.** The headless Chrome instance launched for CDP verification was stopped via `Stop-Process -Id <this-session's-specific-pid>`, confirmed unreachable afterward — never a broad `taskkill /IM chrome.exe`, continuing the P51/P52.6 "target the specific PID on this real, interactively-used machine" precedent.
-
-**7. Release notes and publish sequence prepared, not executed.** Wrote user-facing release notes (what Relay is, major V1 capabilities, Windows/Android download and install steps, the same-Wi-Fi/hotspot requirement, the unsigned-installer/SmartScreen caveat, the Android direct-install/Play-Protect caveat, manual-update behavior, and a pointer to `SHA256SUMS.txt`) — deliberately excluding the internal P1–P52 milestone history, per this milestone's own instruction. Handed the project owner the exact commands (`git tag -a v1.0.0 -m "Relay v1.0.0"`, `git push origin main`, `git push origin v1.0.0`) and the GitHub web-UI steps (create release at the `v1.0.0` tag, title `Relay v1.0.0`, paste the notes, attach the three files from `desktop/dist/release/`) to run themselves, plus a post-publish verification checklist (re-download both assets from the live release, recompute SHA-256, diff against `SHA256SUMS.txt`, confirm the website's two download buttons and the "Releases on GitHub" link resolve). No `git tag`, `git push`, or GitHub API/web call was made by Claude Code in this milestone.
-
-**8. Security audit.** Re-ran the P49 targeted secret search (git-tracked keystore/`.env`/credential-shaped filenames) with the same clean result as P49/P50/P51. No new files were added to the tracked repository by this milestone beyond `web/index.html`/`web/css/style.css` edits and this documentation. No credentials, tokens, or the production keystore were read, moved, or referenced by path anywhere in this milestone's output.
-
-**9. No application source changed.** `git diff --stat` after all P53 edits shows changes confined to `web/index.html`, `web/css/style.css`, `README.md`, `CLAUDE.md`, `docs/12_Packaging_Deployment.md`, and this file — zero changes under `backend/`, `desktop/src/`, or `android/`.
-
-**10. Verdict: release fully prepared and verified; publish deliberately deferred to the project owner.** The three release assets are verified correct and unchanged from P51, their checksums independently re-confirmed, the website is wired to the real release URLs (currently 404 until published — expected), and release notes plus an exact step-by-step publish/verification sequence are ready. Per the project owner's explicit instruction this session, Claude Code did not create the `v1.0.0` tag, did not push it, and did not create or upload anything to GitHub — see `CLAUDE.md`'s "GitHub Release & Distribution Setup (P53)" section for the handoff instructions. P54 (external smoke test) cannot meaningfully begin until the project owner completes that publish, and per `CLAUDE.md`'s Git Workflow rule does not begin automatically in any case.
+**Verdict: release fully prepared and verified; publish deliberately
+deferred to the project owner.** No application source changed —
+`web/index.html`, `web/css/style.css`, and documentation only.

@@ -8,10 +8,12 @@ blockers found. See `docs/15_QA_NOTEBOOK.md`'s P38–P41 entries for the
 full verification record. Production Android signing landed in P50, and
 **the release version has been finalized as `1.0.0` across all three
 components (P51)** — see §15 below for the current release-candidate
-artifact set. What remains before public distribution is Windows code
-signing (out of scope for V1, unsigned by deliberate choice — see
-`CLAUDE.md`'s P49 section) and the actual publish step (a future
-milestone, not yet started).
+artifact set. Windows code signing remains out of scope for V1 (unsigned
+by deliberate choice — see `CLAUDE.md`'s P49 section). The release
+artifacts, checksums, release notes, and website download links are all
+prepared and verified (P51/P53) — see §16 below — but the actual GitHub
+tag/Release/asset upload is a manual step the project owner performs
+themselves and had not happened as of this document's last edit.
 
 ---
 
@@ -257,5 +259,31 @@ Full build/verification detail for the P51 release candidate — version
 consistency audit, signing verification, physical-device smoke test,
 upgrade/persistence checks, and exact artifact hashes — is in
 `docs/15_QA_NOTEBOOK.md`'s P51 entry. Publishing these artifacts (a
-GitHub Release, a tag, a website) is explicitly out of P51's scope; see
+GitHub Release, a tag, a website) was explicitly out of P51's scope; see
 `CLAUDE.md`'s P49 section for the planned P52–P54 sequence.
+
+---
+
+# 16. Release Publishing (Milestone P53)
+
+**Distribution channel: GitHub Releases, one release per version tag.**
+`https://github.com/MohdSaad01/Relay/releases` is the sole artifact host
+(per `CLAUDE.md`'s P49 section) — no CDN, no separate download server.
+The first public release, `v1.0.0`, attaches exactly the three files
+named in §15 above (`Relay-Setup-1.0.0.exe`, `Relay-1.0.0.apk`,
+`SHA256SUMS.txt`), built from `desktop/dist/release/`. GitHub's own
+auto-generated source archive is left enabled but is not a supported
+install path — it contains no signing keystore and cannot produce a
+working build without the full toolchain.
+
+**P53 verified the existing P51 artifacts still match the current release
+commit (no `backend/`/`desktop/`/`android/` source changed since P51),
+independently recomputed both files' SHA-256 against the existing
+`SHA256SUMS.txt`, and wired `web/index.html`'s download section to the
+release's predictable asset URLs** (`.../releases/download/v1.0.0/<file>`).
+Publishing the actual tag and GitHub Release — `git tag`, `git push`, and
+creating the release with its three attached assets — is a manual step
+performed by the project owner directly, not automated by Claude Code;
+see `CLAUDE.md`'s "GitHub Release & Distribution Setup (P53)" section and
+`docs/15_QA_NOTEBOOK.md`'s P53 entry for the full verification record and
+the exact publish sequence.

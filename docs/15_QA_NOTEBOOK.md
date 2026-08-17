@@ -17,7 +17,7 @@ as "verified on this one device," not as multi-device coverage.
 
 ---
 
-# Current Status / Baseline (as of P51)
+# Current Status / Baseline (as of P53)
 
 This section is a short orientation pointer, not a replacement for the
 milestone entries below — it exists so a reader doesn't have to scan the
@@ -108,7 +108,25 @@ answer to one of these; do not expand it into a second changelog.
   physical smoke test on RMX3997 including a real cross-platform transfer
   and a Desktop upgrade-in-place persistence check). No application
   behavior changed — version fields only. See this file's P51 entry for
-  full detail. No milestone after P51 has begun.
+  full detail.
+- **P52 (Relay Website, sub-milestones P52.1–P52.8) is complete.** A
+  small static site under `web/` (GitHub Pages-ready, not yet deployed) —
+  overview, how-it-works, product screenshots, features, download
+  section, requirements/compatibility, and a final accessibility/copy QA
+  pass. See this file's P52.6/P52.7/P52.8 entries.
+- **P53 (GitHub Release & Distribution Setup) is prepared but not
+  published.** The existing P51 artifacts were re-verified directly
+  against the current release commit (no rebuild needed — no
+  backend/desktop/android source changed since P51), checksums
+  independently re-confirmed, release notes written, and the website's
+  download section wired to the real (not-yet-live) GitHub Release asset
+  URLs. **The project owner deliberately chose to run the actual
+  `git tag`/`git push`/GitHub-Release-creation/asset-upload steps
+  themselves** rather than have Claude Code do it — no tag exists on
+  `origin`, no GitHub Release exists, and the website's download links
+  will 404 until that manual publish happens. See this file's P53 entry
+  and `CLAUDE.md`'s "GitHub Release & Distribution Setup (P53)" section
+  for the exact handoff steps.
 
 ---
 
@@ -2807,3 +2825,29 @@ Deliberately **not** stated anywhere: RAM/CPU/storage figures, supported Windows
 **12. Deferred / explicitly out of scope for this milestone (per its own charter):** GitHub Pages deployment, GitHub Release/tag creation, GitHub Actions/CI configuration, domain purchase, and any repository-settings change — all remain P53/P54's job. The one subjective observation in item 9 (hamburger→X icon swap) was deliberately left unfixed rather than treated as a defect.
 
 **13. Verdict: the website is ready to hand off to P53.** Every section was re-verified as still visually correct after every fix (full-page screenshots at 1440px/834px/390px, zero horizontal overflow, zero console/network errors, throughout). Fixes made were: one accessibility contrast correction, six copy/grammar corrections plus one capitalization correction, one image-dimension correction, one dead-CSS removal, and one metadata addition (Open Graph + theme-color, no fabricated URL). No structural, layout, or visual-design change was made anywhere — the P52.1–P52.7 design system is unchanged. Per `CLAUDE.md`'s Git Workflow rule, P53 does not begin automatically.
+
+---
+
+# Milestone P53 — GitHub Release & Distribution Setup
+
+**Purpose:** prepare Relay's first public GitHub Release (`v1.0.0`) — verify the existing release-candidate artifacts still match the current release commit, generate/verify checksums, write user-facing release notes, and wire the P52 website's download section to the real release URLs. The project owner explicitly chose to run the actual `git tag`/`git push`/GitHub-Release-creation/asset-upload sequence themselves (their first hands-on GitHub release) rather than have Claude Code do it — this entry documents everything prepared and verified up to that handoff point, not a completed publish.
+
+**1. Investigation.** Confirmed `git status` clean, `HEAD` at `d81eced` (end of P52.8), no tags on `origin` yet (`git ls-remote --tags origin` empty; the only local tag, `backend-v1-complete`, predates the packaging milestones and is unrelated). Confirmed `git diff --stat 4975372..HEAD` (the P51 version-finalization commit through P53's starting point) touches only `web/`, `CLAUDE.md`, and `docs/15_QA_NOTEBOOK.md` — zero files under `backend/`, `desktop/`, or `android/` — so the P51-built artifacts require no rebuild to be valid for this release commit. Located the existing release-candidate artifacts at `desktop/dist/release/` (`Relay-Setup-1.0.0.exe`, `Relay-1.0.0.apk`, `SHA256SUMS.txt`, all dated 2026-08-16 19:51, from the P51 build). Read `docs/12_Packaging_Deployment.md`, `CLAUDE.md`'s P49/P50/P51/P52.6 sections, and `web/index.html`/`web/css/style.css`'s existing P53 swap-point comments before touching anything.
+
+**2. Artifact re-verification (all direct inspection, none assumed from prior milestones' prose).** Windows installer: `Get-Item .VersionInfo` confirmed `FileVersion`/`ProductVersion` `1.0.0`, `CompanyName` "Relay Labs", `ProductName` "Relay", empty `Comments`; `Get-AuthenticodeSignature` confirmed genuinely `NotSigned` (the expected, documented V1 state); `resources/backend/relay-backend.exe` inside `desktop/dist/win-unpacked/` confirmed byte-identical (same SHA-256, `152d3220…04b9f4`) to `backend/dist/relay-backend/relay-backend.exe`, and the `resources/` tree confirmed to contain no stray dev files (`.env`, `relay.db`, etc.). Android APK: `apksigner verify --print-certs` (from `%ANDROID_HOME%\build-tools\37.0.0\`) confirmed the exact same production certificate P50/P51 documented — `CN=Relay Labs, OU=Relay, O=Relay Labs, L=Local, ST=Local, C=US`, SHA-256 `59af725033dcb49e92964df01c8fa4d2493084cd97e5e6669f4b100d8ad564ba`; `aapt2 dump badging` confirmed `package name='com.relay.mobile' versionCode='1' versionName='1.0.0'`, `application-label='Relay'`, and no `debuggable`/`testOnly` flags; `aapt2 dump xmltree --file AndroidManifest.xml` confirmed `android:networkSecurityConfig` is wired, and dumping the resolved `network_security_config.xml` resource directly (traced through `aapt2 dump resources` since P50/P51's build renames resource files) confirmed `cleartextTrafficPermitted=true`; `unzip -l` confirmed `lib/<abi>/libhermesvm.so` for all four ABIs plus `assets/index.android.bundle` (Hermes embedded, no Metro dependency) and zero keystore/`.env`/`.pem`/secret-shaped filenames anywhere in the archive. `git ls-files | grep -i keystore` confirmed only the non-secret RN-template `debug.keystore` and the `keystore.properties.example` template are tracked.
+
+**3. Checksum verification.** `Get-FileHash -Algorithm SHA256` independently recomputed for both `Relay-Setup-1.0.0.exe` and `Relay-1.0.0.apk` and diffed against the existing `SHA256SUMS.txt` — exact match on both (`1d9c190a…04740` / `7936e30e…31c9b00`). No regeneration was needed; the P51-produced file is correct as-is and is the file to upload.
+
+**4. Website integration.** `web/index.html`'s two `.download-cta` blocks (marked by P52.6's own `<!-- P53 replaces this status block... -->` comments) were swapped from the "Release coming soon" status line to real `.btn.btn-primary` anchors pointing at `https://github.com/MohdSaad01/Relay/releases/download/v1.0.0/Relay-Setup-1.0.0.exe` and `.../Relay-1.0.0.apk` — the predictable GitHub Release asset URL pattern, valid the instant the project owner publishes a release with tag `v1.0.0` and these exact filenames. No card restructuring was needed, confirming P52.6's own prediction. The hero's `hero-cta-note` ("...once the first release is live") was reworded to drop the not-yet-live hedge. `web/css/style.css`'s now-unused `.download-cta-status` rule (the old status-line component, no longer referenced by any element) was removed rather than left as dead CSS, matching P52.8's own precedent; `.download-cta-icon`'s hardcoded muted-gray color was also dropped since the icon now lives inside a `.btn-primary` and correctly inherits the button's white text color via `currentColor`. These links will 404 until the project owner completes the manual publish steps below — expected, not a defect.
+
+**5. Responsive/regression re-verification of the changed section.** Re-confirmed `chrome --headless=new --window-size=<w>,...` is reliable at 1440px and 834px (real, non-floored viewport widths) via direct screenshot: both show the new download buttons rendering correctly, no leftover placeholder text, no visual breakage. At 390px, both of the previously-documented CLI tooling artifacts were re-encountered and worked around: `--headless=new --window-size=390,...` reproduced P52.6's already-documented ~500px viewport floor (a cropped, falsely-overflowing-looking image); legacy `--headless` (no `=new`) produced a genuinely 390px-wide output image but with content laid out at a wider virtual viewport and only its left slice rendered — an equally misleading result not previously documented, encountered fresh in this milestone. Resolved by driving Chrome directly over the DevTools Protocol: launched `chrome --headless=new --remote-debugging-port=9333`, created a target via `PUT /json/new`, connected over its `webSocketDebuggerUrl` using Node's `ws` package (present in this environment; no new dependency installed in the repo itself — the script lived entirely in the session scratch directory), called `Emulation.setDeviceMetricsOverride({width:390, height:4200, mobile:true})`, and confirmed `document.documentElement.scrollWidth === document.documentElement.clientWidth === 390` (zero horizontal overflow) before capturing screenshots of both the full page and the download section specifically — both render cleanly, full-width buttons, no clipping. A second CDP script listened on the `Log`/`Runtime`/`Network` domains across a full page load and reported zero console errors/warnings, zero `Runtime.exceptionThrown` events, and zero HTTP responses ≥ 400 or `Network.loadingFailed` events.
+
+**6. Process discipline.** The headless Chrome instance launched for CDP verification was stopped via `Stop-Process -Id <this-session's-specific-pid>`, confirmed unreachable afterward — never a broad `taskkill /IM chrome.exe`, continuing the P51/P52.6 "target the specific PID on this real, interactively-used machine" precedent.
+
+**7. Release notes and publish sequence prepared, not executed.** Wrote user-facing release notes (what Relay is, major V1 capabilities, Windows/Android download and install steps, the same-Wi-Fi/hotspot requirement, the unsigned-installer/SmartScreen caveat, the Android direct-install/Play-Protect caveat, manual-update behavior, and a pointer to `SHA256SUMS.txt`) — deliberately excluding the internal P1–P52 milestone history, per this milestone's own instruction. Handed the project owner the exact commands (`git tag -a v1.0.0 -m "Relay v1.0.0"`, `git push origin main`, `git push origin v1.0.0`) and the GitHub web-UI steps (create release at the `v1.0.0` tag, title `Relay v1.0.0`, paste the notes, attach the three files from `desktop/dist/release/`) to run themselves, plus a post-publish verification checklist (re-download both assets from the live release, recompute SHA-256, diff against `SHA256SUMS.txt`, confirm the website's two download buttons and the "Releases on GitHub" link resolve). No `git tag`, `git push`, or GitHub API/web call was made by Claude Code in this milestone.
+
+**8. Security audit.** Re-ran the P49 targeted secret search (git-tracked keystore/`.env`/credential-shaped filenames) with the same clean result as P49/P50/P51. No new files were added to the tracked repository by this milestone beyond `web/index.html`/`web/css/style.css` edits and this documentation. No credentials, tokens, or the production keystore were read, moved, or referenced by path anywhere in this milestone's output.
+
+**9. No application source changed.** `git diff --stat` after all P53 edits shows changes confined to `web/index.html`, `web/css/style.css`, `README.md`, `CLAUDE.md`, `docs/12_Packaging_Deployment.md`, and this file — zero changes under `backend/`, `desktop/src/`, or `android/`.
+
+**10. Verdict: release fully prepared and verified; publish deliberately deferred to the project owner.** The three release assets are verified correct and unchanged from P51, their checksums independently re-confirmed, the website is wired to the real release URLs (currently 404 until published — expected), and release notes plus an exact step-by-step publish/verification sequence are ready. Per the project owner's explicit instruction this session, Claude Code did not create the `v1.0.0` tag, did not push it, and did not create or upload anything to GitHub — see `CLAUDE.md`'s "GitHub Release & Distribution Setup (P53)" section for the handoff instructions. P54 (external smoke test) cannot meaningfully begin until the project owner completes that publish, and per `CLAUDE.md`'s Git Workflow rule does not begin automatically in any case.

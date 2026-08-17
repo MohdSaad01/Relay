@@ -1026,7 +1026,7 @@ build/verification detail: `docs/15_QA_NOTEBOOK.md`'s P40 entry.
 
 * Resume/`Range` support, checksum verification, compression, end-to-end encryption, bandwidth limiting (all explicitly deferred future enhancements per `docs/11_File_Transfer.md` §16)
 * WebSockets / real-time push (transfer progress is currently polled via `GET /transfers/{id}`)
-* Packaging & distribution (`docs/12_Packaging_Deployment.md`): the backend has a verified PyInstaller `--onedir` production bundle (P38), the desktop app has a real, verified NSIS installer (P39), Android has a real, physically-verified release APK (P40), and the three have now been verified together as one product over a real LAN (P41, re-verified fresh at P48) — the Windows installer is still not code-signed for public distribution (out of scope for V1), and Windows Firewall's first-run prompt behavior remains environmentally unconfirmed (P39, re-confirmed P41). **Android's release signing identity is no longer a local-verification keystore — P50 replaced it with a real production keystore**, see "Production Android Signing (P50)" below. **The Desktop/Android/backend version-string drift is resolved — P51 unified all three at `1.0.0`** (Android `versionCode` remains `1`, the first public release); see "Release Artifact Finalization & Version 1.0.0 (P51)" below. Publishing the finalized artifacts (a GitHub Release, a tag, a website) has not happened yet — see P49's proposed P52–P54 sequence.
+* Packaging & distribution (`docs/12_Packaging_Deployment.md`): the backend has a verified PyInstaller `--onedir` production bundle (P38), the desktop app has a real, verified NSIS installer (P39), Android has a real, physically-verified release APK (P40), and the three have now been verified together as one product over a real LAN (P41, re-verified fresh at P48) — the Windows installer is still not code-signed for public distribution (out of scope for V1), and Windows Firewall's first-run prompt behavior remains environmentally unconfirmed (P39, re-confirmed P41). **Android's release signing identity is no longer a local-verification keystore — P50 replaced it with a real production keystore**, see "Production Android Signing (P50)" below. **The Desktop/Android/backend version-string drift is resolved — P51 unified all three at `1.0.0`** (Android `versionCode` remains `1`, the first public release); see "Release Artifact Finalization & Version 1.0.0 (P51)" below. The website (P52) is complete and its download section is wired to the real GitHub Release URLs; the release artifacts, checksums, and release notes are fully prepared and verified (P53) but the actual tag/GitHub Release/asset upload has been deliberately left for the project owner to perform themselves — see "GitHub Release & Distribution Setup (P53)" below.
 * Whether `Devices`/`Settings`/`Pairing`/`Discovery` should also require a paired-device session was raised during M9 and left open — revisit if Android is ever expected to call those routes directly
 * Automatic Desktop address rediscovery/re-resolution when a paired session's stored `desktop_base_url` goes stale — P47 added a user-triggered local recovery ("Forget this desktop"), deliberately not automatic reconnection or network scanning; see "Android Session Recovery & 'Forget This Desktop' (P47)" below.
 * Android's `react-native-saf-x`-based folder picker (`android/src/streaming/folderPicker.ts`) intermittently fails with "Unsupported Uri" on some real devices (realme C65 5G, and RMX3997 as of P48) — self-recovers on retry, no data loss; a post-V1 candidate for a retry-with-backoff or a different SAF library, not a V1 blocker. See "Release Sign-Off (P48)" below.
@@ -1824,18 +1824,22 @@ rules):**
    Unicode filename). No application behavior changed — version fields and
    a rebuild only. See "Release Artifact Finalization & Version 1.0.0
    (P51)" below and `docs/15_QA_NOTEBOOK.md`'s P51 entry.
-3. **P52 — Free Relay Website.** Build the small GitHub Pages static
-   site (overview, features, Windows/Android download, pairing/
-   installation instructions, known limitations, GitHub link) — content
-   only, no backend, no analytics/telemetry. Can start independently of
-   P50/P51's exact artifact bytes (the site's download links are wired up
-   in P53) but should wait until versioning (P51) is decided so the site
-   doesn't have to be rewritten for version-string changes.
-4. **P53 — GitHub Release / Distribution Setup.** Tag `v1.0.0`, publish
+3. ~~**P52 — Free Relay Website.**~~ **Done** (across sub-milestones
+   P52.1–P52.8; see "Website — Download & Installation Section (P52.6)",
+   "Website — Requirements & Compatibility Section (P52.7)", and
+   "Website — Final QA & Polish (P52.8)" below). Content-only static site
+   under `web/` — overview, features, Windows/Android download section,
+   requirements, GitHub link — no backend, no analytics/telemetry.
+4. ~~**P53 — GitHub Release & Distribution Setup.**~~ **Prepared, publish
+   step deliberately left to the project owner.** Tag `v1.0.0`, publish
    the first real GitHub Release with the three P51 assets, wire the
-   website's download links (P52) to the published release. Depends on
-   P50, P51, and P52 all being complete — this is the actual "go live"
-   step.
+   website's download links (P52) to the published release. See "GitHub
+   Release & Distribution Setup (P53)" below — the release artifacts,
+   checksums, release notes, and website integration are all finished and
+   verified; creating the actual tag/GitHub Release/uploading assets was
+   deliberately done by the project owner directly (their first public
+   release), not by Claude Code, and is not yet complete as of this
+   file's own last edit.
 5. **P54 — External Installation & Deployment Smoke Test.** Verify the
    real published release end-to-end from a genuine outside perspective
    (download from the live website on a machine/device that has never
@@ -2118,8 +2122,109 @@ actual source (config files, doc sections, or the running app) rather
 than against how a prior milestone phrased them, per P52.7's own
 precedent above.
 
-Do not begin P53 automatically — it remains its own milestone, reviewed
-before starting, per this file's Git Workflow rules.
+## GitHub Release & Distribution Setup (P53)
+
+**P53 verified the existing P51 release-candidate artifacts against the
+current HEAD, prepared release notes and a website wired to the real
+GitHub Release URLs, and then deliberately stopped short of the actual
+publish step.** The project owner chose to run the tag/push/release/asset
+upload/verification sequence themselves, as their first hands-on GitHub
+release — Claude Code prepared everything up to that point but did not
+run `git tag`, `git push` for the tag, or create anything on GitHub. See
+`docs/15_QA_NOTEBOOK.md`'s P53 entry for the full investigation record.
+
+**No rebuild was needed.** `git diff --stat` from the P51 commit
+(`4975372`) to P53's starting `HEAD` (`d81eced`, the end of P52.8) touches
+only `web/`, `CLAUDE.md`, and `docs/15_QA_NOTEBOOK.md` — zero files under
+`backend/`, `desktop/`, or `android/`. The P51-built artifacts in
+`desktop/dist/release/` (`Relay-Setup-1.0.0.exe`, `Relay-1.0.0.apk`,
+`SHA256SUMS.txt`) therefore still correspond exactly to the application
+state at P53's release commit — re-verified directly rather than assumed:
+`Relay-Setup-1.0.0.exe`'s `FileVersion`/`ProductVersion` (`1.0.0`),
+`CompanyName`/publisher (`Relay Labs`), and empty `Comments` field all
+confirmed via `Get-Item .VersionInfo`; genuinely `NotSigned` via
+`Get-AuthenticodeSignature`; its bundled `resources/backend/relay-backend.exe`
+confirmed byte-identical (same SHA-256) to the source
+`backend/dist/relay-backend/relay-backend.exe`. `Relay-1.0.0.apk`'s
+`apksigner verify --print-certs` output confirmed the exact same
+production certificate fingerprint P50/P51 documented
+(`CN=Relay Labs`, SHA-256 `59af725033dcb49e92964df01c8fa4d2493084cd97e5e6669f4b100d8ad564ba`),
+`aapt2 dump badging` confirmed `applicationId=com.relay.mobile`,
+`versionName=1.0.0`, `versionCode=1`, label `Relay`, not debuggable;
+`aapt2 dump xmltree` on the resolved `network_security_config.xml`
+resource confirmed `cleartextTrafficPermitted=true` still present; the APK
+was confirmed to embed Hermes (`libhermesvm.so` per ABI) and
+`assets/index.android.bundle` (no Metro dependency) and to contain no
+keystore/credential files. Both files' SHA-256 hashes were independently
+recomputed (`Get-FileHash`) and matched the pre-existing
+`SHA256SUMS.txt` byte-for-byte — that file needed no regeneration.
+
+**The website's download section (P52.6's scaffold) is now wired to the
+real, predictable GitHub Release asset URLs** —
+`https://github.com/MohdSaad01/Relay/releases/download/v1.0.0/Relay-Setup-1.0.0.exe`
+and `.../v1.0.0/Relay-1.0.0.apk` — swapped in at exactly the two
+`<!-- P53 replaces this ... -->` comment markers P52.6 left, per that
+milestone's own prediction that no card restructuring would be needed.
+Both `.download-cta-status` "Release coming soon" blocks became real
+`.btn.btn-primary` anchor downloads (reusing the site's existing button
+component, no new one added); the now-dead `.download-cta-status` CSS
+rule was removed (`web/css/style.css`) rather than left orphaned, per
+P52.8's own dead-code precedent. The hero section's `hero-cta-note` also
+lost its "once the first release is live" hedge, since from the site's
+own perspective the release is real, just not yet pushed by the project
+owner. **These links will 404 until the tag and release actually exist on
+GitHub** — this is expected and resolves itself the moment the project
+owner completes the manual steps below with the exact tag name `v1.0.0`
+and exact filenames `Relay-Setup-1.0.0.exe`/`Relay-1.0.0.apk`; do not
+"fix" a 404 on this URL pattern by changing the website again without
+first checking whether the release has actually been published yet.
+
+**Responsive/regression verification used a real CDP-driven mobile
+emulation, not `chrome --headless --window-size=390,...` alone** — P52.6's
+own documented tooling caveat (headless Chrome's `--window-size` floors
+around ~500px and produces a falsely-cropped-looking image below that) was
+independently reconfirmed in P53 (legacy `--headless` mode showed a
+different failure mode: a genuinely 390px-wide output image, but content
+laid out at a wider virtual viewport and only the left slice rendered —
+equally misleading). The reliable method, used here and worth reusing for
+any future narrow-width check on this site: launch
+`chrome --headless=new --remote-debugging-port=<port>`, connect over its
+`ws://` CDP endpoint (Node's `ws` package is available on this machine),
+call `Emulation.setDeviceMetricsOverride` with `mobile: true` and the
+exact target width, then compare `document.documentElement.scrollWidth`
+against `clientWidth` (equal ⇒ no horizontal overflow) before taking a
+`Page.captureScreenshot`. Verified clean at 1440px, 834px, and 390px:
+real download buttons, no leftover "coming soon"/placeholder text, no
+horizontal overflow (`scrollWidth === clientWidth === 390` at the narrow
+width), zero console errors/warnings and zero failed or 4xx/5xx network
+requests captured via the `Log`/`Runtime`/`Network` CDP domains during a
+full page load.
+
+**A process note for cleaning up this session's own headless Chrome
+instance, following the P52.6/P51 "target the specific PID, never an
+image-name-wide kill" precedent already established on this machine:**
+the CDP-driving Chrome process launched for this verification was stopped
+via `Stop-Process -Id <this-specific-pid>`, not `taskkill /IM chrome.exe`.
+
+**The actual GitHub publish sequence — for the project owner to run
+themselves, not automated here:**
+
+1. From a clean `git status` on this release commit:
+   `git tag -a v1.0.0 -m "Relay v1.0.0"`, then `git push origin main`
+   (if any local commit isn't already on the remote) and
+   `git push origin v1.0.0`.
+2. On `https://github.com/MohdSaad01/Relay/releases/new`: select the
+   `v1.0.0` tag, title `Relay v1.0.0`, paste the prepared release notes,
+   attach exactly `Relay-Setup-1.0.0.exe`, `Relay-1.0.0.apk`, and
+   `SHA256SUMS.txt` from `desktop/dist/release/`, publish.
+3. Verify: download both assets fresh from the published release,
+   recompute their SHA-256 and diff against `SHA256SUMS.txt`, confirm the
+   website's two download buttons and the footer's "Releases on GitHub"
+   link now resolve instead of 404ing.
+
+**Do not begin P54 automatically** — it remains its own milestone,
+reviewed before starting, per this file's Git Workflow rules, and in any
+case cannot meaningfully start until the release above actually exists.
 
 ## Documentation
 

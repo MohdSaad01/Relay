@@ -813,16 +813,13 @@ p {
 }
 
 /* ---------------------------------------------------------------------
-   Download & Installation (P52.6) — states the version, the exact
-   artifact name, and what to do next per platform, without pretending a
-   GitHub Release exists yet (none does as of this milestone). Reuses
-   .feature-icon (P52.5) for the platform glyphs and .badge (existing)
-   for both the version tag and the "coming soon" status, rather than
-   adding new components for either. .download-cta-status is a status
-   line, not a disabled-looking button — once the GitHub Release is
-   published, P53 only needs to swap this block's contents for a real
-   .btn download link; the surrounding .download-platform card needs no
-   restructuring.
+   Download & Installation (P52.6 scaffold, P53 wired to the real
+   v1.0.0 GitHub Release) — states the version, the exact artifact name,
+   and what to do next per platform. Reuses .feature-icon (P52.5) for the
+   platform glyphs, .badge (existing) for the version tag, and .btn (the
+   site's existing anchor-button component) for the actual download link
+   — no new component was added for P53's swap from status text to a
+   real link.
    --------------------------------------------------------------------- */
 
 .download-grid {
@@ -865,20 +862,10 @@ p {
   border-radius: var(--radius-sm);
 }
 
-.download-cta-status {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-text);
-}
-
 .download-cta-icon {
   flex: 0 0 auto;
   width: 18px;
   height: 18px;
-  color: var(--color-text-muted);
 }
 
 .download-artifact {
